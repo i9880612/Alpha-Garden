@@ -1,0 +1,13 @@
+{
+  "generationCount": 500,
+  "backtestCount": 100,
+  "explorationPercent": 30,
+  "selfCorrelationPercent": 30,
+  "mutationPercent": 40,
+  "directionValidationPercent": 3,
+  "maxPendingSeconds": 600,
+  "maxConsecutiveFailures": 2,
+  "maxRequestFailures": 3,
+  "maxInFlightBacktests": 3,
+  "explorationSeedAttemptMultiplier": 4
+}

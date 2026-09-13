@@ -1,0 +1,35 @@
+{
+  "catalogContext": {
+    "instrumentType": "EQUITY",
+    "region": "USA",
+    "universe": "TOP3000",
+    "delay": 1
+  },
+  "decay": 4,
+  "neutralization": {
+    "default": "SUBINDUSTRY",
+    "rootGroupNeutralize": "NONE",
+    "byFieldCategory": {
+      "Analyst": "INDUSTRY",
+      "Earnings": "INDUSTRY",
+      "Fundamental": "INDUSTRY",
+      "Model": "SUBINDUSTRY",
+      "News": "SUBINDUSTRY",
+      "Option": "SECTOR",
+      "Price Volume": "SUBINDUSTRY",
+      "Sentiment": "SUBINDUSTRY",
+      "Social Media": "SUBINDUSTRY"
+    }
+  },
+  "truncation": {
+    "default": 0.08,
+    "tailRisk": 0.05
+  },
+  "pasteurization": "ON",
+  "unitHandling": "VERIFY",
+  "nanHandling": "OFF",
+  "language": "FASTEXPR",
+  "visualization": false,
+  "maxTrade": "OFF",
+  "maxPosition": "OFF"
+}
