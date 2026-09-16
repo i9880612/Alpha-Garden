@@ -64,6 +64,8 @@
 .ag-operation-log .ag-log-result > span:nth-child(4) { width: 11ch; }
 .ag-operation-log .ag-log-result > span:nth-child(5) { width: 10ch; }
 .ag-operation-log .ag-log-result > span:nth-child(6) { width: 12ch; }
+.ag-operation-log:lang(en) .ag-log-result > span:nth-child(1) { width: 10ch; }
+.ag-operation-log:lang(en) .ag-log-result > span:nth-child(5) { width: 14ch; }
 .ag-operation-log .ag-log-metrics > span { width: 7ch; }
 .ag-operation-log .ag-log-metrics > span:nth-child(3) { width: 10ch; }
 .ag-operation-log .ag-log-metrics > span:nth-child(5) { width: 11ch; }

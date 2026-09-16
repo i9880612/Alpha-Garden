@@ -1,7 +1,8 @@
 import { Alert, Button, Empty, Select, Space, Tag, Typography } from "antd";
 import { Fragment, useLayoutEffect, useRef, useState } from "react";
 import { useConsole } from "@/api/use-console";
-import { logMessage, statusName, timestamp } from "@/api/presentation";
+import { statusName, timestamp } from "@/api/presentation";
+import { presentLog } from "@/api/log-presentation";
 import { errorMessage } from "@/api/console";
 import AlphaLoading from "@/components/alpha-loading";
 
@@ -22,6 +23,15 @@ const logTokenColors: Record<string, string> = {
   "[变异]": "purple",
   "[SC治理]": "warning",
   "[反转]": "lime",
+  "[PASSED]": "success",
+  "[FAILED]": "error",
+  "[PENDING]": "warning",
+  "[ERROR]": "error",
+  "[UNKNOWN]": "muted",
+  "[EXPLORATION]": "info",
+  "[MUTATION]": "purple",
+  "[SC REPAIR]": "warning",
+  "[REVERSAL]": "lime",
 };
 
 function LogTokens({ text }: { text: string }) {
@@ -31,31 +41,27 @@ function LogTokens({ text }: { text: string }) {
   });
 }
 
-function LogText({ message }: { message: string }) {
+function LogText({ message, zh }: { message: string; zh: boolean }) {
   // Terminal space padding cannot align CJK fallback fonts in the browser.
-  // Keep every captured character for copying, but place result fields in fixed columns.
-  const result = /^(\[(?:通过|未通过|待定|异常)\]\s+)(\[[^\]\r\n]+\]\s+)(第\d+轮\s+)(\d+\/\d+\s+)(\[(?:探索|变异|SC治理|反转)\]\s+)(\S+\s+)(.*)$/.exec(message);
-  if (result) {
-    const metrics = /^(Sharpe\s+)(-?\d+\.\d+)(\s+Fitness\s+)(-?\d+\.\d+)(\s+Turnover\s+)(-?\d+\.\d+%)$/.exec(result[7]);
+  // Copy the displayed text while keeping result fields aligned in both languages.
+  const { text, fields, detail, tone } = presentLog(message, zh);
+  if (fields && detail !== undefined) {
+    const metrics = /^(Sharpe\s+)(-?\d+\.\d+)(\s+Fitness\s+)(-?\d+\.\d+)(\s+Turnover\s+)(-?\d+\.\d+%)(.*)$/.exec(detail);
     return (
       <span className="ag-log-result">
-        {result.slice(1, 7).map((part, index) => <span key={index}><LogTokens text={part} /></span>)}
+        {fields.map((part, index) => <span key={index}><LogTokens text={part} /></span>)}
         {metrics ? (
           <span className="ag-log-metrics">
-            {metrics.slice(1).map((part, index) => <span key={index} className={index % 2 ? "ag-log-number" : undefined}>{part}</span>)}
+            {metrics.slice(1, 7).map((part, index) => <span key={index} className={index % 2 ? "ag-log-number" : undefined}>{part}</span>)}
+            {metrics[7]}
           </span>
-        ) : <span><LogTokens text={result[7]} /></span>}
+        ) : <span>{detail}</span>}
       </span>
     );
   }
-  const warning = /^(?:请求暂未成功|发送回测遇到429限流|收取结果遇到429限流|收取结果暂未成功|发送回测处于限流冷却|进度暂时无法读取|提交进度暂不可读|入队检查等待平台重试时间)/.test(message)
-    || /^(?:恢复|种子)相关性：.*(?:读取失败|证据待定)/.test(message);
-  const error = message.startsWith("操作未完成；");
-  const phase = /^(?:第 \d+ 轮 )?阶段\[\d+\]/.test(message);
-  const tone = error ? "error" : warning ? "warning" : phase ? "info" : undefined;
   return (
     <span className={tone ? `ag-log-${tone}` : undefined}>
-      <LogTokens text={message} />
+      <LogTokens text={text} />
     </span>
   );
 }
@@ -143,22 +149,22 @@ export function JobPanel({ zh, scope }: { zh: boolean; scope: JobScope }) {
                 {zh ? "最近进度" : "Latest progress"} ·{" "}
                 {new Date(job.progress.at).toLocaleTimeString()}
               </Typography.Text>
-              <Typography.Text>{job.progress.message}</Typography.Text>
+              <Typography.Text>{presentLog(job.progress.message, zh).text}</Typography.Text>
             </div>
           )}
           <pre
             ref={logRef}
             className="ag-operation-log"
+            lang={zh ? "zh-CN" : "en-US"}
             aria-label={zh ? "操作日志" : "Operation logs"}
           >
             {job.logs.length
               ? job.logs.map((line, index) => {
-                  const message = logMessage(line.message);
                   return (
                     <Fragment key={`${line.at}-${index}`}>
                       {index > 0 ? "\n" : ""}
                       <span className="ag-log-muted">{new Date(line.at).toLocaleTimeString()}</span>{" "}
-                      <LogText message={message} />
+                      <LogText message={line.message} zh={zh} />
                     </Fragment>
                   );
                 })

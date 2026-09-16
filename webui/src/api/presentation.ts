@@ -6,13 +6,6 @@ export const progressGradients = [["#4354f7", "#949aff"], ["#bf8730", "#f1d45c"]
 export const gradeName = (grade?: string | null) => grade ? grade[0] + grade.slice(1).toLowerCase() : "—";
 export const metric = (value?: number | null, percent = false) => value == null ? "—" : percent ? `${(value * 100).toFixed(1)}%` : value.toFixed(2);
 export const timestamp = (value?: string | null) => value ? new Date(value).toLocaleString() : "—";
-export const logMessage = (message: string) => message
-  .replace(/^(结果列：.*)；(通过\/未通过\/待定.*)$/, "$1\n说明：$2")
-  .replace(
-  /\bS\s*(-?\d+\.\d+) F\s*(-?\d+\.\d+) T\s*(-?\d+\.\d+%)$/,
-  (_, sharpe: string, fitness: string, turnover: string) =>
-    `Sharpe ${sharpe.padStart(6)}  Fitness ${fitness.padStart(6)}  Turnover ${turnover.padStart(6)}`,
-);
 export const sourceName = (source: string | undefined, zh: boolean) => ({ exploration: ["探索", "Exploration"], sc: ["SC 治理", "SC repair"], mutation: ["变异", "Mutation"], reversal: ["反转", "Reversal"] })[source || ""]?.[zh ? 0 : 1] || "—";
 export function mutationDescription({ action, before, after }: { action: string; before: string; after: string }, zh: boolean) {
   const beforeOperator = /^\s*([A-Za-z_][\w]*)\s*\(/.exec(before)?.[1];

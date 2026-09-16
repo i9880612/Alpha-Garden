@@ -37,7 +37,7 @@ A black terminal view keeps timestamps, check outcomes, platform grades, sources
 
 ![Run logs with colored results, aligned metrics and progress](assets/screenshots/run-logs.en-US.jpg)
 
-The console retains up to **500 lines per operation** for the current web-service session. These logs are temporary; restarting the service clears them without removing persisted research results. The interface is bilingual, while raw engine log messages currently remain in Chinese.
+The console retains up to **500 lines per operation** for the current web-service session. These logs are temporary; restarting the service clears them without removing persisted research results. Log statuses, sources, stages and live progress follow the selected Chinese or English language. Platform error messages and error codes retain their original text.
 
 ### Formula details
 
