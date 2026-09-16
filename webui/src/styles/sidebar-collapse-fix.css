@@ -1,0 +1,44 @@
+.ag-console-sider.is-collapsed .ant-menu {
+  width: 80px !important;
+}
+
+.ag-console-sider.is-collapsed .ant-menu-item,
+.ag-console-sider.is-collapsed .ant-menu-submenu-title {
+  width: 56px !important;
+  height: 44px !important;
+  margin: 8px 12px !important;
+  padding: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: hidden !important;
+}
+
+.ag-console-sider.is-collapsed .ant-menu-item .anticon,
+.ag-console-sider.is-collapsed .ant-menu-submenu-title .anticon {
+  position: static !important;
+  min-width: 16px !important;
+  margin: 0 !important;
+  line-height: 1 !important;
+  transform: scale(1.04) !important;
+}
+
+.ag-console-sider.is-collapsed .ant-menu-title-content,
+.ag-console-sider.is-collapsed .ant-menu-submenu-arrow {
+  width: 0 !important;
+  flex: 0 0 0 !important;
+  opacity: 0 !important;
+  margin: 0 !important;
+  transform: translateX(-6px) !important;
+  overflow: hidden !important;
+}
+
+.ag-console-sider.is-collapsed .ant-menu-sub.ant-menu-inline {
+  display: none !important;
+}
+
+.ag-console-sider.is-expanded .ant-menu-title-content,
+.ag-console-sider.is-expanded .ant-menu-submenu-arrow {
+  opacity: 1;
+  transform: translateX(0);
+}

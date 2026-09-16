@@ -112,9 +112,10 @@ def advance_automated_cycle_backtests(
                 run=run, cycle_number=cycle_number, action="submission_check_wait", snapshot=None,
                 counts=counts, platform_request_performed=False, retry_after_seconds=min(delays),
             )
-        seed_delay = None if run.optimization_only else capture_next_seed_series(
+        seed_delay = capture_next_seed_series(
             database_path, client, account_scope=run.account_scope, observed_at=observed_at,
             candidate_task_ids=tuple(s.task.task_id for s in snapshots if s.task.status == "completed"),
+            admit_seeds=not run.optimization_only,
         )
         if seed_delay is not None:
             return _advance_result(

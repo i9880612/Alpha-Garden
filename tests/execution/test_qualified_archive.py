@@ -21,6 +21,8 @@ from persistence.backtests import BacktestMutationRecord, create_backtest_mutati
 from persistence.database import open_database
 from persistence.qualified_archive import list_qualified_alpha_archive
 from persistence.schema import initialize_database_schema
+from persistence.pnl import save_pnl_series
+from tests.learning.test_seed_correlation import independent_series
 from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
 from persistence.submissions import PlatformSubmittedAlphaRecord, record_platform_submitted_alphas
 from worldquant.backtests import BacktestCheck, BacktestDetail, BacktestYearlyStat, STANDARD_REGULAR_CHECK_NAMES
@@ -71,6 +73,7 @@ def complete_candidate(connection, snapshot, *, sharpe=1.5, grade="GOOD", qualif
         json.dumps({"is": {"checks": [{"name": check.name, "result": check.status} for check in checks]}}),
         None,
     ))
+    save_pnl_series(connection, independent_series(result.task.platform_alpha_id))
     return result
 
 

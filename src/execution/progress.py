@@ -190,7 +190,10 @@ def _backtest_message(snapshot: BacktestSnapshot, action: str) -> tuple[str, str
             return "异常", "接收超时；远端未知，不重发"
         if task.failure_code == "platform_pending_timeout":
             return "异常", "等待超时；远端结果未决"
-        return "异常", f"回测失败（{task.failure_code or '原因未提供'}）"
+        detail = f"回测失败（{task.failure_code or '原因未提供'}）"
+        if task.failure_message:
+            detail += "：" + " ".join(task.failure_message.split())
+        return "异常", detail
     if task.status == "submission_unknown":
         return "", (
             "回测请求发送中，尚未确认接收" if action == "submission_in_progress"

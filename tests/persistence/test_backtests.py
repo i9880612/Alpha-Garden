@@ -26,6 +26,7 @@ from persistence.backtests import (
     initialize_backtest_schema,
     list_active_backtest_tasks,
     list_backtest_tasks,
+    list_started_backtest_task_ids,
     list_completed_backtests,
     list_terminal_backtests,
     list_backtest_formulas,
@@ -116,6 +117,10 @@ class BacktestPersistenceTests(unittest.TestCase):
             )
 
             tasks = list_backtest_tasks(connection)
+            self.assertEqual(list_backtest_tasks(connection, task_ids=frozenset()), ())
+            self.assertEqual(list_backtest_tasks(connection, task_ids=frozenset({active_task.task_id})),
+                             (active_task,))
+            self.assertEqual(list_started_backtest_task_ids(connection), frozenset({completed.task_id}))
 
         expected = tuple(
             sorted(
@@ -256,6 +261,57 @@ class BacktestPersistenceTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 1)
         self.assertEqual(snapshots[0].task, completed)
         self.assertEqual(snapshots[0].result, self._result(task.task_id))
+
+    def test_completed_batch_preserves_checks_grades_and_empty_yearly_capture(self) -> None:
+        with open_database(self.database_path) as connection:
+            self.assertEqual(list_completed_backtests(connection), ())
+            expected = []
+            for index, grade in enumerate(("GOOD", "SPECTACULAR")):
+                task = self._task(f"ts_mean(close,{index + 2})")
+                create_backtest_task(connection, task)
+                pending = self._pending(task, remote_id=f"simulation-{index}", platform_alpha_id=f"alpha-{index}")
+                replace_backtest_task(connection, pending, expected_status="created")
+                result = replace(self._result(task.task_id), grade=grade, sharpe=1.5 + index,
+                                 checks=(BacktestCheckRecord("LOW_SHARPE", "PASS", 1.25, 1.5 + index, None),
+                                         BacktestCheckRecord("SELF_CORRELATION", "PENDING", 0.7, None, None)))
+                save_backtest_result(connection, result)
+                yearly = () if index else self._yearly_stats(task.task_id)
+                save_backtest_yearly_stats(connection, task.task_id, yearly)
+                self._finish_task(connection, pending)
+                expected.append(get_backtest_task(connection, task.task_id))
+            create_backtest_task(connection, self._task("rank(volume)"))
+            expected.sort(key=lambda snapshot: (snapshot.task.finished_at, snapshot.task.task_id))
+            self.assertEqual(list_completed_backtests(connection), tuple(expected))
+            self.assertEqual(list_completed_backtests(connection, task_ids=frozenset()), ())
+            for snapshot in expected:
+                # Large sparse ID sets must retain the same complete facts and order.
+                requested = frozenset({snapshot.task.task_id, *(f"absent-{i}" for i in range(1200))})
+                self.assertEqual(list_completed_backtests(connection, task_ids=requested), (snapshot,))
+
+    def test_completed_batch_rejects_missing_result_or_yearly_capture(self) -> None:
+        with open_database(self.database_path) as connection:
+            task = self._task("rank(close)")
+            create_backtest_task(connection, task)
+            pending = self._pending(task, remote_id="simulation-missing", platform_alpha_id="alpha-missing")
+            replace_backtest_task(connection, pending, expected_status="created")
+            connection.execute("SAVEPOINT missing_result")
+            self._finish_task(connection, pending)
+            with self.assertRaisesRegex(ValueError, "completed_backtest_result_missing"):
+                list_completed_backtests(connection)
+            with self.assertRaisesRegex(ValueError, "completed_backtest_result_missing"):
+                list_completed_backtests(connection, task_ids=frozenset({task.task_id}))
+            connection.execute("ROLLBACK TO missing_result")
+            connection.execute("RELEASE missing_result")
+            save_backtest_result(connection, self._result(task.task_id))
+            connection.execute("SAVEPOINT missing_yearly")
+            self._finish_task(connection, pending)
+            with self.assertRaisesRegex(ValueError, "completed_backtest_result_missing"):
+                list_completed_backtests(connection)
+            connection.execute("ROLLBACK TO missing_yearly")
+            connection.execute("RELEASE missing_yearly")
+            save_backtest_yearly_stats(connection, task.task_id, ())
+            self._finish_task(connection, pending)
+            self.assertEqual(list_completed_backtests(connection)[0].yearly_stats, ())
 
     def test_terminal_query_includes_failed_task_without_result(self) -> None:
         completed_task = self._task("rank(close)")
@@ -410,6 +466,10 @@ class BacktestPersistenceTests(unittest.TestCase):
             replayed = create_backtest_mutation(connection, mutation)
             loaded = get_backtest_mutation(connection, child.task_id)
             mutations = list_backtest_mutations(connection)
+            self.assertEqual(list_backtest_mutations(connection, parent_task_ids=frozenset({parent.task_id})),
+                             (mutation,))
+            self.assertEqual(list_backtest_mutations(connection, parent_task_ids=frozenset({child.task_id})), ())
+            self.assertEqual(list_backtest_mutations(connection, parent_task_ids=frozenset()), ())
 
         self.assertEqual(first, mutation)
         self.assertEqual(replayed, mutation)

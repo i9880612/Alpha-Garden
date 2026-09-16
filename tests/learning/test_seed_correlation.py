@@ -1,4 +1,5 @@
 import math
+import random
 from dataclasses import replace
 from datetime import date, timedelta
 from types import SimpleNamespace
@@ -18,14 +19,28 @@ def series(alpha, increments, account="account"):
     return PnlSeriesRecord(account, alpha, "2026-09-09T00:00:00+00:00", tuple(points))
 
 
-def reference(alpha, account="account"):
+def reference(alpha, account="account", sharpe=1.5):
     return PlatformSubmittedAlphaRecord(account, alpha, f"rank({alpha})", "ACTIVE",
-        "2026-09-01T00:00:00+00:00", False, {}, "2026-09-09T00:00:00+00:00")
+        "2026-09-01T00:00:00+00:00", False, {"is": {"sharpe": sharpe}}, "2026-09-09T00:00:00+00:00")
 
 
-def candidate(alpha="child", account="account"):
+def candidate(alpha="child", account="account", sharpe=1.5):
     return SimpleNamespace(task=SimpleNamespace(platform_alpha_id=alpha,
-                           account_scope=account, formula=f"rank({alpha})"))
+                           account_scope=account, formula=f"rank({alpha})"), result=SimpleNamespace(sharpe=sharpe))
+
+
+def independent_series(alpha, account="group-account"):
+    rng = random.Random(alpha)
+    return series(alpha, [rng.gauss(0, 1) for _ in range(300)], account)
+
+
+def test_ten_percent_boundary_and_every_correlated_reference():
+    x = [math.sin(i) for i in range(300)]
+    records = tuple(series(alpha, x) for alpha in ("child", "one", "two"))
+    assert assess_seed_correlation(candidate(sharpe=1.65), (reference("one"),), records).state == "passed"
+    assert assess_seed_correlation(candidate(sharpe=1.649999), (reference("one"),), records).state == "failed"
+    assert assess_seed_correlation(candidate(sharpe=1.65), (reference("one"), reference("two", sharpe=1.6)), records).state == "failed"
+    assert assess_seed_correlation(candidate(sharpe=1.65), (reference("one", sharpe=None),), records).state == "pending"
 
 
 def test_all_references_required_for_pass_but_one_high_pair_proves_failure():
@@ -66,8 +81,9 @@ def test_unusable_pnl_is_not_a_pass(kind):
     assert assess_seed_correlation(candidate(), (reference("one"),), (child, ref)).state == "pending"
 
 
-def test_threshold_equality_is_rejected(monkeypatch):
-    monkeypatch.setattr("learning.seed_correlation.daily_pnl_correlation", lambda *a, **kw: 0.7)
-    x = [math.sin(i) for i in range(300)]
-    assert assess_seed_correlation(candidate(), (reference("one"),),
-        (series("child", x), series("one", x))).state == "failed"
+def test_correlation_threshold_equality_requires_ten_percent_improvement():
+    from evaluation.correlation import correlation_check
+
+    assert correlation_check(0.699999, 1.5, 1.5) == "passed"
+    assert correlation_check(0.7, 1.5, 1.5) == "failed"
+    assert correlation_check(0.7, 1.65, 1.5) == "passed"

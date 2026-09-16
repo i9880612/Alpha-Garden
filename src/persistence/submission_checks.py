@@ -40,6 +40,14 @@ def get_submission_check(connection: sqlite3.Connection, task_id: str) -> Submis
     return SubmissionCheckRecord(*row) if row is not None else None
 
 
+def list_submission_checks(connection: sqlite3.Connection) -> tuple[SubmissionCheckRecord, ...]:
+    rows = connection.execute(
+        "SELECT task_id, observed_at, payload_json, error_code, attempt_count, retry_not_before "
+        "FROM submission_checks ORDER BY task_id"
+    ).fetchall()
+    return tuple(SubmissionCheckRecord(*row) for row in rows)
+
+
 def save_submission_check(connection: sqlite3.Connection, record: SubmissionCheckRecord) -> None:
     if not record.task_id or datetime.fromisoformat(record.observed_at).utcoffset() is None:
         raise ValueError("submission_check_identity_invalid")

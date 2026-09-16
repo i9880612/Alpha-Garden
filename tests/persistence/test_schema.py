@@ -19,10 +19,60 @@ from persistence.schema import (
     add_submission_research_storage,
     add_optimization_run_storage,
     add_submission_source_storage,
+    add_optimization_submission_source,
 )
 
 
 class DatabaseSchemaTests(unittest.TestCase):
+    def test_optimization_submission_migration_preserves_attempts_and_rolls_back(self):
+        from tests.execution.test_submission_runner import SubmissionQueueRunnerTests
+        from execution.submission_queue import claim_next_submission_queue_item
+        fixture = SubmissionQueueRunnerTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture._completed_run(("rank(close)",))
+        with open_database(fixture.database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            claim_next_submission_queue_item(connection, account_scope="group-account",
+                observed_at="2026-09-04T01:00:00+00:00", submission_mode="manual")
+            sql = connection.execute("SELECT sql FROM sqlite_master WHERE name='formal_submission_attempts'").fetchone()[0]
+            indexes = [row[0] for row in connection.execute("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='formal_submission_attempts' AND sql IS NOT NULL")]
+            old_sql = sql.replace("source IN ('qualified_archive', 'optimization')", "source = 'qualified_archive'")
+            self.assertNotEqual(old_sql, sql)
+            connection.execute(old_sql.replace("formal_submission_attempts (", "previous_attempts (", 1))
+            connection.execute("INSERT INTO previous_attempts SELECT * FROM formal_submission_attempts")
+            connection.execute("DROP TABLE formal_submission_attempts")
+            connection.execute("ALTER TABLE previous_attempts RENAME TO formal_submission_attempts")
+            for index in indexes:
+                connection.execute(index)
+            connection.commit()
+            before = tuple(tuple(row) for row in connection.execute("SELECT * FROM formal_submission_attempts"))
+            old_schema = connection.execute("SELECT name,sql FROM sqlite_master ORDER BY name").fetchall()
+            with self.assertRaisesRegex(ValueError, "requires_transaction"):
+                add_optimization_submission_source(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            add_optimization_submission_source(connection)
+            self.assertEqual(tuple(tuple(row) for row in connection.execute("SELECT * FROM formal_submission_attempts")), before)
+            connection.rollback()
+            self.assertEqual(connection.execute("SELECT name,sql FROM sqlite_master ORDER BY name").fetchall(), old_schema)
+            self.assertEqual(tuple(tuple(row) for row in connection.execute("SELECT * FROM formal_submission_attempts")), before)
+            connection.execute("CREATE TABLE unrelated (value TEXT)")
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            with self.assertRaisesRegex(ValueError, "schema_mismatch"):
+                add_optimization_submission_source(connection)
+            connection.rollback()
+            connection.execute("DROP TABLE unrelated")
+            connection.execute("BEGIN IMMEDIATE")
+            add_optimization_submission_source(connection)
+            add_optimization_submission_source(connection)
+            initialize_database_schema(connection)
+            self.assertEqual(tuple(tuple(row) for row in connection.execute("SELECT * FROM formal_submission_attempts")), before)
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            connection.execute("UPDATE formal_submission_attempts SET source='optimization'")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("UPDATE formal_submission_attempts SET submission_mode='automatic'")
+
     def test_submission_source_migration_preserves_attempts_is_atomic_and_rejects_unrelated_schema(self):
         from tests.execution.test_submission_runner import SubmissionQueueRunnerTests
         from execution.submission_queue import claim_next_submission_queue_item

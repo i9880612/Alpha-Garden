@@ -1512,7 +1512,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT count(*) FROM submission_checks").fetchone()[0], 0)
             self.assertTrue(all(s.task.submission_started_at is None for s in plan.backtests))
 
-    def _record_submitted_alpha(self, formula: str, *, observed_at="2026-09-03T00:00:00+00:00", settings=None, alpha_id="submitted-alpha") -> None:
+    def _record_submitted_alpha(self, formula: str, *, observed_at="2026-09-03T00:00:00+00:00", settings=None, alpha_id="submitted-alpha", sharpe=None) -> None:
         raw_payload = {
             "id": alpha_id,
             "status": "ACTIVE",
@@ -1522,6 +1522,8 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         }
         if settings is not None:
             raw_payload["settings"] = settings
+        if sharpe is not None:
+            raw_payload["is"] = {"sharpe": sharpe}
         with open_database(self.database_path) as connection:
             record_platform_submitted_alphas(
                 connection,

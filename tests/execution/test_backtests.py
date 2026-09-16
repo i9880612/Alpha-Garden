@@ -30,6 +30,7 @@ from worldquant.backtests import (
     BacktestPollObservation,
     BacktestSubmissionObservation,
     STANDARD_REGULAR_CHECK_NAMES,
+    parse_poll_response,
 )
 
 
@@ -416,6 +417,28 @@ class BacktestExecutionTests(unittest.TestCase):
         self.assertEqual(failed.task.failure_code, "platform_warning")
         self.assertEqual(failed.task.failure_message, "Incompatible unit")
         self.assertIsNone(failed.result)
+
+    def test_platform_error_message_survives_poll_and_persistence(self) -> None:
+        message = "Unexpected keyword argument 'd'"
+        with open_database(self.database_path) as connection:
+            task = self._prepare(connection)
+            record_submission_unknown(connection, task.task.task_id,
+                                      observed_at="2026-08-29T00:01:00+00:00")
+            record_submission_accepted(connection, task.task.task_id,
+                                       remote_id="https://api.worldquantbrain.com/simulations/1",
+                                       observed_at="2026-08-29T00:02:00+00:00")
+            apply_backtest_poll_observation(
+                connection, task.task.task_id,
+                parse_poll_response({"status": "ERROR", "message": message}),
+                observed_at="2026-08-29T00:03:00+00:00",
+            )
+        with open_database(self.database_path) as connection:
+            failed = get_backtest_task(connection, task.task.task_id)
+        self.assertEqual(failed.task.status, "failed")
+        self.assertEqual(failed.task.failure_code, "platform_error")
+        self.assertEqual(failed.task.failure_message, message)
+        self.assertIsNone(failed.result)
+        self.assertIsNone(failed.task.platform_alpha_id)
 
     def _prepare(self, connection, **overrides):
         arguments = {

@@ -5,7 +5,8 @@ import json
 from dataclasses import dataclass
 
 from execution.qualified_archive import consume_qualified_alpha_archive
-from execution.qualified_candidates import load_exhausted_qualified_candidates
+from execution.qualified_candidates import load_submittable_qualified_candidates, load_submission_opportunity_ids
+from execution.seeds import load_signal_frontiers
 
 from persistence.backtests import (
     BacktestMutationRecord,
@@ -14,6 +15,7 @@ from persistence.backtests import (
     list_backtest_mutations,
 )
 from persistence.runs import get_automated_run_backtest_by_task
+from persistence.schema import require_optimization_submission_storage
 from persistence.submission_checks import get_submission_check
 from persistence.submission_queue import (
     FormalSubmissionQueueRecord,
@@ -144,12 +146,25 @@ def list_submission_candidates(
     if grade is not None and (source != "qualified_archive" or grade not in BELOW_TARGET_GRADES):
         raise ValueError("formal_submission_grade_filter_invalid")
     if source == "queue":
-        return list_formal_submission_queue(connection, account_scope=account_scope, run_id=run_id)
-    if source != "qualified_archive" or run_id is not None:
+        queue = list_formal_submission_queue(connection, account_scope=account_scope, run_id=run_id)
+        if not queue:
+            return ()
+        allowed = set(load_submission_opportunity_ids(connection, account_scope=account_scope))
+        return tuple(r for r in queue if r.task_id in allowed)
+    if source not in {"qualified_archive", "optimization"} or run_id is not None:
         raise ValueError("formal_submission_source_invalid")
     parents = _parent_map(list_backtest_mutations(connection))
     candidates = []
-    for snapshot in load_exhausted_qualified_candidates(connection, account_scope=account_scope):
+    snapshots = (
+        tuple(_required_snapshot(connection, task_id) for task_id in
+              load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids)
+        if source == "optimization" else load_submittable_qualified_candidates(connection, account_scope=account_scope)
+    )
+    allowed = (set(load_submission_opportunity_ids(connection, account_scope=account_scope, include_optimization=True))
+               if source == "optimization" else {s.task.task_id for s in snapshots})
+    for snapshot in snapshots:
+        if snapshot.task.account_scope != account_scope or snapshot.task.task_id not in allowed:
+            continue
         if grade is not None and snapshot.result.grade != grade:
             continue
         task = snapshot.task
@@ -165,6 +180,30 @@ def list_submission_candidates(
     return tuple(candidates)
 
 
+def require_selected_submission(connection: sqlite3.Connection, *, account_scope: str, task_id: str,
+                                source: str = "optimization") -> None:
+    """Validate the exact manual selection, including a resumable attempt, without writes."""
+    snapshot = get_backtest_task(connection, task_id)
+    if snapshot is None or snapshot.task.account_scope != account_scope:
+        raise ValueError("formal_submission_task_not_found")
+    if source not in {"optimization", "qualified_archive"}:
+        raise ValueError("formal_submission_source_invalid")
+    if source == "optimization":
+        require_optimization_submission_storage(connection)
+    attempts = list_formal_submission_attempts(connection, account_scope=account_scope)
+    active = tuple(item for item in attempts if item.status in FORMAL_SUBMISSION_ACTIVE_STATUSES)
+    if any(item.task_id != task_id or item.source != source or item.submission_mode != "manual" for item in active):
+        raise ValueError("formal_submission_other_attempt_active")
+    if active:
+        return
+    if any(item.task_id == task_id for item in attempts):
+        raise ValueError("formal_submission_already_attempted")
+    if task_id not in {item.task_id for item in list_submission_candidates(
+        connection, account_scope=account_scope, source=source,
+    )}:
+        raise ValueError("formal_submission_candidate_unavailable")
+
+
 def claim_next_submission_queue_item(
     connection: sqlite3.Connection,
     *,
@@ -175,8 +214,10 @@ def claim_next_submission_queue_item(
     allowed_task_ids: frozenset[str] | None = None,
     source: str = "queue",
 ) -> FormalSubmissionAttemptRecord | None:
-    if source == "qualified_archive" and submission_mode != "manual":
+    if source != "queue" and submission_mode != "manual":
         raise ValueError("formal_submission_source_invalid")
+    if source == "optimization" and (not isinstance(allowed_task_ids, frozenset) or len(allowed_task_ids) != 1):
+        raise ValueError("formal_submission_selection_required")
     queue = list_submission_candidates(
         connection,
         account_scope=account_scope,

@@ -19,7 +19,7 @@ from execution.runs import retire_previous_automated_runs
 from persistence.backtests import get_backtest_task, list_active_backtest_tasks
 from persistence.database import open_database
 from persistence.runs import get_automated_run, list_active_automated_runs
-from execution.submission_queue import list_submission_candidates
+from execution.submission_queue import list_submission_candidates, require_selected_submission
 from persistence.submissions import (
     FORMAL_SUBMISSION_ACTIVE_STATUSES,
     FORMAL_SUBMISSION_UNRESOLVED_STATUSES,
@@ -80,8 +80,10 @@ def submit_queued_alphas(
     client_factory: ClientFactory | None = None,
     source: str = "queue",
     grade: str | None = None,
+    selected_task_id: str | None = None,
 ) -> SubmissionQueueCompletion:
     _validate_max_submissions(max_submissions)
+    _validate_selection(source, selected_task_id, max_submissions, grade)
     _validate_poll_interval(poll_interval_seconds)
     current_time = clock or _utc_now
     def checked_clock() -> datetime:
@@ -93,10 +95,13 @@ def submit_queued_alphas(
     with exclusive_run_process(database_path):
         observed = checked_clock()
         with open_database(database_path) as connection:
+            if selected_task_id is not None:
+                require_selected_submission(connection, account_scope=settings.account_scope, task_id=selected_task_id, source=source)
             queued_task_ids = frozenset(
                 item.task_id for item in list_submission_candidates(
                     connection, account_scope=settings.account_scope, source=source, grade=grade,
                 )
+                if selected_task_id is None or item.task_id == selected_task_id
             )
             needs_recovery = bool(list_active_automated_runs(connection)) or any(
                 task.account_scope == settings.account_scope
@@ -111,7 +116,7 @@ def submit_queued_alphas(
                 observed_at=observed.isoformat(), reason="stopped_for_manual_submission",
             )
             logging.getLogger("execution.progress").info(
-                "正在收尾已中断的研究批次：取消未发送任务，收取已发送回测；本次只提交启动时的队列。"
+                "正在收尾已中断的研究批次：取消未发送任务，收取已发送回测；本次只提交已选定的公式。"
             )
             settle_stopped_run_results(
                 database_path, account_scope=settings.account_scope,
@@ -133,6 +138,7 @@ def submit_queued_alphas(
             queued_task_ids=queued_task_ids,
             source=source,
             grade=grade,
+            selected_task_id=selected_task_id,
         )
         return replace(
             completion,
@@ -156,13 +162,17 @@ def run_submission_queue(
     queued_task_ids: frozenset[str] | None = None,
     source: str = "queue",
     grade: str | None = None,
+    selected_task_id: str | None = None,
 ) -> SubmissionQueueCompletion:
     _validate_max_submissions(max_submissions)
+    _validate_selection(source, selected_task_id, max_submissions, grade)
     _validate_poll_interval(poll_interval_seconds)
     current_time = clock or _utc_now
     wait = waiter or time.sleep
     with open_database(database_path) as connection:
         require_standalone_submission_scope(connection, account_scope)
+        if selected_task_id is not None:
+            require_selected_submission(connection, account_scope=account_scope, task_id=selected_task_id, source=source)
         queue = list_submission_candidates(
             connection,
             account_scope=account_scope,
@@ -171,6 +181,8 @@ def run_submission_queue(
         )
         if queued_task_ids is not None:
             queue = tuple(item for item in queue if item.task_id in queued_task_ids)
+        if selected_task_id is not None:
+            queue = tuple(item for item in queue if item.task_id == selected_task_id)
         active_attempts = tuple(
             attempt
             for attempt in list_formal_submission_attempts(
@@ -193,6 +205,8 @@ def run_submission_queue(
     if len(active) > 1:
         raise ValueError("formal_submission_active_attempt_conflict")
     if active and (active[0].source != source or grade is not None and active_grade != grade):
+        if active[0].source == "optimization":
+            raise ValueError("formal_submission_other_attempt_active")
         command = "submit " + active_grade.lower() if active_grade is not None else "submit"
         raise ValueError("存在另一来源的未完成提交，请先运行 " + command + " 收尾")
     authorized_task_ids = {record.task_id for record in queue}
@@ -441,6 +455,15 @@ def _expired_reconciliation_task_ids(
 def _validate_max_submissions(value: int | None) -> None:
     if value is not None and (type(value) is not int or value <= 0):
         raise ValueError("提交数量必须为正整数。")
+
+
+def _validate_selection(source: str, task_id: str | None, limit: int | None, grade: str | None) -> None:
+    if source == "optimization":
+        if not isinstance(task_id, str) or not task_id.strip() or limit != 1 or grade is not None:
+            raise ValueError("formal_submission_selection_required")
+    elif task_id is not None and (source != "qualified_archive" or not isinstance(task_id, str)
+                                 or not task_id.strip() or limit != 1 or grade is not None):
+        raise ValueError("formal_submission_selection_required")
 
 
 def _validate_poll_interval(value: float) -> None:

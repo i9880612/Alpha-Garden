@@ -65,14 +65,14 @@ def local_formal_submission_eligible(snapshot: BacktestSnapshot) -> bool:
 def formal_submission_grade_rejection(
     grade: str | None, *, source: str = "queue", expected_grade: str | None = None,
 ) -> str | None:
-    if source not in {"queue", "qualified_archive"}:
+    if source not in {"queue", "qualified_archive", "optimization"}:
         raise ValueError("formal_submission_source_invalid")
     if expected_grade is not None and grade in BELOW_TARGET_GRADES | {"SPECTACULAR"} and grade != expected_grade:
         return f"formal_submission_grade_changed:{expected_grade}:{grade}"
     if grade == "SPECTACULAR":
         return None
     if grade in BELOW_TARGET_GRADES:
-        if source == "qualified_archive":
+        if source in {"qualified_archive", "optimization"}:
             return None
         return "formal_submission_grade_below_target:" + grade
     return "formal_submission_grade_unavailable"

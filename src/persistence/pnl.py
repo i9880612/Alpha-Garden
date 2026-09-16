@@ -28,7 +28,20 @@ def initialize_pnl_schema(connection: sqlite3.Connection) -> None:
     )""")
 
 
-def list_pnl_series(connection: sqlite3.Connection) -> tuple[PnlSeriesRecord, ...]:
+def list_pnl_series(
+    connection: sqlite3.Connection, *, platform_alpha_ids: frozenset[str] | None = None,
+    account_scope: str | None = None,
+) -> tuple[PnlSeriesRecord, ...]:
+    if platform_alpha_ids is not None and not platform_alpha_ids:
+        return ()
+    clauses, parameters = [], []
+    if platform_alpha_ids is not None:
+        clauses.append("platform_alpha_id IN (SELECT value FROM json_each(?))")
+        parameters.append(json.dumps(sorted(platform_alpha_ids)))
+    if account_scope is not None:
+        clauses.append("account_scope=?")
+        parameters.append(account_scope)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
     return tuple(
         PnlSeriesRecord(
             row[0],
@@ -41,6 +54,7 @@ def list_pnl_series(connection: sqlite3.Connection) -> tuple[PnlSeriesRecord, ..
         )
         for row in connection.execute(
             "SELECT account_scope, platform_alpha_id, observed_at, points_json, retry_not_before FROM platform_pnl_series"
+            + where, parameters,
         )
     )
 

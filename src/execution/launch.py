@@ -18,10 +18,12 @@ from execution.process_lock import exclusive_run_process
 from execution.run_recovery import settle_stopped_run_results
 from execution.runs import (
     AutomatedRunLimits,
+    AutomatedRunPaused,
     prepare_automated_run,
     retire_previous_automated_runs,
     validate_automated_run_limits,
     resume_request_failed_run,
+    set_automated_run_paused,
 )
 from persistence.catalog import FieldCatalogContext
 from persistence.database import open_database
@@ -87,16 +89,16 @@ def launch_automated_run(
         )
         if run_created is not None:
             run_created(run)
-        make_client = client_factory or _default_client_factory
-        client = make_client(connection_settings)
-        return run_automated_run(
-            database_path,
-            client,
-            run.run_id,
-            poll_interval_seconds=poll_interval_seconds,
-            clock=current_time,
-            waiter=waiter,
-        )
+        try:
+            make_client = client_factory or _default_client_factory
+            client = make_client(connection_settings)
+            return run_automated_run(
+                database_path, client, run.run_id,
+                poll_interval_seconds=poll_interval_seconds, clock=current_time, waiter=waiter,
+            )
+        except AutomatedRunPaused:
+            set_automated_run_paused(database_path, run.run_id, paused=True)
+            raise
 
 
 def resume_automated_run(
@@ -119,16 +121,17 @@ def resume_automated_run(
         )
         resume_request_failed_run(database_path, run_id)
         _require_run_account_scope(database_path, run_id, connection_settings.account_scope)
-        make_client = client_factory or _default_client_factory
-        client = make_client(connection_settings)
-        return run_automated_run(
-            database_path,
-            client,
-            run_id,
-            poll_interval_seconds=poll_interval_seconds,
-            clock=clock,
-            waiter=waiter,
-        )
+        try:
+            make_client = client_factory or _default_client_factory
+            client = make_client(connection_settings)
+            set_automated_run_paused(database_path, run_id, paused=False)
+            return run_automated_run(
+                database_path, client, run_id,
+                poll_interval_seconds=poll_interval_seconds, clock=clock, waiter=waiter,
+            )
+        except AutomatedRunPaused:
+            set_automated_run_paused(database_path, run_id, paused=True)
+            raise
 
 
 def _validate_launch_authority(limits: AutomatedRunLimits) -> None:
@@ -157,16 +160,9 @@ def _require_run_account_scope(
             raise ValueError("automated_run_missing")
         if run.account_scope != account_scope:
             raise ValueError("automated_run_account_scope_mismatch")
-        if run.status == "completed":
-            raise ValueError("automated_run_already_completed")
-        if run.status == "failed":
-            if (
-                run.stop_reason != "submission_reconciliation_required"
-                and run.stop_reason != "request_failure_limit_reached"
-                and not automated_run_has_submission_unknown(connection, run.run_id)
-                and not failed_automated_run_has_local_work(connection, run)
-            ):
-                raise ValueError("automated_run_already_failed")
+        rejection = run_resume_rejection(connection, run)
+        if rejection:
+            raise ValueError(rejection)
         if run.status in {"created", "running"}:
             settings_policy = BacktestSettingsPolicy.from_config_dict(
                 json.loads(run.settings_policy_json)
@@ -181,6 +177,18 @@ def _require_run_account_scope(
                 ),
                 account_scope=run.account_scope,
             )
+
+def run_resume_rejection(connection, run: AutomatedRunRecord) -> str | None:
+    """Read the existing recovery boundary without changing the run or its tasks."""
+    if run.status == "completed":
+        return "automated_run_already_completed"
+    if (run.status == "failed"
+            and run.stop_reason not in {"submission_reconciliation_required", "request_failure_limit_reached"}
+            and not automated_run_has_submission_unknown(connection, run.run_id)
+            and not failed_automated_run_has_local_work(connection, run)):
+        return "automated_run_already_failed"
+    return None
+
 
 def _aware_time(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.utcoffset() is None:

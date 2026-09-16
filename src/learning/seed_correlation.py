@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from learning.pnl import daily_pnl_correlation
+from evaluation.correlation import (
+    CORRELATION_CUTOFF, MIN_CORRELATION_INTERVALS, correlation_check, submitted_sharpe,
+)
+
+from learning.pnl import PnlCorrelations
 
 from persistence.backtests import BacktestSnapshot
 from persistence.pnl import PnlSeriesRecord
@@ -10,8 +14,8 @@ from persistence.submissions import PlatformSubmittedAlphaRecord, normalize_subm
 
 
 # Seed admission, not a substitute for the platform's submission check.
-MAX_SEED_CORRELATION = 0.7
-MIN_SEED_CORRELATION_INTERVALS = 252
+MAX_SEED_CORRELATION = CORRELATION_CUTOFF
+MIN_SEED_CORRELATION_INTERVALS = MIN_CORRELATION_INTERVALS
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,32 +44,33 @@ def assess_seed_correlation(
     snapshot: BacktestSnapshot,
     references: tuple[PlatformSubmittedAlphaRecord, ...],
     series: tuple[PnlSeriesRecord, ...],
+    *, correlations: PnlCorrelations | None = None,
 ) -> SeedCorrelationAssessment:
     """Compare with every recorded submitted alpha of the same account.
 
-    A known high pair rejects even with incomplete coverage. A pass requires
+    A known blocking pair rejects even with incomplete coverage. A pass requires
     all pairs. Missing/flat/insufficient-overlap series are unknown, never zero correlation.
     Submitted parents retain their separate SC-repair role, including self=1.
     """
     refs = tuple(ref for ref in references if ref.account_scope == snapshot.task.account_scope)
     if submitted_seed(snapshot, refs):
         return SeedCorrelationAssessment("submitted", None, None, 0, len(refs))
-    by_id = {
-        item.platform_alpha_id: item.points for item in series
-        if item.account_scope == snapshot.task.account_scope and item.points is not None
-    }
-    points = by_id.get(snapshot.task.platform_alpha_id)
+    correlations = correlations or PnlCorrelations(series)
     measured = []
-    if points is not None:
-        for ref in refs:
-            other = by_id.get(ref.platform_alpha_id)
-            value = daily_pnl_correlation(points, other, minimum_intervals=MIN_SEED_CORRELATION_INTERVALS) if other is not None else None
-            if value is not None:
-                measured.append((value, ref.platform_alpha_id))
+    states = []
+    for ref in refs:
+        value = correlations.correlation(
+            (snapshot.task.account_scope, snapshot.task.platform_alpha_id),
+            (ref.account_scope, ref.platform_alpha_id), minimum_intervals=MIN_SEED_CORRELATION_INTERVALS)
+        if value is not None:
+            measured.append((value, ref.platform_alpha_id))
+        states.append(correlation_check(value,
+            snapshot.result.sharpe if snapshot.result is not None else None,
+            submitted_sharpe(ref.raw_payload)))
     maximum, reference = max(measured, default=(None, None))
-    if maximum is not None and maximum >= MAX_SEED_CORRELATION:
+    if "failed" in states:
         state = "failed"
-    elif len(measured) == len(refs):
+    elif len(states) == len(refs) and all(state == "passed" for state in states):
         state = "passed"
     else:
         state = "pending"

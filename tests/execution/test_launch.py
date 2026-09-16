@@ -9,6 +9,7 @@ from dataclasses import replace
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -29,10 +30,12 @@ from execution.real_backtests import expire_real_backtest_if_pending_timeout
 from execution.process_lock import exclusive_run_process
 from execution.runs import (
     AutomatedRunLimits,
+    AutomatedRunPaused,
     complete_automated_run_after_candidate_planning_stop,
     fail_automated_run,
     prepare_automated_run,
     start_automated_run,
+    set_automated_run_paused,
 )
 from generation.candidate import FormulaCandidate, exploration_candidate
 from generation.parser import parse_formula
@@ -84,6 +87,12 @@ class FakeTime:
 
 
 class LaunchClient:
+    def fetch_pnl(self, *, platform_alpha_id):
+        from tests.learning.test_seed_correlation import independent_series
+        from worldquant.pnl import PnlObservation
+        self.calls.append("pnl")
+        return PnlObservation(independent_series(platform_alpha_id).points)
+
     def __init__(self) -> None:
         self.authenticated = False
         self.calls: list[str] = []
@@ -236,7 +245,7 @@ class AutomatedRunLaunchTests(unittest.TestCase):
             )
         rendered = output.getvalue()
         for expected in ("阶段[1] 公式生成中", "阶段[1] 公式生成完成", "阶段[2] 筛选完成",
-                         "[通过]   第1轮 01/1 [探索]   alpha-1    S  1.30 F  1.10 T 12.0%",
+                         "[通过]   [未知]        第1轮 01/1 [探索]   alpha-1    S  1.30 F  1.10 T 12.0%",
                          "阶段[5] 结算与学习反馈完成"):
             self.assertIn(expected, rendered)
         self.assertEqual(rendered.count("alpha-1    S  1.30 F  1.10 T 12.0%"), 1)
@@ -264,6 +273,63 @@ class AutomatedRunLaunchTests(unittest.TestCase):
             active_runs = list_active_automated_runs(connection)
         self.assertEqual(task_count, 1)
         self.assertEqual(active_runs, ())
+
+    def test_pause_saves_accepted_submission_and_resume_does_not_post_it_again(self):
+        fake_time = FakeTime("2026-08-30T00:00:00+08:00")
+        paused = False
+        client = LaunchClient()
+        submit = client.submit_backtest
+        def pause_on_response(**kwargs):
+            nonlocal paused
+            response = submit(**kwargs)
+            paused = True
+            return response
+        client.submit_backtest = pause_on_response
+        def clock():
+            if paused:
+                raise AutomatedRunPaused()
+            return fake_time.now()
+        with self.assertRaises(AutomatedRunPaused):
+            launch_automated_run(self.database_path, self.settings_path, self.environment_path,
+                                limits=self._limits(), clock=clock, waiter=fake_time.wait,
+                                client_factory=lambda settings: client)
+        with open_database(self.database_path) as connection:
+            run = list_active_automated_runs(connection)[0]
+            before = [tuple(row) for row in connection.execute("SELECT * FROM backtest_tasks")]
+        self.assertEqual(run.stop_reason, "user_paused")
+        self.assertIsNone(run.finished_at)
+        self.assertEqual(client.calls, ["authenticate", "submit"])
+        paused = False
+        completion = resume_automated_run(self.database_path, self.environment_path, run.run_id,
+                                         clock=clock, waiter=fake_time.wait, client_factory=lambda settings: client)
+        self.assertEqual(completion.run.run_id, run.run_id)
+        self.assertEqual(completion.run.status, "completed")
+        self.assertEqual(client.calls.count("submit"), 1)
+        with open_database(self.database_path) as connection:
+            after = [tuple(row) for row in connection.execute("SELECT * FROM backtest_tasks")]
+        self.assertEqual(len(before), len(after))
+        self.assertEqual(before[0][0], after[0][0])
+
+    def test_pause_after_recovery_prevents_another_request_or_batch_plan(self):
+        fake_time = FakeTime("2026-08-30T00:00:00+08:00")
+        client = LaunchClient()
+        paused = False
+        def recovered(*args, **kwargs):
+            nonlocal paused
+            paused = True
+            return None
+        def clock():
+            if paused:
+                raise AutomatedRunPaused()
+            return fake_time.now()
+        with patch("execution.runner.advance_stopped_run_backtest", side_effect=recovered), self.assertRaises(AutomatedRunPaused):
+            launch_automated_run(self.database_path, self.settings_path, self.environment_path,
+                                limits=self._limits(), clock=clock, waiter=fake_time.wait,
+                                client_factory=lambda settings: client)
+        self.assertEqual(client.calls, ["authenticate"])
+        with open_database(self.database_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM backtest_tasks").fetchone()[0], 0)
+            self.assertEqual(list_active_automated_runs(connection)[0].stop_reason, "user_paused")
 
     def test_missing_backtest_authorization_stops_before_reading_credentials(self) -> None:
         limits = AutomatedRunLimits(
@@ -507,6 +573,8 @@ class AutomatedRunLaunchTests(unittest.TestCase):
         )
         client = LaunchClient()
         fake_time = FakeTime("2026-08-30T00:01:32+08:00")
+        with exclusive_run_process(self.database_path):
+            set_automated_run_paused(self.database_path, run.run_id, paused=True)
 
         completion = resume_automated_run(
             self.database_path,

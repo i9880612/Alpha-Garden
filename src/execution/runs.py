@@ -65,6 +65,28 @@ class AutomatedCycleTransition:
     consecutive_failures: int
 
 
+class AutomatedRunPaused(Exception):
+    """Cooperative stop at a boundary where observed results are already saved."""
+
+
+def set_automated_run_paused(database_path: str | Path, run_id: str, *, paused: bool) -> None:
+    """Called by the launch/resume owner while it holds the process lock.
+
+    The unfinished plan keeps its tasks and budgets. Its stop reason records
+    the pause; terminal outcomes and their original reasons are never changed.
+    """
+    with open_database(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        run = get_automated_run(connection, run_id)
+        if run is None:
+            raise ValueError("automated_run_missing")
+        if run.status not in {"created", "running"}:
+            return
+        if paused or run.stop_reason == "user_paused":
+            replace_automated_run(connection, replace(run, stop_reason="user_paused" if paused else None),
+                                  expected_status=run.status)
+
+
 def validate_automated_run_limits(limits: AutomatedRunLimits) -> None:
     if not isinstance(limits, AutomatedRunLimits):
         raise ValueError("automated_run_limits_invalid")

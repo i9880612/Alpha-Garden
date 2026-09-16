@@ -29,6 +29,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="初始化 Alpha Garden，或执行有界的真实回测自动运行。",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    web = commands.add_parser("web", help="启动本机网页控制台和接口；不会自动运行或提交。")
+    web.add_argument("--port", type=int, default=8787)
+    web.add_argument("--read-only", action="store_true", help="仅查看本地数据，禁用运行和提交操作。")
+    web.add_argument("--database", type=Path, default=Path("data/alpha_garden.sqlite3"))
+    web.add_argument("--settings", type=Path, default=Path("config/backtest.default.json"))
+    web.add_argument("--run-config", type=Path, default=Path("config/run.default.json"))
+    web.add_argument("--env", type=Path, default=Path(".env"))
+    web.add_argument("--assets", type=Path, default=Path("webui/dist"))
     initialize = commands.add_parser(
         "init",
         help="初始化本地结构，并在平台目录缺失时同步字段和算子。",
@@ -134,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
             "到高 Sharpe "
             "逐条读取平台详情、执行最新检查，并只提交全部检查明确通过的公式。"
             "指定数量时成功提交达到该数量即停止；省略时处理全部启动候选。"
-            "如 submit good 2：只选择合格表中 Good 级别、自身20次额度耗尽的公式。"
+            "如 submit good 2：选择合格归档中 Good 级别、当前满足相关性与改善条件的公式。"
         ),
     )
     submit.add_argument(
@@ -171,6 +179,18 @@ def build_parser() -> argparse.ArgumentParser:
 def run(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
+    if arguments.command == "web":
+        from alpha_garden.web import serve_console
+        from execution.console import ConsolePaths
+        if not 1 <= arguments.port <= 65535:
+            parser.error("端口必须在 1 到 65535 之间。")
+        try:
+            serve_console(ConsolePaths(arguments.database, arguments.settings, arguments.run_config, arguments.env),
+                          port=arguments.port, read_only=arguments.read_only, assets=arguments.assets)
+        except OSError as exc:
+            print(f"网页服务启动失败：{exc}", file=sys.stderr)
+            return 1
+        return 0
     if arguments.command == "run":
         with run_progress_console():
             return _run_automated(arguments)

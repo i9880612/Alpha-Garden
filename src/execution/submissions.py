@@ -9,6 +9,7 @@ from pathlib import Path
 
 from execution.runs import record_automated_run_failure
 from execution.qualified_archive import consume_qualified_alpha_archive
+from execution.qualified_candidates import load_submission_opportunity_ids
 from execution.submission_queue import claim_next_submission_queue_item
 from execution.submitted_formulas import refresh_submitted_formulas
 from persistence.backtests import (
@@ -17,6 +18,9 @@ from persistence.backtests import (
     list_active_backtest_tasks,
 )
 from persistence.database import DATABASE_LOCK_TIMEOUT_SECONDS, open_database
+from persistence.qualified_archive import archive_qualified_alpha
+from persistence.submission_queue import FormalSubmissionQueueRecord, create_formal_submission_queue_item
+from persistence.submission_checks import SubmissionCheckRecord, get_submission_check, save_submission_check
 from persistence.runs import (
     AutomatedRunRecord,
     get_automated_run,
@@ -36,6 +40,7 @@ from persistence.submissions import (
     normalize_submitted_formula,
     record_platform_submitted_alphas,
     replace_formal_submission_attempt,
+    release_unposted_submission,
 )
 from submission.formal import (
     assess_formal_check_payload,
@@ -166,7 +171,7 @@ def _advance_formal_submission_scope(
     allow_expired_confirmation: bool = False,
     source: str = "queue",
 ) -> FormalSubmissionAdvance:
-    if source not in {"queue", "qualified_archive"} or (automated and source != "queue"):
+    if source not in {"queue", "qualified_archive", "optimization"} or (automated and source != "queue"):
         raise ValueError("formal_submission_source_invalid")
     observed = _timestamp(observed_at)
     with open_database(database_path) as connection:
@@ -427,7 +432,7 @@ def _advance_formal_detail(
     if confirmed is None:
         rejection = formal_submission_grade_rejection(
             parse_alpha_grade(detail.payload), source=attempt.source,
-            expected_grade=snapshot.result.grade if attempt.source == "qualified_archive" else None,
+            expected_grade=snapshot.result.grade if attempt.source != "queue" else None,
         )
         if rejection is not None:
             return _reject_submission_grade(
@@ -607,6 +612,41 @@ def _advance_formal_post(
                     else None
                 ),
             )
+        assert current.check_observed_at is not None
+        previous_check = get_submission_check(connection, current.task_id)
+        newer_check_blocks = (
+            previous_check is not None
+            and _timestamp(previous_check.observed_at) > _timestamp(current.check_observed_at)
+            and assess_formal_check_payload(
+                json.loads(previous_check.payload_json) if previous_check.payload_json else None
+            ).state != "passed"
+        )
+        if newer_check_blocks or current.task_id not in load_submission_opportunity_ids(
+            connection, account_scope=current_run.account_scope,
+            include_optimization=current.source == "optimization", reserved_task_id=current.task_id,
+        ):
+            # No POST has happened. Keep the fresh check as evidence, return the
+            # candidate to its source and release the reservation atomically.
+            # Replanning excludes it while pending, so independent work can finish.
+            if current.check_payload_json is not None and (
+                previous_check is None or _timestamp(current.check_observed_at)
+                >= _timestamp(previous_check.retry_not_before or previous_check.observed_at)
+            ):
+                save_submission_check(connection, SubmissionCheckRecord(
+                    current.task_id, current.check_observed_at, current.check_payload_json, None,
+                    previous_check.attempt_count + 1 if previous_check else 1))
+            release_unposted_submission(connection, current)
+            if current.source == "qualified_archive":
+                archive_qualified_alpha(connection, task_id=current.task_id, archived_at=observed_at)
+            elif current.source == "queue":
+                snapshot = get_backtest_task(connection, current.task_id)
+                create_formal_submission_queue_item(connection, FormalSubmissionQueueRecord(
+                    current.task_id, current_run.account_scope, current.run_id, current.cycle_number,
+                    current.family_root_task_id, normalize_submitted_formula(snapshot.task.formula), observed_at))
+            logging.getLogger("execution.progress").info(
+                "正式提交：%s 本地相关性或改善机会待重新确认，暂缓提交；未发送提交请求。", current.task_id)
+            return _advance_result(current_run, current.cycle_number,
+                action="formal_submission_deferred", task_id=current.task_id)
         claimed = replace(
             current,
             status="submitting",

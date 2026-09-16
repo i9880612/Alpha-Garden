@@ -101,6 +101,10 @@ class SignalSeedExecutionTests(unittest.TestCase):
             frontier = load_signal_frontiers(connection, optimization_only=True)
             self.assertEqual(frontier.active_branch_task_ids, (child.task.task_id,))
             self.assertEqual(frontier.records[0].qualified_parent_remaining_attempts, 20)
+            before_child = load_signal_frontiers(connection, optimization_only=True,
+                                                 excluded_task_ids=frozenset({child.task.task_id}))
+            self.assertEqual(before_child.active_branch_task_ids, (parent.task.task_id,))
+            self.assertEqual(before_child.records[0].branches[0].remaining_attempts, 20)
             connection.execute("UPDATE backtest_results SET grade='SPECTACULAR' WHERE task_id=?", (child.task.task_id,))
             self.assertEqual(load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids, ())
             self.assertEqual(load_signal_frontiers(connection).active_branch_task_ids, (child.task.task_id,))
@@ -156,6 +160,43 @@ class SignalSeedExecutionTests(unittest.TestCase):
             self.assertEqual(load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids,
                              (parent.task.task_id,))
 
+    def test_optimization_checks_unchecked_ancestors_before_accepting_descendant(self):
+        from tests.execution.test_qualified_archive import prepare_candidate, complete_candidate
+
+        with open_database(self.database_path) as connection:
+            root = complete_candidate(connection, prepare_candidate(connection), sharpe=1.8)
+            synchronize_signal_seeds(connection)
+            middle = complete_candidate(connection, prepare_candidate(connection, parent=root), sharpe=1.6)
+            leaf = complete_candidate(connection, prepare_candidate(connection, parent=middle), sharpe=1.7)
+            connection.execute("DELETE FROM submission_checks WHERE task_id=?", (middle.task.task_id,))
+            frontier = load_signal_frontiers(connection, optimization_only=True)
+            self.assertEqual(set(frontier.active_branch_task_ids), {root.task.task_id, leaf.task.task_id})
+            leaf_frontier = next(
+                f for f in frontier.records if f.branches[0].task_id == leaf.task.task_id)
+            self.assertEqual(leaf_frontier.root_task_id, root.task.task_id)
+            connection.execute("UPDATE backtest_results SET sharpe=0.1 WHERE task_id=?", (middle.task.task_id,))
+            self.assertEqual(load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids,
+                             (root.task.task_id,))
+            connection.execute("UPDATE backtest_results SET sharpe=1.6 WHERE task_id=?", (middle.task.task_id,))
+            connection.execute("UPDATE backtest_tasks SET settings_json=? WHERE task_id=?",
+                               ('{"delay":2}', middle.task.task_id))
+            self.assertEqual(load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids,
+                             (root.task.task_id,))
+
+    def test_submitted_better_descendant_still_retires_optimization_parent(self):
+        from tests.execution.test_qualified_archive import prepare_candidate, complete_candidate, FINISHED
+
+        with open_database(self.database_path) as connection:
+            parent = complete_candidate(connection, prepare_candidate(connection), sharpe=1.5)
+            synchronize_signal_seeds(connection)
+            child = complete_candidate(connection, prepare_candidate(connection, parent=parent), sharpe=1.8)
+            record_platform_submitted_alphas(connection, (PlatformSubmittedAlphaRecord(
+                child.task.account_scope, child.task.platform_alpha_id, child.task.formula, "ACTIVE",
+                FINISHED, False,
+                {"id": child.task.platform_alpha_id, "status": "ACTIVE", "hidden": False,
+                 "dateSubmitted": FINISHED, "regular": {"code": child.task.formula}}, FINISHED),))
+            self.assertEqual(load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids, ())
+
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
@@ -182,7 +223,8 @@ class SignalSeedExecutionTests(unittest.TestCase):
                 "group-account", "reference", "rank(reference)", "ACTIVE",
                 "2026-09-01T00:00:00+00:00", False,
                 {"id": "reference", "status": "ACTIVE", "hidden": False,
-                 "dateSubmitted": "2026-09-01T00:00:00+00:00", "regular": {"code": "rank(reference)"}},
+                 "dateSubmitted": "2026-09-01T00:00:00+00:00", "regular": {"code": "rank(reference)"},
+                 "is": {"sharpe": 2.0}},
                 "2026-09-09T00:00:00+00:00"),))
             for alpha in (root.task.platform_alpha_id, child.task.platform_alpha_id, "reference"):
                 save_pnl_series(connection, series(alpha, [math.sin(i) for i in range(300)], "group-account"))

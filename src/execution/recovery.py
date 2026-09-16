@@ -7,6 +7,7 @@ import sqlite3
 
 from execution.self_correlation import load_self_correlation_references
 from execution.catalog import load_generation_catalog
+from execution.progress import LOGGER_NAME
 from generation.self_correlation import (
     SELF_CORRELATION_REPAIR_FAMILIES, SELF_CORRELATION_HALF_FAMILIES,
     SELF_CORRELATION_LIGHT_FAMILIES,
@@ -95,9 +96,10 @@ def capture_next_recovery_series(
         comparisons = load_recovery_comparisons(
             connection, observed_at=datetime.fromisoformat(observed_at)
         )
+        series = list_pnl_series(connection)
         existing = {
             (item.account_scope, item.platform_alpha_id)
-            for item in list_pnl_series(connection)
+            for item in series
             if item.points is not None
             or (
                 item.retry_not_before is not None
@@ -120,14 +122,18 @@ def capture_next_recovery_series(
     )
     if alpha is None:
         return None
+    ready_count = sum(item.account_scope == account_scope and item.platform_alpha_id in required
+                      and item.points is not None for item in series)
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.info("恢复相关性：正在获取时序数据 %s（已获取 %s/%s）", alpha, ready_count, len(required))
+    error_code = None
     try:
         observation = client.fetch_pnl(platform_alpha_id=alpha)
     except WorldQuantRequestError as exc:
         if exc.status_code != 404:
+            logger.warning("恢复相关性：时序数据 %s 读取失败（%s）", alpha, exc.code)
             raise
-        logging.getLogger("execution.progress").warning(
-            "恢复相关性取数 %s：HTTP 404，证据待定，稍后重试", alpha,
-        )
+        error_code = "HTTP 404"
         observation = PnlObservation(None, exc.retry_after_seconds)
     if observation.points is None:
         retry = max(retry_interval_seconds, observation.retry_after_seconds or 0.0)
@@ -146,10 +152,13 @@ def capture_next_recovery_series(
             )
         # Unknown research evidence does not block unrelated backtests. Respect
         # explicit platform Retry-After before any further platform request.
+        logger.warning("恢复相关性：时序数据 %s %s，证据待定，%g 秒后可重试", alpha,
+                       f"读取失败（{error_code}）" if error_code else "暂未就绪", retry)
         return observation.retry_after_seconds or 0.0
     with open_database(database_path) as connection:
         save_pnl_series(
             connection,
             PnlSeriesRecord(account_scope, alpha, observed_at, observation.points),
         )
+    logger.info("恢复相关性：时序数据 %s 获取完成（已获取 %s/%s）", alpha, ready_count + 1, len(required))
     return 0.0

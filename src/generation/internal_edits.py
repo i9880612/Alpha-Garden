@@ -139,21 +139,23 @@ def _edits(
                     or any(p.variadic for p in target.parameters)
                 ):
                     continue
-                arguments = list(node.arguments)
-                for assignment in binding.assignments:
+                arguments = []
+                for assignment in sorted(binding.assignments, key=lambda item: item.parameter_index):
                     index = assignment.parameter_index
                     if (
                         index >= len(target.parameters)
                         or target.parameters[index].kind != assignment.parameter.kind
                     ):
                         break
-                    argument = arguments[assignment.argument_index]
-                    arguments[assignment.argument_index] = CallArgument(
+                    argument = node.arguments[assignment.argument_index]
+                    # Follow the target signature: required inputs are positional,
+                    # optional inputs are named (e.g. ts_backfill's lookback).
+                    arguments.append(CallArgument(
                         argument.value,
                         target.parameters[index].name
-                        if argument.name is not None
+                        if target.parameters[index].optional
                         else None,
-                    )
+                    ))
                 else:
                     replacement = Call(target.name, tuple(arguments))
                     target_binding = bind_operator_arguments(

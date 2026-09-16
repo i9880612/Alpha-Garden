@@ -19,8 +19,10 @@ from execution.backtest_batches import (
     prepare_automated_candidate_backtest_batch,
 )
 from execution.runner import run_automated_run
+from execution.driver import AutomatedRunAdvance
 from execution.runs import (
     AutomatedRunLimits,
+    AutomatedRunPaused,
     fail_automated_run,
     prepare_automated_run,
     start_automated_run,
@@ -73,6 +75,12 @@ class FakeTime:
 
 
 class RunnerClient:
+    def fetch_pnl(self, *, platform_alpha_id):
+        from tests.learning.test_seed_correlation import independent_series
+        from worldquant.pnl import PnlObservation
+        self.calls.append("pnl")
+        return PnlObservation(independent_series(platform_alpha_id).points)
+
     def __init__(
         self,
         *submissions,
@@ -232,6 +240,28 @@ class RunnerClient:
 
 
 class AutomatedRunnerTests(unittest.TestCase):
+    def test_pause_after_capacity_step_does_not_start_account_reconciliation(self):
+        run_id = self._prepare_running_task(max_pending_seconds=60)
+        with open_database(self.database_path) as connection:
+            run = get_automated_run(connection, run_id)
+        client = RunnerClient()
+        client.authenticated = True
+        stopped = False
+        def advance(*args, **kwargs):
+            nonlocal stopped
+            stopped = True
+            return AutomatedRunAdvance(run, "backtest_advanced", 1, None, "capacity_wait", None, False)
+        def clock():
+            if stopped:
+                raise AutomatedRunPaused()
+            return datetime.fromisoformat("2026-08-30T00:01:31+08:00")
+        with patch("execution.runner.advance_automated_run", side_effect=advance), \
+                patch("execution.runner.reconcile_account_backtest_capacity") as reconcile, \
+                self.assertRaises(AutomatedRunPaused):
+            run_automated_run(self.database_path, client, run_id, clock=clock)
+        reconcile.assert_not_called()
+        self.assertEqual(client.calls, [])
+
     def test_deferred_checks_do_not_stop_new_batches_and_late_pass_is_queued(self):
         old_run = self._prepare_running_task(max_pending_seconds=60)
         clock = FakeTime("2026-08-30T00:01:31+08:00")

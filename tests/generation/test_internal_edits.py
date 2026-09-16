@@ -49,6 +49,9 @@ def catalog():
             operator("zscore", x, roles=("cross_sectional_normalization",)),
             operator("ts_mean", x, d),
             operator("ts_delta", x, d),
+            operator("ts_scale", x, d, OperatorParameter("constant", "float", optional=True)),
+            operator("ts_backfill", x, OperatorParameter("lookback", "window", optional=True),
+                     OperatorParameter("k", "int", optional=True)),
             operator(
                 "ts_decay_linear",
                 x,
@@ -146,7 +149,21 @@ def test_equal_arity_is_not_enough_and_missing_arguments_are_rejected(catalog):
 
 def test_named_windows_are_rebound_without_changing_values(catalog):
     result = candidates("rank(ts_mean(close,d=66))", catalog)
-    assert "rank(other_window(close,lookback=66))" in {c.formula for c in result}
+    assert "rank(other_window(close,66))" in {c.formula for c in result}
+    assert "rank(ts_backfill(close,lookback=66))" in {c.formula for c in result}
+
+
+@pytest.mark.parametrize("formula", [
+    "rank(ts_backfill(close,lookback=66))",
+    "rank(ts_backfill(lookback=66,x=close))",
+])
+def test_backfill_replacements_use_positional_required_windows(catalog, formula):
+    result = candidates(formula, catalog)
+    formulas = {c.formula for c in result}
+    for operator in ("ts_mean", "ts_delta", "ts_scale", "ts_decay_linear"):
+        assert f"rank({operator}(close,66))" in formulas
+        assert not any(f"{operator}(close,d=" in text for text in formulas)
+    assert all(validate_formula(c.expression, catalog).is_valid for c in result)
 
 
 def test_omitted_optional_argument_does_not_block_operator_replacement(catalog):

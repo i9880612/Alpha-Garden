@@ -1,0 +1,104 @@
+/* Loaded by index.html so the same brand loader appears before React starts. */
+:root {
+  --ag-loading-bg: #f5f5f5;
+  --ag-loading-text: rgba(0, 0, 0, 0.6);
+  --ag-loading-logo-filter: none;
+  --ag-loading-track: rgba(82, 102, 223, 0.14);
+  --ag-loading-accent: #5266df;
+  --ag-loading-highlight: #8b9ee9;
+}
+
+:root.dark {
+  --ag-loading-bg: #0a0a0a;
+  --ag-loading-text: rgba(255, 255, 255, 0.72);
+  --ag-loading-logo-filter: brightness(0) invert(1);
+  --ag-loading-track: rgba(132, 147, 255, 0.16);
+  --ag-loading-accent: #7183ff;
+  --ag-loading-highlight: #c1c9ff;
+}
+
+.ag-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  color: var(--ag-loading-text);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+.ag-loading--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--ag-loading-bg);
+}
+
+.ag-loading-logo {
+  display: block;
+  width: min(220px, 70vw);
+  height: auto;
+  filter: var(--ag-loading-logo-filter);
+}
+
+.ag-loading-track {
+  display: block;
+  position: relative;
+  width: 104px;
+  height: 2px;
+  flex: none;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--ag-loading-track);
+}
+
+.ag-loading-track::after {
+  content: "";
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--ag-loading-accent), var(--ag-loading-highlight), transparent);
+  animation: ag-loading-sweep 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.ag-loading-label {
+  font-size: 13px;
+  line-height: 20px;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+}
+
+.ag-loading.ag-loading--compact {
+  width: 160px;
+  height: auto;
+  gap: 12px;
+  margin: 0 auto;
+  padding: 16px 0;
+}
+
+.ag-loading--compact .ag-loading-logo { width: 140px; }
+.ag-loading--compact .ag-loading-track { width: 80px; }
+.ag-loading--compact .ag-loading-label { font-size: 11px; }
+
+/* Ant Design adds ant-spin-dot to the indicator; preserve the shared layout. */
+.ant-spin .ag-loading.ag-loading--compact {
+  display: flex;
+}
+
+.ant-spin-nested-loading > div > .ant-spin .ag-loading.ag-loading--compact {
+  margin: 0;
+  transform: translate(-50%, -50%);
+}
+
+.ant-spin-blur .ant-table-placeholder { visibility: hidden; }
+
+@keyframes ag-loading-sweep {
+  0% { opacity: 0; transform: translateX(-100%); }
+  20%, 80% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(250%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-loading-track::after { animation: none; transform: translateX(75%); }
+}

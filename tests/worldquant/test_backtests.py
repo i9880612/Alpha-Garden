@@ -165,6 +165,17 @@ class WorldQuantBacktestProtocolTests(unittest.TestCase):
                 with self.assertRaises(WorldQuantProtocolError):
                     parse_poll_response(payload)
 
+    def test_terminal_failure_keeps_message_without_requiring_one(self) -> None:
+        for status in ("ERROR", "FAILED", "CANCELLED", "CANCELED"):
+            for message in ("Unexpected keyword argument 'd'", "  Calculation failed  ",
+                            None, "", "  ", {"unexpected": "shape"}):
+                with self.subTest(status=status, message=message):
+                    failed = parse_poll_response({"status": status, "message": message})
+                    self.assertEqual(failed.state, "failed")
+                    self.assertEqual(failed.failure_message,
+                                     message.strip() or None if isinstance(message, str) else None)
+                    self.assertIsNone(failed.platform_alpha_id)
+
     def test_detail_extracts_metrics_and_checks_from_observed_shape(self) -> None:
         detail = parse_backtest_detail(
             self._detail_payload(),

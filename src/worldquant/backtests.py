@@ -335,11 +335,13 @@ def parse_poll_response(payload: Mapping[str, object]) -> BacktestPollObservatio
         if alpha_id is not None:
             raise WorldQuantProtocolError("worldquant_poll_state_conflict")
         normalized = "CANCELLED" if status == "CANCELED" else status
+        message = payload.get("message")
         return BacktestPollObservation(
             state="failed",
             platform_alpha_id=None,
             platform_status=normalized,
             progress=_optional_progress(payload),
+            failure_message=message.strip() if isinstance(message, str) and message.strip() else None,
         )
     if status == "WARNING":
         if alpha_id is None:

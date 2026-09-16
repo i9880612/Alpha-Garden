@@ -126,7 +126,7 @@ def add_submission_source_storage(connection: sqlite3.Connection) -> None:
         return
     key = ("table", "formal_submission_attempts", "formal_submission_attempts")
     column = ("source TEXT NOT NULL DEFAULT 'queue' CHECK ( "
-              "source = 'queue' OR (source = 'qualified_archive' AND submission_mode = 'manual'))")
+              "source = 'queue' OR (source IN ('qualified_archive', 'optimization') AND submission_mode = 'manual'))")
     previous = dict(expected)
     previous[key] = expected[key].replace(", " + column, "")
     if actual != previous:
@@ -135,6 +135,40 @@ def add_submission_source_storage(connection: sqlite3.Connection) -> None:
         raise ValueError("submission_source_migration_requires_transaction")
     connection.execute("ALTER TABLE formal_submission_attempts ADD COLUMN " + column)
     _require_current_schema(connection, expected)
+
+
+def require_optimization_submission_storage(connection: sqlite3.Connection) -> None:
+    """Reject manual optimization submission until its storage migration is applied."""
+    key = ("table", "formal_submission_attempts", "formal_submission_attempts")
+    if _schema_objects(connection).get(key) != _reference_schema_objects()[key]:
+        raise ValueError("formal_submission_storage_update_required")
+
+
+def add_optimization_submission_source(connection: sqlite3.Connection) -> None:
+    """Explicit transactional migration; retain all attempt data and relax only its manual source check."""
+    expected = _reference_schema_objects()
+    actual = _schema_objects(connection)
+    if actual == expected:
+        return
+    key = ("table", "formal_submission_attempts", "formal_submission_attempts")
+    previous = dict(expected)
+    previous[key] = expected[key].replace(
+        "source IN ('qualified_archive', 'optimization')", "source = 'qualified_archive'",
+    )
+    if actual != previous:
+        raise ValueError("optimization_submission_migration_schema_mismatch")
+    if not connection.in_transaction:
+        raise ValueError("optimization_submission_migration_requires_transaction")
+    connection.execute(expected[key].replace("formal_submission_attempts (", "formal_submission_attempts_replacement (", 1))
+    connection.execute("INSERT INTO formal_submission_attempts_replacement SELECT * FROM formal_submission_attempts")
+    connection.execute("DROP TABLE formal_submission_attempts")
+    connection.execute("ALTER TABLE formal_submission_attempts_replacement RENAME TO formal_submission_attempts")
+    for (kind, _, table), sql in expected.items():
+        if kind == "index" and table == "formal_submission_attempts":
+            connection.execute(sql)
+    _require_current_schema(connection, expected)
+    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise ValueError("optimization_submission_migration_foreign_key_violation")
 
 
 def add_optimization_run_storage(connection: sqlite3.Connection) -> None:
@@ -277,7 +311,9 @@ def _schema_objects(
         """
     ).fetchall()
     def normalized(sql: str) -> str:
-        sql = " ".join(sql.replace('"backtest_tasks"', 'backtest_tasks').split())
+        for table in ("backtest_tasks", "formal_submission_attempts"):
+            sql = sql.replace(f'"{table}"', table)
+        sql = " ".join(sql.split())
         # ALTER TABLE can move whitespace before commas and closing parentheses.
         # Normalize SQL spacing without changing quoted CHECK/default values.
         parts = re.split(r"('(?:''|[^'])*')", sql)

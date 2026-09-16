@@ -14,6 +14,7 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from worldquant.alphas import UserAlphaPage, parse_user_alpha_page
 from worldquant.pnl import PnlObservation, parse_pnl
+from worldquant.recordsets import RECORDSET_UNITS, RecordsetObservation, parse_recordset
 from worldquant.backtests import (
     BacktestDetail,
     BacktestPollObservation,
@@ -367,6 +368,27 @@ class WorldQuantClient:
             ),
             retry_after_seconds=None,
         )
+
+    def fetch_recordset(self, *, platform_alpha_id: str, metric: str) -> RecordsetObservation:
+        self._require_authenticated()
+        if metric not in RECORDSET_UNITS:
+            raise ValueError("worldquant_recordset_metric_invalid")
+        if not isinstance(platform_alpha_id, str) or not platform_alpha_id.strip():
+            raise ValueError("worldquant_alpha_id_missing")
+        encoded = quote(platform_alpha_id.strip(), safe="")
+        response = self._send(Request(self._url(f"/alphas/{encoded}/recordsets/{metric}"),
+            headers={"Accept": "application/json"}, method="GET"),
+            code="worldquant_recordset_request_failed", outcome_unknown=False)
+        retry = _retry_after_seconds(response.headers)
+        if (response.status_code == 200 and not response.body.strip()) or (response.status_code == 503 and retry is not None):
+            return RecordsetObservation(None, retry)
+        if response.status_code != 200:
+            raise _http_error("worldquant_recordset_http_error", response, outcome_unknown=False)
+        payload = _json_object(response.body, "worldquant_recordset_json_invalid")
+        try:
+            return RecordsetObservation(parse_recordset(payload, metric))
+        except ValueError as exc:
+            raise WorldQuantProtocolError("worldquant_recordset_response_invalid") from exc
 
     def fetch_pnl(self, *, platform_alpha_id: str) -> PnlObservation:
         self._require_authenticated()

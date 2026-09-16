@@ -25,6 +25,7 @@ from execution.request_failures import (
     remaining_automated_request_retry_seconds,
 )
 from execution.runs import (
+    AutomatedRunPaused,
     automated_run_has_hard_stop_evidence,
     can_resume_independent_backtests,
     clear_automated_request_failures,
@@ -75,6 +76,8 @@ def run_automated_run(
     wait = waiter or time.sleep
 
     initial_run = _load_run(database_path, run_id)
+    if initial_run.stop_reason == "user_paused":
+        raise AutomatedRunPaused()
     progress = RunProgress(database_path, run_id)
     if initial_run.status == "completed":
         return _completion(
@@ -289,6 +292,7 @@ def run_automated_run(
                 database_path, client, account_scope=run.account_scope,
                 observed_at=observed.isoformat(),
             ) if run.status == "running" else None
+            observed = _aware_time(current_time())
             if run.status == "running" and advance_deferred_submission_check(
                 database_path, client, account_scope=run.account_scope, observed_at=observed.isoformat(),
             ):
@@ -305,11 +309,13 @@ def run_automated_run(
                               snapshot=recovered.snapshot)
             step_count += 1
             platform_request_count += int(recovered.platform_request_performed)
+        observed = _aware_time(current_time())
         advance = advance_automated_run(
             database_path,
             client,
             run.run_id,
             observed_at=observed.isoformat(),
+            checkpoint=current_time,
         )
         step_count += 1
         progress.advanced(advance)
@@ -326,6 +332,7 @@ def run_automated_run(
         if advance.run.status == "failed":
             continue
         if advance.backtest_action in {"capacity_wait", "reconciliation_required"}:
+            observed = _aware_time(current_time())
             try:
                 reconciliation = reconcile_account_backtest_capacity(
                     database_path, client, account_scope=run.account_scope,

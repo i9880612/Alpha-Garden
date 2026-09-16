@@ -701,7 +701,6 @@ def _validate_record(record: AutomatedRunRecord) -> None:
                 record.started_at,
                 record.retry_not_before,
                 record.finished_at,
-                record.stop_reason,
                 record.candidate_planning_stop_diagnostic_json,
             )
         ) or any(
@@ -711,13 +710,13 @@ def _validate_record(record: AutomatedRunRecord) -> None:
                 record.consecutive_failures,
                 record.request_failure_count,
             )
-        ):
+        ) or record.stop_reason not in {None, "user_paused"}:
             raise ValueError("automated_run_state_invalid")
     elif record.status == "running":
         if (
             record.started_at is None
             or record.finished_at is not None
-            or record.stop_reason is not None
+            or record.stop_reason not in {None, "user_paused"}
             or record.candidate_planning_stop_diagnostic_json is not None
             or (record.max_cycles > 0 and record.current_cycle >= record.max_cycles)
             or (record.request_failure_count == 0) != (record.retry_not_before is None)

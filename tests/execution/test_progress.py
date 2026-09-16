@@ -134,6 +134,22 @@ class RunProgressTests(unittest.TestCase):
         self.assertNotIn("回测完成", output.getvalue())
         self.assertNotIn("Sharpe", output.getvalue())
 
+    def test_failed_log_includes_saved_platform_message_on_one_line(self):
+        original = self.tasks[0][0]
+        failed = replace(original, task=replace(
+            original.task, status="failed", failure_code="platform_error",
+            failure_message="Unexpected keyword argument 'd'\n at position 12",
+        ))
+        output = io.StringIO()
+        with redirect_stdout(output), run_progress_console():
+            self.progress.backtest(failed.task.task_id, snapshot=failed)
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("platform_error", lines[0])
+        self.assertIn("Unexpected keyword argument 'd' at position 12", lines[0])
+        self.assertIn("[异常]", lines[0])
+        self.assertNotIn(" S ", lines[0])
+
     def test_exhausted_response_logs_local_failure_without_fake_scores(self):
         original = self.tasks[0][0]
         failed = replace(original, task=replace(

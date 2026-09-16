@@ -24,7 +24,7 @@ from persistence.backtests import (
     BacktestMutationRecord,
     BacktestSnapshot,
     list_backtest_mutations,
-    list_backtest_tasks,
+    list_started_backtest_task_ids,
     list_completed_backtests,
 )
 from persistence.seeds import (
@@ -107,23 +107,46 @@ def load_signal_frontiers(
         for task_id in excluded_task_ids
     ):
         raise ValueError("signal_frontier_excluded_tasks_invalid")
+    mutations = list_backtest_mutations(connection)
+    roots = tuple(seed.root_task_id for seed in list_signal_seeds(connection))
+    decisions = load_qualified_evolution(
+        connection, excluded_task_ids=excluded_task_ids, mutations=mutations,
+    ) if optimization_only else ()
+    required = None
+    if optimization_only:
+        # Evolution already considered all checked descendants, including submitted
+        # replacements. Frontier membership only needs each active candidate's
+        # complete ancestor chain and the roots, not unrelated completed backtests.
+        parents = {mutation.child_task_id: mutation.parent_task_id for mutation in mutations}
+        required = set(roots)
+        pending = [decision.task_id for decision in decisions if not decision.retired]
+        while pending:
+            task_id = pending.pop()
+            if task_id in required:
+                continue
+            required.add(task_id)
+            if task_id in parents:
+                pending.append(parents[task_id])
     completed = tuple(
         snapshot
-        for snapshot in list_completed_backtests(connection)
+        for snapshot in list_completed_backtests(
+            connection, task_ids=frozenset(required) if required is not None else None,
+        )
         if snapshot.task.task_id not in excluded_task_ids
     )
-    mutations = list_backtest_mutations(connection)
     evidence = build_learning_evidence(completed)
     frontiers = build_signal_frontiers(
         evidence,
         mutations,
-        tuple(seed.root_task_id for seed in list_signal_seeds(connection)),
+        roots,
         _attempted_mutation_child_task_ids(
             connection,
             mutations,
             excluded_task_ids=excluded_task_ids,
         ),
-        recovery_task_ids=recovery_task_ids(
+        # Optimization uses checked lineage membership, which is independent of
+        # recovery branches. Avoid rebuilding historical PnL correlations here.
+        recovery_task_ids=frozenset() if optimization_only else recovery_task_ids(
             load_recovery_comparisons(connection, snapshots=completed),
             list_pnl_series(connection),
         ),
@@ -136,7 +159,7 @@ def load_signal_frontiers(
     grades = {snapshot.task.task_id: snapshot.result.grade for snapshot in completed}
     archived = {record.task_id for record in list_qualified_alpha_archive(connection)}
     selected = []
-    for decision in load_qualified_evolution(connection, excluded_task_ids=excluded_task_ids):
+    for decision in decisions:
         task_id = decision.task_id
         if (decision.retired or task_id in archived or task_id not in root_by_task
                 or grades[task_id] not in BELOW_TARGET_GRADES):
@@ -206,14 +229,12 @@ def _attempted_mutation_child_task_ids(
     *,
     excluded_task_ids: frozenset[str],
 ) -> tuple[str, ...]:
-    tasks_by_id = {task.task_id: task for task in list_backtest_tasks(connection)}
+    started = list_started_backtest_task_ids(connection) - excluded_task_ids
     return tuple(
         sorted(
             mutation.child_task_id
             for mutation in mutations
-            if mutation.child_task_id not in excluded_task_ids
-            and mutation.child_task_id in tasks_by_id
-            and tasks_by_id[mutation.child_task_id].submission_started_at is not None
+            if mutation.child_task_id in started
         )
     )
 

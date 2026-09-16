@@ -45,6 +45,8 @@ from persistence.backtests import (
     get_backtest_task,
 )
 from persistence.database import open_database
+from persistence.pnl import save_pnl_series
+from tests.learning.test_seed_correlation import independent_series
 from persistence.runs import get_automated_run, list_automated_run_backtests
 from persistence.schema import initialize_database_schema
 from persistence.submission_queue import list_formal_submission_queue
@@ -164,6 +166,212 @@ class SubmissionClient:
 
 
 class SubmissionQueueRunnerTests(unittest.TestCase):
+    def test_grade_and_exact_selection_cannot_skip_a_preserved_improvement_step(self):
+        import math
+        from execution.qualified_archive import synchronize_qualified_alpha_archive
+        from execution.submission_queue import list_submission_candidates
+        from tests.learning.test_seed_correlation import series
+        tasks, formulas = self._completed_run(("rank(close)", "rank(open)", "rank(volume)"),
+            sharpes=(1.5, 1.6, 1.7), grades=("AVERAGE", "GOOD", "EXCELLENT"), lineage=(1, 0))
+        with open_database(self.database_path) as connection:
+            create_backtest_mutation(connection, BacktestMutationRecord(
+                tasks[2], tasks[1], "test_mutation", "formula", "parent", "child"))
+            for task_id in tasks:
+                alpha = get_backtest_task(connection, task_id).task.platform_alpha_id
+                connection.execute("DELETE FROM platform_pnl_series WHERE platform_alpha_id=?", (alpha,))
+                save_pnl_series(connection, series(alpha, [math.sin(i) for i in range(300)], "group-account"))
+            synchronize_qualified_alpha_archive(connection, observed_at="2026-09-04T00:10:00+00:00")
+            self.assertEqual([r.task_id for r in list_submission_candidates(connection,
+                account_scope="group-account", source="qualified_archive")], [tasks[0]])
+            self.assertEqual(list_submission_candidates(connection, account_scope="group-account",
+                source="qualified_archive", grade="GOOD"), ())
+        client = SubmissionClient(formulas)
+        for source, task_id in (("qualified_archive", tasks[1]), ("optimization", tasks[2])):
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "candidate_unavailable"):
+                self._submit(client, FakeTime("2026-09-04T01:00:00+00:00"), source=source,
+                    selected_task_id=task_id, max_submissions=1)
+        self.assertEqual(client.calls, [])
+
+    def test_selected_archive_submission_uses_the_archive_source_and_only_the_selected_formula(self):
+        tasks, client = self._qualified_batch()
+        result = self._submit(client, FakeTime("2026-09-04T01:00:00+00:00"),
+            source="qualified_archive", selected_task_id=tasks[0], max_submissions=1)
+        self.assertEqual(result.submitted_count, 1)
+        with open_database(self.database_path) as connection:
+            self.assertEqual(get_formal_submission_attempt(connection, tasks[0]).source, "qualified_archive")
+            self.assertIsNone(get_formal_submission_attempt(connection, tasks[1]))
+
+    def test_changed_opportunity_releases_unposted_reservation_and_continues_independent_work(self):
+        from persistence.pnl import list_pnl_series
+        from persistence.submission_checks import get_submission_check
+        tasks, client = self._qualified_batch()
+        now = "2026-09-04T01:00:00+00:00"
+        for _ in range(3):
+            advance_submission_queue(self.database_path, client, account_scope="group-account",
+                observed_at=now, authorized_task_ids=frozenset(tasks), source="qualified_archive")
+        with open_database(self.database_path) as connection:
+            [attempt] = list_formal_submission_attempts(connection)
+            self.assertEqual(attempt.status, "ready")
+            blocked = get_backtest_task(connection, attempt.task_id)
+            original = next(p for p in list_pnl_series(connection) if p.platform_alpha_id == blocked.task.platform_alpha_id)
+            save_pnl_series(connection, replace(original, platform_alpha_id="new-reference"))
+            record_platform_submitted_alphas(connection, (PlatformSubmittedAlphaRecord(
+                "group-account", "new-reference", "rank(reference)", "ACTIVE", now, False,
+                {"id": "new-reference", "status": "ACTIVE", "dateSubmitted": now, "hidden": False,
+                 "regular": {"code": "rank(reference)"}, "is": {"sharpe": blocked.result.sharpe}}, now),))
+        result = self._submit(client, FakeTime(now), source="qualified_archive")
+        self.assertTrue(result.completed)
+        self.assertEqual(result.submitted_count, 1)
+        self.assertNotIn(blocked.task.platform_alpha_id, client.posted_ids)
+        with open_database(self.database_path) as connection:
+            self.assertIsNone(get_formal_submission_attempt(connection, blocked.task.task_id))
+            self.assertEqual(get_backtest_task(connection, blocked.task.task_id), blocked)
+            self.assertGreater(get_submission_check(connection, blocked.task.task_id).attempt_count, 1)
+
+    def _optimization_batch(self):
+        task_ids, client = self._qualified_batch(attempts=0)
+        return task_ids, client
+
+    def _ready_archive_submission(self):
+        tasks, client = self._qualified_batch()
+        for _ in range(3):
+            advance_submission_queue(self.database_path, client, account_scope="group-account",
+                observed_at="2026-09-04T01:00:00+00:00", authorized_task_ids=frozenset(tasks),
+                source="qualified_archive")
+        with open_database(self.database_path) as connection:
+            [attempt] = list_formal_submission_attempts(connection)
+        self.assertEqual(attempt.status, "ready")
+        return tasks, client, attempt
+
+    def test_newer_unresolved_check_defers_ready_submission_without_overwriting_evidence(self):
+        from persistence.submission_checks import get_submission_check
+        from persistence.qualified_archive import list_qualified_alpha_archive
+        tasks, client, attempt = self._ready_archive_submission()
+        with open_database(self.database_path) as connection:
+            previous = get_submission_check(connection, attempt.task_id)
+            newer = SubmissionCheckRecord(attempt.task_id, "2026-09-04T01:00:01+00:00",
+                None, "request_timeout", previous.attempt_count + 1, "2026-09-04T01:10:01+00:00")
+            save_submission_check(connection, newer)
+        result = advance_submission_queue(self.database_path, client, account_scope="group-account",
+            observed_at="2026-09-04T01:00:02+00:00", authorized_task_ids=frozenset(tasks),
+            source="qualified_archive")
+        self.assertEqual(result.action, "formal_submission_deferred")
+        self.assertEqual(client.posted_ids, [])
+        with open_database(self.database_path) as connection:
+            self.assertIsNone(get_formal_submission_attempt(connection, attempt.task_id))
+            self.assertEqual(get_submission_check(connection, attempt.task_id), newer)
+            self.assertIn(attempt.task_id, {r.task_id for r in list_qualified_alpha_archive(connection)})
+
+    def test_failed_source_restoration_rolls_back_reservation_and_check_changes(self):
+        from persistence.submission_checks import get_submission_check
+        from persistence.qualified_archive import list_qualified_alpha_archive
+        tasks, client, attempt = self._ready_archive_submission()
+        with open_database(self.database_path) as connection:
+            before_check = get_submission_check(connection, attempt.task_id)
+            before_archive = list_qualified_alpha_archive(connection)
+        with patch("execution.submissions.load_submission_opportunity_ids", return_value=()), patch(
+                "execution.submissions.archive_qualified_alpha", side_effect=RuntimeError("restore failed")):
+            with self.assertRaisesRegex(RuntimeError, "restore failed"):
+                advance_submission_queue(self.database_path, client, account_scope="group-account",
+                    observed_at="2026-09-04T01:00:02+00:00", authorized_task_ids=frozenset(tasks),
+                    source="qualified_archive")
+        self.assertEqual(client.posted_ids, [])
+        with open_database(self.database_path) as connection:
+            self.assertEqual(get_formal_submission_attempt(connection, attempt.task_id), attempt)
+            self.assertEqual(get_submission_check(connection, attempt.task_id), before_check)
+            self.assertEqual(list_qualified_alpha_archive(connection), before_archive)
+
+    def test_old_ready_reservation_cannot_erase_claimed_or_posted_submission(self):
+        from persistence.submissions import release_unposted_submission, replace_formal_submission_attempt
+        _, _, ready = self._ready_archive_submission()
+        current = ready
+        for status in ("submitting", "confirmation_pending"):
+            with self.subTest(status=status), open_database(self.database_path) as connection:
+                changed = replace(current, status=status, submission_claimed_at="2026-09-04T01:00:01+00:00",
+                    updated_at="2026-09-04T01:00:02+00:00",
+                    submit_http_status=201 if status == "confirmation_pending" else None,
+                    submit_response_json="null" if status == "confirmation_pending" else None)
+                replace_formal_submission_attempt(connection, changed,
+                    expected_status=current.status, expected_updated_at=current.updated_at)
+                with self.assertRaisesRegex(ValueError, "reservation_not_releasable"):
+                    release_unposted_submission(connection, ready)
+                self.assertEqual(get_formal_submission_attempt(connection, ready.task_id), changed)
+                current = changed
+
+    def test_selected_optimization_submits_only_requested_formula_with_unused_budget(self):
+        from execution.submission_queue import list_submission_candidates
+        task_ids, client = self._optimization_batch()
+        with open_database(self.database_path) as connection:
+            selected_alpha = get_backtest_task(connection, task_ids[1]).task.platform_alpha_id
+            self.assertEqual(len(list_submission_candidates(connection, account_scope="group-account", source="optimization")), 2)
+        time = FakeTime("2026-09-04T01:00:00+00:00")
+        result = self._submit(client, time, source="optimization", selected_task_id=task_ids[1], max_submissions=1)
+        self.assertEqual((result.submitted_count, result.initial_queue_count), (1, 1))
+        self.assertEqual(client.posted_ids, [selected_alpha])
+        self.assertTrue(all(alpha in {None, selected_alpha} for _, alpha in client.calls))
+        with open_database(self.database_path) as connection:
+            self.assertEqual(list_formal_submission_attempts(connection)[0].source, "optimization")
+            self.assertEqual([item.task_id for item in list_submission_candidates(connection, account_scope="group-account", source="optimization")], [task_ids[0]])
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM backtest_mutations").fetchone()[0], 0)
+            self.assertEqual({item.task_id for item in list_formal_submission_queue(connection)}, {task_ids[2]})
+        with self.assertRaisesRegex(ValueError, "already_attempted"):
+            self._submit(client, time, source="optimization", selected_task_id=task_ids[1], max_submissions=1)
+        self.assertEqual(client.posted_ids, [selected_alpha])
+
+    def test_selected_optimization_rejects_invalid_scope_before_recovery_or_platform_access(self):
+        from execution.submission_queue import require_selected_submission
+        task_ids, client = self._optimization_batch()
+        run, _ = self._interrupted_run(formulas=("rank(high)", "rank(low)", "rank(vwap)"))
+        for selected in ("missing", task_ids[2]):
+            with self.subTest(selected=selected), self.assertRaisesRegex(ValueError, "task_not_found|candidate_unavailable"):
+                self._submit(client, FakeTime("2026-09-04T02:00:00+00:00"), source="optimization", selected_task_id=selected, max_submissions=1)
+        with open_database(self.database_path) as connection:
+            with self.assertRaisesRegex(ValueError, "task_not_found"):
+                require_selected_submission(connection, account_scope="other-account", task_id=task_ids[0])
+            self.assertEqual(get_automated_run(connection, run.run_id).status, "running")
+        self.assertEqual(client.calls, [])
+
+    def test_selected_optimization_rejects_unmigrated_storage_before_recovery(self):
+        task_ids, client = self._optimization_batch()
+        run, _ = self._interrupted_run(formulas=("rank(high)", "rank(low)", "rank(vwap)"))
+        with open_database(self.database_path) as connection:
+            connection.execute("ALTER TABLE formal_submission_attempts DROP COLUMN source")
+            connection.execute("""ALTER TABLE formal_submission_attempts ADD COLUMN source TEXT
+                NOT NULL DEFAULT 'queue' CHECK (source = 'queue'
+                OR (source = 'qualified_archive' AND submission_mode = 'manual'))""")
+        before = self.database_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "formal_submission_storage_update_required"):
+            self._submit(client, FakeTime("2026-09-04T02:00:00+00:00"), source="optimization",
+                         selected_task_id=task_ids[0], max_submissions=1)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(self.database_path.read_bytes(), before)
+        with open_database(self.database_path) as connection:
+            self.assertEqual(get_automated_run(connection, run.run_id).status, "running")
+
+    def test_selected_optimization_failed_recheck_does_not_submit_other_candidates(self):
+        task_ids, client = self._optimization_batch()
+        client.failed_check_ids = frozenset(client.formulas)
+        result = self._submit(client, FakeTime("2026-09-04T01:00:00+00:00"), source="optimization", selected_task_id=task_ids[0], max_submissions=1)
+        self.assertEqual((result.ineligible_count, result.submitted_count), (1, 0))
+        self.assertEqual(client.posted_ids, [])
+        with open_database(self.database_path) as connection:
+            self.assertEqual([item.task_id for item in list_formal_submission_attempts(connection)], [task_ids[0]])
+
+    def test_selected_optimization_unknown_post_resumes_only_same_formula_without_reposting(self):
+        task_ids, client = self._optimization_batch()
+        client.unknown_post_ids = frozenset(client.formulas)
+        time = FakeTime("2026-09-04T01:00:00+00:00")
+        first = self._submit(client, time, source="optimization", selected_task_id=task_ids[0], max_submissions=1)
+        self.assertEqual(first.unresolved_count, 1)
+        calls = list(client.calls)
+        with self.assertRaisesRegex(ValueError, "other_attempt_active"):
+            self._submit(client, time, source="optimization", selected_task_id=task_ids[1], max_submissions=1)
+        self.assertEqual(client.calls, calls)
+        client.unknown_post_ids = frozenset()
+        second = self._submit(client, time, source="optimization", selected_task_id=task_ids[0], max_submissions=1)
+        self.assertEqual(second.submitted_count, 1)
+        self.assertEqual(len(client.posted_ids), 1)
+
     def _qualified_batch(self, *, grades=("GOOD", "EXCELLENT", "SPECTACULAR"), attempts=20):
         from execution.backtests import prepare_backtest_task, fail_backtest_task
         from execution.qualified_archive import synchronize_qualified_alpha_archive
@@ -954,7 +1162,7 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
         )
 
         self.assertTrue(completion.completed)
-        self.assertEqual(completion.initial_queue_count, 2)
+        self.assertEqual(completion.initial_queue_count, 1)
         self.assertEqual(completion.submission_claimed_count, 1)
         self.assertEqual(
             tuple(platform_formulas[alpha_id] for alpha_id in client.posted_ids),
@@ -977,7 +1185,8 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
             lower_candidate_stages.index("post"),
         )
         with open_database(self.database_path) as connection:
-            self.assertEqual(list_formal_submission_queue(connection), ())
+            from execution.submission_queue import list_submission_candidates
+            self.assertEqual(list_submission_candidates(connection, account_scope="group-account"), ())
             attempts = list_formal_submission_attempts(connection)
         self.assertEqual({attempt.task_id for attempt in attempts}, {task_ids[1]})
 
@@ -1011,7 +1220,8 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
             ("rank(open)",),
         )
         with open_database(self.database_path) as connection:
-            self.assertEqual(list_formal_submission_queue(connection), ())
+            from execution.submission_queue import list_submission_candidates
+            self.assertEqual(list_submission_candidates(connection, account_scope="group-account"), ())
             self.assertEqual(len(list_formal_submission_attempts(connection)), 1)
 
     def test_active_automated_run_blocks_standalone_submission_before_login(
@@ -1061,6 +1271,7 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
         time = FakeTime("2026-09-04T02:00:00+00:00")
         with open_database(self.database_path) as connection:
             unknown = get_backtest_task(connection, tasks[1].task.task_id)
+            save_pnl_series(connection, independent_series("late-alpha"))
 
         result = self._submit(client, time, max_submissions=2)
 
@@ -1372,7 +1583,8 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
                 self.assertEqual(result.submitted_count, 1)
                 self.assertNotIn(blocked, client.posted_ids)
                 with open_database(source.database_path) as connection:
-                    self.assertEqual(list_formal_submission_queue(connection), ())
+                    from execution.submission_queue import list_submission_candidates
+                    self.assertEqual(list_submission_candidates(connection, account_scope="group-account"), ())
                     if steps:
                         attempt = get_formal_submission_attempt(connection, tasks[0])
                         self.assertEqual(attempt.failure_code, "formal_submission_grade_unavailable")
@@ -1512,7 +1724,7 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
             client_factory=lambda _settings: client, **kwargs,
         )
 
-    def _interrupted_run(self):
+    def _interrupted_run(self, *, formulas=("rank(open)", "rank(volume)", "rank(high)")):
         run = prepare_automated_run(
             self.database_path, POLICY_PATH, account_scope="group-account",
             limits=AutomatedRunLimits(
@@ -1531,7 +1743,7 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
         tasks = prepare_automated_candidate_backtest_batch(
             self.database_path, run_id=run.run_id,
             candidates=tuple(AutomatedCandidateBacktest(self._candidate(f), self.settings)
-                             for f in ("rank(open)", "rank(volume)", "rank(high)")),
+                             for f in formulas),
             created_at="2026-09-04T01:00:01+00:00",
         )
         with open_database(self.database_path) as connection:
@@ -1695,6 +1907,7 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
                     json.dumps({"is": {"checks": [{"name": name, "result": "PASS"}
                                                   for name in STANDARD_REGULAR_CHECK_NAMES]}}), None,
                 ))
+                save_pnl_series(connection, independent_series(platform_alpha_id))
         settle_automated_cycle(
             self.database_path,
             run.run_id,
@@ -1711,6 +1924,7 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
     ) -> None:
         submitted_at = "2026-09-04T00:30:00+00:00"
         with open_database(self.database_path) as connection:
+            save_pnl_series(connection, independent_series(platform_alpha_id))
             record_platform_submitted_alphas(
                 connection,
                 (

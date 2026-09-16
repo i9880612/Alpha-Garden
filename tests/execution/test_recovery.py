@@ -59,8 +59,9 @@ def pending_recovery_series(tmp_path, monkeypatch):
     (45.0, "2026-09-07T00:10:00+00:00"),
 ))
 def test_missing_recovery_series_defers_only_its_object_and_recovers_after_cooldown(
-    pending_recovery_series, retry_after, retry_at,
+    pending_recovery_series, retry_after, retry_at, caplog,
 ):
+    caplog.set_level("INFO", logger="execution.progress")
     database_path, comparisons = pending_recovery_series
     child_points = series("child", [math.cos(i) for i in range(300)]).points
     client = Mock()
@@ -72,6 +73,10 @@ def test_missing_recovery_series_defers_only_its_object_and_recovers_after_coold
     ]
     assert capture_next_recovery_series(database_path, client, account_scope="account",
         observed_at="2026-09-07T00:00:00+00:00") == (retry_after or 0.0)
+    assert "正在获取时序数据 missing-child（已获取 2/4）" in caplog.messages[0]
+    assert not getattr(caplog.records[0], "transient", False)
+    assert "读取失败（HTTP 404），证据待定，600 秒后可重试" in caplog.messages[-1]
+    assert "获取完成" not in caplog.text
     with open_database(database_path) as connection:
         records = list_pnl_series(connection)
         missing = next(r for r in records if r.account_scope == "account" and r.platform_alpha_id == "missing-child")
@@ -91,6 +96,7 @@ def test_missing_recovery_series_defers_only_its_object_and_recovers_after_coold
     assert client.fetch_pnl.call_count == 2
     assert capture_next_recovery_series(database_path, client, account_scope="account",
         observed_at=retry_at) == 0.0
+    assert "获取完成（已获取 4/4）" in caplog.messages[-1]
     with open_database(database_path) as connection:
         records = list_pnl_series(connection)
         assert recovery_task_ids(comparisons, records) == frozenset({"missing-child", "other-child"})
@@ -193,6 +199,7 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
             reference,
             observed_at="2026-08-30T00:06:00+08:00",
             settings=fixture.settings,
+            sharpe=1.5,
         )
         with open_database(fixture.database_path) as connection:
             original = get_backtest_task(connection, parent.task.task_id)
@@ -200,6 +207,7 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
             parent_formula, settings=fixture.settings,
             observed_at="2026-08-30T00:06:00+08:00",
             alpha_id=original.task.platform_alpha_id,
+            sharpe=original.result.sharpe,
         )
         fixture._record_formal_attempt(
             task_id=parent.task.task_id,

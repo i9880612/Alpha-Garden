@@ -31,24 +31,23 @@ def load_automated_run_limits(
 ) -> AutomatedRunLimits:
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        limits = _limits_from_config(
+        limits = automated_run_limits_from_config(
             payload,
             cycles=cycles,
             automatic_submissions_enabled=automatic_submissions_enabled,
             optimization_only=optimization_only,
         )
-        validate_automated_run_limits(limits)
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("automated_run_config_file_invalid") from exc
     return limits
 
 
-def _limits_from_config(
+def automated_run_limits_from_config(
     payload: object,
     *,
     cycles: int,
-    automatic_submissions_enabled: bool,
-    optimization_only: bool,
+    automatic_submissions_enabled: bool = False,
+    optimization_only: bool = False,
 ) -> AutomatedRunLimits:
     if not isinstance(payload, Mapping) or set(payload) != set(_CONFIG_KEYS):
         raise ValueError("automated_run_config_invalid")
@@ -62,7 +61,7 @@ def _limits_from_config(
     max_backtests = 0 if cycles == -1 else cycles * backtest_count
     if not isinstance(automatic_submissions_enabled, bool):
         raise ValueError("automated_run_automatic_submission_setting_invalid")
-    return AutomatedRunLimits(
+    limits = AutomatedRunLimits(
         **values,
         max_cycles=cycles,
         max_backtests=max_backtests,
@@ -70,3 +69,5 @@ def _limits_from_config(
         automatic_submissions_enabled=automatic_submissions_enabled,
         optimization_only=optimization_only,
     )
+    validate_automated_run_limits(limits)
+    return limits

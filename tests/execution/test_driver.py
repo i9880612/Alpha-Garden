@@ -812,9 +812,11 @@ class AutomatedRunDriverTests(unittest.TestCase):
             self._accepted("simulation-2"),
         )
 
-        advances = tuple(
-            self._advance(client, minute=minute) for minute in range(1, 16)
-        )
+        advances = []
+        for minute in range(1, 30):
+            advances.append(self._advance(client, minute=minute))
+            if advances[-1].action == "run_stopped":
+                break
 
         self.assertEqual(advances[7].action, "cycle_settled")
         self.assertEqual(advances[7].run.current_cycle, 1)
@@ -836,9 +838,11 @@ class AutomatedRunDriverTests(unittest.TestCase):
             self._accepted("simulation-3"),
         )
 
-        advances = tuple(
-            self._advance(client, minute=minute) for minute in range(1, 24)
-        )
+        advances = []
+        for minute in range(1, 40):
+            advances.append(self._advance(client, minute=minute))
+            if advances[-1].action == "cycle_planned" and advances[-1].cycle_number == 4:
+                break
 
         self.assertEqual(advances[-2].action, "cycle_settled")
         self.assertEqual(advances[-2].run.current_cycle, 3)

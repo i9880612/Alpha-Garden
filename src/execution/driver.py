@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from execution.request_failures import (
     remaining_automated_request_retry_seconds,
 )
 from execution.runs import (
+    AutomatedRunPaused,
     clear_automated_request_failures,
     complete_automated_run_after_candidate_planning_stop,
     complete_optimization_run,
@@ -62,9 +64,12 @@ def advance_automated_run(
     run_id: str,
     *,
     observed_at: str,
+    checkpoint: Callable[[], object] | None = None,
 ) -> AutomatedRunAdvance:
     observed = _timestamp(observed_at)
     run = _load_run(database_path, run_id)
+    if run.stop_reason == "user_paused":
+        raise AutomatedRunPaused()
     if run.status in {"completed", "failed"}:
         return _result(run, action="run_stopped")
     if run.status == "created":
@@ -105,8 +110,9 @@ def advance_automated_run(
                 platform_request_performed=old_check.platform_request_performed,
                 retry_after_seconds=old_check.retry_after_seconds,
             )
-        seed_delay = None if run.optimization_only else capture_next_seed_series(
+        seed_delay = capture_next_seed_series(
             database_path, client, account_scope=run.account_scope, observed_at=observed_at,
+            admit_seeds=not run.optimization_only,
         )
         if seed_delay is not None:
             return _result(run, action="seed_evidence_captured", cycle_number=cycle_number,
@@ -149,6 +155,8 @@ def advance_automated_run(
                 retry_after_seconds=delay,
             )
         try:
+            if checkpoint is not None:
+                checkpoint()
             plan = plan_automated_cycle(
                 database_path,
                 run_id=run.run_id,

@@ -131,7 +131,7 @@ def initialize_submission_schema(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             source TEXT NOT NULL DEFAULT 'queue' CHECK (
-                source = 'queue' OR (source = 'qualified_archive' AND submission_mode = 'manual')
+                source = 'queue' OR (source IN ('qualified_archive', 'optimization') AND submission_mode = 'manual')
             ),
             CHECK (
                 (check_payload_json IS NULL) = (check_observed_at IS NULL)
@@ -233,6 +233,14 @@ def list_platform_submitted_alphas(
     return tuple(_record_from_row(row) for row in rows)
 
 
+def list_formal_submission_formulas(connection: sqlite3.Connection) -> tuple[tuple[str, str], ...]:
+    """Account/formula facts for every attempted submission, regardless of outcome."""
+    return tuple((row[0], row[1]) for row in connection.execute("""
+        SELECT account_scope, formula FROM backtest_tasks
+        WHERE task_id IN (SELECT task_id FROM formal_submission_attempts)
+    """))
+
+
 def create_formal_submission_attempt(
     connection: sqlite3.Connection,
     record: FormalSubmissionAttemptRecord,
@@ -258,6 +266,20 @@ def create_formal_submission_attempt(
         _attempt_values(record),
     )
     return record
+
+
+def release_unposted_submission(connection: sqlite3.Connection, record: FormalSubmissionAttemptRecord) -> None:
+    """Release only an unposted ready reservation; never erase an external outcome."""
+    if record.status != "ready" or record.submission_claimed_at is not None:
+        raise ValueError("formal_submission_reservation_not_releasable")
+    cursor = connection.execute(
+        "DELETE FROM formal_submission_attempts WHERE task_id=? AND status='ready' AND updated_at=? "
+        "AND submission_claimed_at IS NULL AND submit_http_status IS NULL "
+        "AND submit_response_json IS NULL AND confirmation_observed_at IS NULL",
+        (record.task_id, record.updated_at),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError("formal_submission_reservation_not_releasable")
 
 
 def replace_formal_submission_attempt(
@@ -537,8 +559,8 @@ def _validate_attempt(record: FormalSubmissionAttemptRecord) -> None:
         _require_clean_text(value, error)
     if record.submission_mode not in FORMAL_SUBMISSION_MODES:
         raise ValueError("formal_submission_mode_invalid")
-    if record.source not in {"queue", "qualified_archive"} or (
-        record.source == "qualified_archive" and record.submission_mode != "manual"
+    if record.source not in {"queue", "qualified_archive", "optimization"} or (
+        record.source != "queue" and record.submission_mode != "manual"
     ):
         raise ValueError("formal_submission_source_invalid")
     if (
@@ -628,7 +650,7 @@ def _validate_attempt(record: FormalSubmissionAttemptRecord) -> None:
         grade_rejected_before_check = (
             record.status == "ineligible"
             and ((record.failure_code or "").startswith("formal_submission_grade_below_target:")
-                 or record.source == "qualified_archive"
+                 or record.source in {"qualified_archive", "optimization"}
                  and (record.failure_code or "").startswith("formal_submission_grade_changed:"))
         )
         if (

@@ -36,31 +36,44 @@ def advance(case, snapshot, client, observed="2026-09-09T00:00:00+00:00"):
                                    observed_at=observed, candidate_task_ids=(snapshot.task.task_id,))
 
 
-def test_pnl_collection_admits_only_after_all_pairs_and_reuses_captured_data(pending_seed):
+def test_pnl_collection_admits_only_after_all_pairs_and_reuses_captured_data(pending_seed, caplog):
     case, snapshot = pending_seed
+    caplog.set_level("INFO", logger="execution.progress")
     client = Mock()
-    client.fetch_pnl.side_effect = [
+    observations = iter([
         PnlObservation(series("reference", [math.sin(i) for i in range(300)]).points),
         PnlObservation(series("child", [math.cos(i) for i in range(300)]).points),
-    ]
+    ])
+    def fetch_pnl(*, platform_alpha_id):
+        record = caplog.records[-1]
+        assert f"正在获取时序数据 {platform_alpha_id}" in record.getMessage()
+        assert not getattr(record, "transient", False)  # Must reach the web log handler before the request finishes.
+        return next(observations)
+    client.fetch_pnl.side_effect = fetch_pnl
     assert advance(case, snapshot, client) == 0
+    assert "获取完成（已获取 1/2）" in caplog.messages[-1]
     with open_database(case.database_path) as connection:
         assert list_signal_seeds(connection) == ()
     assert advance(case, snapshot, client) == 0
+    assert "获取完成（已获取 2/2）" in caplog.messages[-1]
     with open_database(case.database_path) as connection:
         assert tuple(s.root_task_id for s in list_signal_seeds(connection)) == (snapshot.task.task_id,)
         assert load_signal_frontiers(connection).active_branch_task_ids == (snapshot.task.task_id,)
+    count = len(caplog.records)
     assert advance(case, snapshot, client) is None
+    assert len(caplog.records) == count
     assert client.fetch_pnl.call_count == 2
     client.submit_backtest.assert_not_called()
     client.submit_formal_alpha.assert_not_called()
 
 
-def test_pending_pnl_does_not_spin_or_admit_and_can_resume_after_cooldown(pending_seed):
+def test_pending_pnl_does_not_spin_or_admit_and_can_resume_after_cooldown(pending_seed, caplog):
     case, snapshot = pending_seed
     client = Mock()
     client.fetch_pnl.return_value = PnlObservation(None, 30.0)
     assert advance(case, snapshot, client) == 30
+    assert "暂未就绪，证据待定，600 秒后可重试" in caplog.messages[-1]
+    assert "获取完成" not in caplog.text
     assert advance(case, snapshot, client, "2026-09-09T00:00:30+00:00") == 30
     assert advance(case, snapshot, client, "2026-09-09T00:01:00+00:00") is None
     with open_database(case.database_path) as connection:
@@ -69,12 +82,13 @@ def test_pending_pnl_does_not_spin_or_admit_and_can_resume_after_cooldown(pendin
     assert advance(case, snapshot, client, "2026-09-09T00:10:01+00:00") == 30
 
 
-def test_failed_request_does_not_fail_seed_or_research_batch(pending_seed):
+def test_failed_request_does_not_fail_seed_or_research_batch(pending_seed, caplog):
     case, snapshot = pending_seed
     client = Mock()
     client.fetch_pnl.side_effect = WorldQuantRequestError("pnl_network_error", retryable=True,
                                                        outcome_unknown=False, retry_after_seconds=45)
     assert advance(case, snapshot, client) == 45
+    assert "读取失败（pnl_network_error），证据待定，600 秒后可重试" in caplog.messages[-1]
     with open_database(case.database_path) as connection:
         assert not list_signal_seeds(connection)
         record = list_pnl_series(connection)[0]

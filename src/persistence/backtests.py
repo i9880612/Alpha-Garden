@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -563,12 +564,15 @@ def get_backtest_mutation(
 
 def list_backtest_mutations(
     connection: sqlite3.Connection,
+    *,
+    parent_task_ids: frozenset[str] | None = None,
 ) -> tuple[BacktestMutationRecord, ...]:
+    if parent_task_ids is not None and not parent_task_ids:
+        return ()
+    scope = "" if parent_task_ids is None else "WHERE parent_task_id IN (SELECT value FROM json_each(?))"
+    parameters = () if parent_task_ids is None else (json.dumps(sorted(parent_task_ids)),)
     rows = connection.execute(
-        """
-        SELECT * FROM backtest_mutations
-        ORDER BY child_task_id
-        """
+        f"SELECT * FROM backtest_mutations {scope} ORDER BY child_task_id", parameters,
     ).fetchall()
     return tuple(_mutation_from_row(row) for row in rows)
 
@@ -582,14 +586,23 @@ def list_backtest_formulas(connection: sqlite3.Connection) -> tuple[str, ...]:
 
 def list_backtest_tasks(
     connection: sqlite3.Connection,
+    *,
+    task_ids: frozenset[str] | None = None,
 ) -> tuple[BacktestTaskRecord, ...]:
+    if task_ids is not None and not task_ids:
+        return ()
+    scope = "" if task_ids is None else "WHERE task_id IN (SELECT value FROM json_each(?))"
+    parameters = () if task_ids is None else (json.dumps(sorted(task_ids)),)
     rows = connection.execute(
-        """
-        SELECT * FROM backtest_tasks
-        ORDER BY created_at, task_id
-        """
+        f"SELECT * FROM backtest_tasks {scope} ORDER BY created_at, task_id", parameters,
     ).fetchall()
     return tuple(_task_from_row(row) for row in rows)
+
+
+def list_started_backtest_task_ids(connection: sqlite3.Connection) -> frozenset[str]:
+    return frozenset(row[0] for row in connection.execute(
+        "SELECT task_id FROM backtest_tasks WHERE submission_started_at IS NOT NULL"
+    ))
 
 
 def list_active_backtest_tasks(
@@ -607,24 +620,56 @@ def list_active_backtest_tasks(
 
 def list_completed_backtests(
     connection: sqlite3.Connection,
+    *,
+    task_ids: frozenset[str] | None = None,
 ) -> tuple[BacktestSnapshot, ...]:
-    rows = connection.execute(
-        """
-        SELECT task_id FROM backtest_tasks
-        WHERE status = 'completed'
-        ORDER BY finished_at, task_id
-        """
+    if task_ids is not None and not task_ids:
+        return ()
+    scope = "t.status = 'completed'"
+    parameters = ()
+    if task_ids is not None:
+        scope += " AND t.task_id IN (SELECT value FROM json_each(?))"
+        parameters = (json.dumps(sorted(task_ids)),)
+    tasks = connection.execute(
+        f"SELECT t.* FROM backtest_tasks t WHERE {scope} ORDER BY t.finished_at, t.task_id",
+        parameters,
     ).fetchall()
+    if not tasks:
+        return ()
+    results = {row["task_id"]: row for row in connection.execute(f"""
+        SELECT r.* FROM backtest_results r
+        JOIN backtest_tasks t ON t.task_id = r.task_id
+        WHERE {scope}
+    """, parameters).fetchall()}
+    checks: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    for row in connection.execute(f"""
+        SELECT c.* FROM backtest_checks c
+        JOIN backtest_tasks t ON t.task_id = c.task_id
+        WHERE {scope} ORDER BY c.task_id, c.check_name
+    """, parameters).fetchall():
+        checks[row["task_id"]].append(row)
+    captured = {row["task_id"] for row in connection.execute(f"""
+        SELECT c.task_id FROM backtest_yearly_stats_captures c
+        JOIN backtest_tasks t ON t.task_id = c.task_id
+        WHERE {scope}
+    """, parameters).fetchall()}
+    yearly: dict[str, list[BacktestYearlyStatRecord]] = defaultdict(list)
+    for row in connection.execute(f"""
+        SELECT s.* FROM backtest_yearly_stats s
+        JOIN backtest_tasks t ON t.task_id = s.task_id
+        WHERE {scope} ORDER BY s.task_id, s.stage, s.year
+    """, parameters).fetchall():
+        yearly[row["task_id"]].append(_yearly_stat_from_row(row))
     snapshots: list[BacktestSnapshot] = []
-    for row in rows:
-        snapshot = get_backtest_task(connection, row["task_id"])
-        if (
-            snapshot is None
-            or snapshot.result is None
-            or snapshot.yearly_stats is None
-        ):
+    for row in tasks:
+        task_id = row["task_id"]
+        if task_id not in results or task_id not in captured:
             raise ValueError("completed_backtest_result_missing")
-        snapshots.append(snapshot)
+        snapshots.append(BacktestSnapshot(
+            task=_task_from_row(row),
+            result=_result_from_row(results[task_id], checks[task_id]),
+            yearly_stats=tuple(yearly[task_id]),
+        ))
     return tuple(snapshots)
 
 
