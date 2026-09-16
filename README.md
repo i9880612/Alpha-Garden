@@ -10,7 +10,7 @@ Alpha Garden is a local research workspace for **WorldQuant BRAIN**, combining a
 
 [Features](#features) · [Interface tour](#interface-tour) · [Quick start](#quick-start) · [Research rules](#research-rules) · [Development](#development)
 
-> The screenshots below show the current frontend running with isolated, synthetic demonstration data. Formula expressions, metrics, curves and logs are examples—not real account records or evidence of investment performance. The regular application reads your configured research database; it does not substitute demo data.
+> Screenshots show the current frontend. The time-series and yearly/check screenshots use authorized, saved platform backtest data with formula identifiers omitted and original values preserved. Other screens use independent synthetic examples, including expressions, lineage and logs. Those example expressions did not produce the historical curve. The regular application reads your configured research database; it does not substitute demo data.
 
 ![Alpha Garden dashboard in English: research totals, 15-day backtest activity, grades and batch progress](assets/screenshots/dashboard.en-US.jpg)
 
@@ -46,6 +46,24 @@ Inspect the expression, backtest metrics, recorded checks, annual results and mu
 ![Formula detail drawer with expression, lineage, remaining attempts and metrics](assets/screenshots/formula-details.en-US.jpg)
 
 In normal service mode, opening a detail requests PnL; the other curves load when selected. Read-only mode shows saved evidence and does not fetch platform curves. Missing data stays unavailable rather than becoming a fabricated result.
+
+**Time series**
+
+An actual saved PnL series: 1,236 observations from January 2019 to December 2023, preserving the original dates and values.
+
+![Formula time series with the original saved historical PnL](assets/screenshots/formula-timeseries.en-US.jpg)
+
+**Yearly performance and checks**
+
+Five annual records and the saved backtest-check snapshot from the same formula. Pending checks retain their recorded status.
+
+![Five years of performance and the corresponding platform check results](assets/screenshots/formula-yearly-checks.en-US.jpg)
+
+**Research settings, mutation and descendants**
+
+An independent example shows field and operator references, replacement of `ts_mean` with `ts_decay_linear` inside a nested expression, and three direct descendants. These illustrative expressions and descendant metrics are separate from the historical backtest above.
+
+![Research settings, an operator replacement and direct descendant formulas](assets/screenshots/formula-research-lineage.en-US.jpg)
 
 ### Quality diagnosis
 
@@ -165,7 +183,7 @@ Focused optimization converges near duplicates within the same account, lineage 
 
 ## Local data and development
 
-Research records live in `data/alpha_garden.sqlite3`; account configuration lives in `.env`. Credentials, local databases, logs, model artifacts and the generated submitted-formula list are excluded from Git. Use synthetic data when sharing screenshots that would otherwise reveal research expressions or account records.
+Research records live in `data/alpha_garden.sqlite3`; account configuration lives in `.env`. Credentials, local databases, logs, model artifacts and the generated submitted-formula list are excluded from Git. Use independent synthetic examples for private expressions and account records. Share real backtest screenshots only with authorization, omit identifying details, and label their source accurately.
 
 | Area | Location |
 | --- | --- |
@@ -173,7 +191,7 @@ Research records live in `data/alpha_garden.sqlite3`; account configuration live
 | React console and frontend development guide | [webui/](webui/README.md) |
 | Backtest policy and research defaults | [config/](config/) |
 | Python verification suites | [tests/](tests/) |
-| Bilingual demonstration screenshots | [assets/screenshots/](assets/screenshots/) |
+| Bilingual interface screenshots | [assets/screenshots/](assets/screenshots/) |
 
 <a id="development"></a>
 For frontend development, run the read-only backend in one terminal and the Vite development server in another:

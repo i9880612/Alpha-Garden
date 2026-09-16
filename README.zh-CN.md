@@ -10,7 +10,7 @@ Alpha Garden 是面向 **WorldQuant BRAIN** 的本地公式研究工作台，将
 
 [功能概览](#功能概览) · [界面导览](#界面导览) · [快速开始](#快速开始) · [研究规则](#研究规则) · [开发说明](#开发说明)
 
-> 下方截图来自当前前端与隔离的示例环境。公式表达式、指标、曲线和日志均为合成示例，不包含真实账号研究记录，也不代表实际投资表现。正常运行的应用读取你配置的研究数据库，不会用示例数据替代真实结果。
+> 下方截图来自当前前端。时序及年度检查截图使用经授权的已保存平台回测数据，保留原始数值并隐去公式标识；其他界面中的表达式、父子关系和日志等使用独立的合成示例。示例表达式不是该历史曲线的来源。正常运行的应用读取你配置的研究数据库，不会用示例数据替代真实结果。
 
 ![Alpha Garden 中文工作台：研究统计、近 15 天回测趋势、评级分布和批次进度](assets/screenshots/dashboard.zh-CN.jpg)
 
@@ -46,6 +46,24 @@ Alpha Garden 是面向 **WorldQuant BRAIN** 的本地公式研究工作台，将
 ![公式详情：表达式、父代关系、剩余额度和回测指标](assets/screenshots/formula-details.zh-CN.jpg)
 
 普通服务模式下，打开详情会请求 PnL，其他曲线在选中对应页签时加载。只读模式仅展示已有证据，不获取平台曲线。缺失数据保持缺失，不补造结果。
+
+**时序曲线**
+
+展示已保存的真实 PnL，覆盖 2019 年 1 月至 2023 年 12 月，共 1,236 个数据点，保留原始日期和数值。
+
+![公式时序：保留原始历史数据的 PnL 曲线](assets/screenshots/formula-timeseries.zh-CN.jpg)
+
+**年度表现与检查结果**
+
+展示同一条公式的五年表现及已保存的回测检查快照，待定检查保留原始状态。
+
+![五年年度表现与对应的平台检查结果](assets/screenshots/formula-yearly-checks.zh-CN.jpg)
+
+**研究设置、本次变异与后代公式**
+
+独立示例展示字段与算子引用、嵌套表达式中的 `ts_mean → ts_decay_linear` 算子替换，以及三条直接后代。这些表达式与后代指标用于演示，与上面的历史回测分开。
+
+![研究设置、内部算子替换与直接衍生公式](assets/screenshots/formula-research-lineage.zh-CN.jpg)
 
 ### 质量诊断
 
@@ -165,7 +183,7 @@ alpha-garden web --read-only
 
 ## 本地数据与开发
 
-研究记录保存在 `data/alpha_garden.sqlite3`，账号配置保存在 `.env`。凭据、本地数据库、日志、模型工件和生成的已提交公式清单均排除在 Git 之外。分享界面时，含有真实表达式或账号记录的内容应换用独立的示例数据。
+研究记录保存在 `data/alpha_garden.sqlite3`，账号配置保存在 `.env`。凭据、本地数据库、日志、模型工件和生成的已提交公式清单均排除在 Git 之外。私有表达式和账号记录应使用独立示例；真实回测截图仅在获得授权后分享，隐去标识并准确注明来源。
 
 | 内容 | 位置 |
 | --- | --- |
@@ -173,7 +191,7 @@ alpha-garden web --read-only
 | React 前端与详细开发说明 | [webui/](webui/README.md) |
 | 回测策略和研究默认配置 | [config/](config/) |
 | Python 验证用例 | [tests/](tests/) |
-| 中英文示例截图 | [assets/screenshots/](assets/screenshots/) |
+| 中英文界面截图 | [assets/screenshots/](assets/screenshots/) |
 
 <a id="开发说明"></a>
 开发前端时，在两个终端分别启动只读后端和 Vite：
