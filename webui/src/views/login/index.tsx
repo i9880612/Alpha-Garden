@@ -3,6 +3,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { consoleReturnPath, login } from "@/api/auth";
 import AlphaLoading from "@/components/alpha-loading";
+import logoUrl from "@/assets/logo/logo-full.svg";
+import welcomeUrl from "@/assets/logo/welcome.svg";
 import { CanvasRevealEffect } from "./login-backdrop";
 import "./index.css";
 
@@ -62,13 +64,12 @@ export default function LoginPage() {
           initial={{ opacity: 0, x: -100 }}
           animate={{ opacity: 1, x: 0 }}
           transition={{ duration: 0.4, ease: "easeOut" }}
-          className="w-full max-w-sm space-y-6 text-center"
+          className="w-full max-w-xl space-y-6 text-center"
         >
           <div className="space-y-2">
-            <h1 className="text-[2.5rem] font-bold leading-[1.1] tracking-tight text-white">
-              Welcome to
-              <br />
-              Alpha Garden
+            <h1 className="ag-login-title">
+              <img className="ag-login-welcome" src={welcomeUrl} alt="Welcome to" width="245" height="70" />
+              <img className="ag-login-logo" src={logoUrl} alt="Alpha Garden" width="280" height="70" />
             </h1>
             <p className="mx-auto max-w-md text-sm leading-6 text-white/55">
               这里可以让 Alpha 变成可培育、可学习、可进化的研究资产

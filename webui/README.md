@@ -129,6 +129,8 @@ Idle streams send a heartbeat comment every ten seconds; comments do not refresh
 
 ## Frontend development
 
+Alpha Garden and Video Garden share a brush-calligraphy logo family. `src/assets/logo/` contains the outlined SVG wordmark, its standalone initial and the matching `Welcome to` lettering (without underline or leaves); no font download is needed. Both consoles use a 190 × 50 px sidebar wordmark container, a 36 × 36 px collapsed initial, a 280 px login wordmark and a 220 px loading wordmark. Welcome lettering and the login wordmark share a 70 px height and sit together in one centered row, scaling down proportionally on narrow screens without wrapping. The existing leaf favicon is unchanged.
+
 The saved theme and brand loading screen are applied by `index.html` before the application modules load. Route loading uses the same screen; table and settings reads use a compact version with the same centered layout. The logo stays still while a thin highlight sweeps beneath it. Loading ends when the relevant content is ready, without a fixed animation delay, and the highlight remains static for reduced-motion preferences.
 
 In separate terminals from the repository root:

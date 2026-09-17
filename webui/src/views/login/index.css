@@ -1,1 +1,4 @@
 .ag-login { color-scheme: dark; }
+.ag-login-title { display: grid; grid-template-columns: minmax(0, 245fr) minmax(0, 280fr); align-items: center; gap: 4px; width: min(529px, 100%); margin: 0 auto 20px; color: white; }
+.ag-login-title > img { display: block; width: 100%; height: auto; filter: invert(1); }
+.ag-login-welcome { transform: translateY(-4%); }
