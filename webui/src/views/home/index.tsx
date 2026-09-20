@@ -253,7 +253,11 @@ const HomePage = () => {
               </h2>
               <span className="ag-progress-summary">
                 {batch.data?.run
-                  ? `${zh ? "最近 · 第" : "Latest · Cycle "}${batch.data.run.current_cycle}${zh ? "轮" : ""}`
+                  ? batch.data.cycle_number != null
+                    ? `${zh ? "最近 · 第" : "Latest · Cycle "}${batch.data.cycle_number}${zh ? "轮" : ""}`
+                    : zh
+                      ? "尚未生成批次"
+                      : "No batch planned"
                   : batch.data
                     ? zh
                       ? "暂无运行"

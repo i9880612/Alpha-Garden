@@ -103,6 +103,8 @@ Formula categories and submission decisions reuse the engine's existing selector
 
 The dashboard uses five independent reads: activity and totals, submitted grades, research eligibility, batch progress, and recent results. Each section loads and fails independently. Grade and recent-result reads do not reconstruct optimization eligibility. Completed research snapshots are loaded in batches instead of querying each historical task separately.
 
+Batch progress shows the latest persisted batch of the current account's newest run, including running batches. Its `cycle_number` comes from the linked tasks; `run.current_cycle` counts settled cycles and can still be zero during the first batch. Completed and failed tasks count as finished, while queued and in-flight tasks remain in the planned total. A run without linked tasks shows "No batch planned" rather than cycle zero.
+
 The dashboard backtest trend covers the last 15 local calendar days, including today, with zero counts for days without completed backtests. Research summary totals and KPI sparklines retain their seven-day window. The trend reserves space for both endpoint date labels and skips intermediate labels when space is limited.
 
 Dashboard charts play ECharts entrance animations when their first data arrives. Live updates and grade legend filters reuse the existing series for transitions instead of restarting the entrance. Resize notifications only resize charts when their dimensions actually change. Reduced-motion preferences disable these animations.

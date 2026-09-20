@@ -276,11 +276,95 @@ class ConsoleReaderTests(unittest.TestCase):
             link = get_automated_run_backtest_by_task(connection, task_ids[0])
         progress = reader.dashboard_progress()
         self.assertEqual(progress["run"]["run_id"], link.run_id)
+        self.assertEqual(progress["cycle_number"], 1)
         self.assertEqual(progress["progress"], [
             {"source": "exploration", "completed": 2, "planned": 2},
             {"source": "sc", "completed": 0, "planned": 0},
             {"source": "mutation", "completed": 0, "planned": 0},
             {"source": "reversal", "completed": 0, "planned": 0}])
+
+    def _progress_run(self):
+        from execution.runs import AutomatedRunLimits, prepare_automated_run, start_automated_run
+
+        run = prepare_automated_run(
+            self.database, self.reader.paths.settings, account_scope="group-account",
+            limits=AutomatedRunLimits(
+                generation_count=10, backtest_count=10, max_cycles=3, max_backtests=30,
+                max_pending_seconds=600, max_consecutive_failures=2, max_request_failures=3,
+                max_in_flight_backtests=3, exploration_seed_attempt_multiplier=4,
+                exploration_percent=30, self_correlation_percent=30, mutation_percent=40,
+                direction_validation_percent=3, real_backtests_authorized=True,
+            ), created_at="2026-09-01T00:00:00+00:00",
+        )
+        return start_automated_run(self.database, run.run_id, started_at="2026-09-01T00:00:01+00:00")
+
+    def test_dashboard_progress_counts_first_batch_before_settlement(self):
+        from persistence.runs import AutomatedRunBacktestRecord, attach_backtest_to_automated_run
+
+        run = self._progress_run()
+        with open_database(self.database) as connection:
+            parent = complete_candidate(connection, prepare_candidate(connection))
+            mutation = prepare_candidate(connection, parent=parent, start=False)
+            sc = prepare_candidate(connection, parent=parent)
+            reversal = prepare_candidate(connection, parent=parent)
+            connection.execute("UPDATE backtest_mutations SET action=? WHERE child_task_id=?",
+                               ("self_correlation_time_smoothing", sc.task.task_id))
+            connection.execute("UPDATE backtest_mutations SET action=? WHERE child_task_id=?",
+                               ("direction_reversal", reversal.task.task_id))
+            fail_backtest_task(connection, reversal.task.task_id, failure_code="platform_error",
+                               failure_message="Test failure", observed_at=FINISHED)
+            for item in (parent, mutation, sc, reversal):
+                attach_backtest_to_automated_run(connection,
+                    AutomatedRunBacktestRecord(run.run_id, item.task.task_id, 1))
+            # Unlinked results do not belong to this batch.
+            complete_candidate(connection, prepare_candidate(connection))
+        before = self.database.read_bytes()
+        progress = self.reader.dashboard_progress()
+        self.assertEqual(progress["run"]["current_cycle"], 0)
+        self.assertEqual(progress["cycle_number"], 1)
+        self.assertEqual(progress["progress"], [
+            {"source": "exploration", "completed": 1, "planned": 1},
+            {"source": "sc", "completed": 0, "planned": 1},
+            {"source": "mutation", "completed": 0, "planned": 1},
+            {"source": "reversal", "completed": 1, "planned": 1}])
+        self.assertEqual(before, self.database.read_bytes())
+
+    def test_dashboard_progress_uses_latest_batch_even_with_older_unsettled_work(self):
+        from persistence.runs import AutomatedRunBacktestRecord, attach_backtest_to_automated_run
+
+        run = self._progress_run()
+        with open_database(self.database) as connection:
+            older = prepare_candidate(connection, start=False)
+            record_submission_unknown(connection, older.task.task_id, observed_at=FINISHED)
+            current = complete_candidate(connection, prepare_candidate(connection))
+            queued = prepare_candidate(connection, start=False)
+            for item, cycle_number in ((older, 1), (current, 2), (queued, 2)):
+                attach_backtest_to_automated_run(connection,
+                    AutomatedRunBacktestRecord(run.run_id, item.task.task_id, cycle_number))
+        progress = self.reader.dashboard_progress()
+        self.assertEqual(progress["run"]["current_cycle"], 0)
+        self.assertEqual(progress["cycle_number"], 2)
+        self.assertEqual(progress["progress"][0], {"source": "exploration", "completed": 1, "planned": 2})
+        with open_database(self.database) as connection:
+            record_submission_accepted(connection, queued.task.task_id, remote_id="next-task", observed_at=FINISHED)
+            complete_candidate(connection, queued)
+        self.assertEqual(self.reader.dashboard_progress()["progress"][0],
+                         {"source": "exploration", "completed": 2, "planned": 2})
+
+    def test_dashboard_progress_distinguishes_missing_run_and_unplanned_batch(self):
+        empty = self.reader.dashboard_progress()
+        self.assertIsNone(empty["run"])
+        self.assertIsNone(empty["cycle_number"])
+        run = self._progress_run()
+        unplanned = self.reader.dashboard_progress()
+        self.assertEqual(unplanned["run"]["run_id"], run.run_id)
+        self.assertIsNone(unplanned["cycle_number"])
+        self.assertTrue(all(row["planned"] == row["completed"] == 0 for row in unplanned["progress"]))
+        other_env = Path(self.folder.name) / "other.env"
+        other_env.write_text("WQB_ACCOUNT_SCOPE=another-account\nWQB_BASE_URL=https://example.invalid\n"
+                             "WQB_SESSION_TOKEN=synthetic-console-secret\n", encoding="utf-8")
+        other_reader = ConsoleReader(replace(self.reader.paths, environment=other_env))
+        self.assertIsNone(other_reader.dashboard_progress()["run"])
 
     def test_dashboard_recent_expressions_are_limited_and_account_scoped(self):
         with open_database(self.database) as connection:

@@ -140,13 +140,15 @@ def archive_facts(connection, account_scope):
     """, (account_scope,))]
 
 
-def cycle_backtest_facts(connection, account_scope, run_id, cycle_number):
+def latest_cycle_backtest_facts(connection, account_scope, run_id):
     return [dict(row) for row in connection.execute("""
-        SELECT t.status, m.action FROM automated_run_backtests l
+        SELECT l.cycle_number, t.status, m.action FROM automated_run_backtests l
         JOIN backtest_tasks t ON t.task_id=l.task_id
         LEFT JOIN backtest_mutations m ON m.child_task_id=t.task_id
-        WHERE t.account_scope=? AND l.run_id=? AND l.cycle_number=?
-    """, (account_scope, run_id, cycle_number))]
+        WHERE t.account_scope=? AND l.run_id=? AND l.cycle_number=(
+            SELECT MAX(cycle_number) FROM automated_run_backtests WHERE run_id=l.run_id
+        )
+    """, (account_scope, run_id))]
 
 
 def recent_backtest_facts(connection, account_scope):

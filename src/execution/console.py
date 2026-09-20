@@ -21,7 +21,7 @@ from persistence.console_research import catalog_page, formula_children_page, fo
 from generation.formula import analyze_formula
 from generation.parser import parse_formula
 from persistence.runs import get_automated_run
-from persistence.console import (archive_facts, attempted_task_ids, completed_dates, cycle_backtest_facts, failed_backtest_checks, formula_facts, formula_page,
+from persistence.console import (archive_facts, attempted_task_ids, completed_dates, latest_cycle_backtest_facts, failed_backtest_checks, formula_facts, formula_page,
                                  read_console_database, recent_backtest_facts, run_facts,
                                  run_backtest_counts, submitted_facts, submission_facts)
 from submission.formal import assess_formal_check_payload
@@ -291,10 +291,11 @@ class ConsoleReader:
         with read_console_database(self.paths.database) as connection:
             runs = run_facts(connection, account, limit=1)
             latest = runs[0] if runs else None
-            cycle = cycle_backtest_facts(connection, account, latest["run_id"], latest["current_cycle"]) if latest else []
+            # current_cycle counts settlements, not the latest persisted batch.
+            cycle = latest_cycle_backtest_facts(connection, account, latest["run_id"]) if latest else []
         planned = Counter(_source(row["action"]) for row in cycle)
         completed = Counter(_source(row["action"]) for row in cycle if row["status"] in {"completed", "failed"})
-        return {"run": latest, "progress": [
+        return {"run": latest, "cycle_number": cycle[0]["cycle_number"] if cycle else None, "progress": [
             {"source": source, "completed": completed[source], "planned": planned[source]}
             for source in ("exploration", "sc", "mutation", "reversal")]}
 

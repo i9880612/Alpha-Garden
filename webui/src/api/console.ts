@@ -27,7 +27,7 @@ export interface SubmittedGrades { grades: { label: string; value: number }[] }
 export interface DashboardResearch {
   observed_at: string; optimization_parents: number; optimization_attempts: number; manual_candidates: number;
 }
-export interface DashboardProgress { progress: Progress[]; run: Run | null }
+export interface DashboardProgress { progress: Progress[]; run: Run | null; cycle_number: number | null }
 export interface RecentBacktests { items: { task_id: string; alpha_id: string | null; formula: string; grade: string | null; sharpe: number | null }[] }
 export interface BacktestPolicy {
   catalogContext: { instrumentType: string; region: string; universe: string; delay: number };
