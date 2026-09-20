@@ -805,6 +805,46 @@ class AutomatedRunLaunchTests(unittest.TestCase):
         self._assert_request_failure_resume(
             "worldquant_authentication_request_failed:SSLEOFError", None, pending=False)
 
+    def test_resume_authentication_failure_before_candidate_planning(self):
+        clock = FakeTime("2026-08-30T00:00:00+08:00")
+        client = LaunchClient()
+        error = WorldQuantRequestError("worldquant_authentication_request_failed",
+            retryable=True, outcome_unknown=False, transport_error_type="SSLEOFError")
+        with patch.object(client, "authenticate", side_effect=error) as authenticate:
+            stopped = launch_automated_run(self.database_path, self.settings_path,
+                self.environment_path, limits=self._limits(), clock=clock.now,
+                waiter=clock.wait, client_factory=lambda settings: client)
+        self.assertEqual(authenticate.call_count, 3)
+        self.assertEqual(stopped.run.status, "failed")
+        self.assertEqual(stopped.run.stop_reason, "request_failure_limit_reached")
+        self.assertEqual(stopped.run.current_cycle, 0)
+        self.assertEqual(client.calls, [])
+        with open_database(self.database_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM automated_run_backtests").fetchone()[0], 0)
+
+        # An explicit retry still stops at the frozen failure limit if the outage persists.
+        with patch.object(client, "authenticate", side_effect=error) as authenticate:
+            failed_retry = resume_automated_run(self.database_path, self.environment_path,
+                stopped.run.run_id, clock=clock.now, waiter=clock.wait,
+                client_factory=lambda settings: client)
+        self.assertEqual(authenticate.call_count, 3)
+        self.assertEqual(failed_retry.run.status, "failed")
+        self.assertEqual(failed_retry.run.request_failure_count, 3)
+
+        completion = resume_automated_run(self.database_path, self.environment_path,
+            stopped.run.run_id, clock=clock.now, waiter=clock.wait,
+            client_factory=lambda settings: client)
+        self.assertEqual(completion.run.status, "completed")
+        self.assertEqual(completion.run.run_id, stopped.run.run_id)
+        self.assertEqual(completion.run.settings_policy_json, stopped.run.settings_policy_json)
+        self.assertEqual(completion.run.max_backtests, stopped.run.max_backtests)
+        self.assertEqual(completion.run.max_cycles, stopped.run.max_cycles)
+        self.assertFalse(completion.run.automatic_submissions_enabled)
+        self.assertEqual(client.calls, ["authenticate", "submit", "poll", "detail", "yearly_stats"])
+        with open_database(self.database_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM automated_runs").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM automated_run_backtests").fetchone()[0], 1)
+
     def test_resume_network_failure_does_not_reopen_settled_cancelled_batch(self):
         self._assert_request_failure_resume(
             "worldquant_poll_request_failed:SSLEOFError", None, pending=False, settled=True)

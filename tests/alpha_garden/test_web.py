@@ -218,6 +218,48 @@ class ConsoleHTTPTests(unittest.TestCase):
             resume.assert_not_called()
         self.assertEqual(self.server.jobs.snapshot(), {"items": [], "busy": False})
 
+    def test_http_resume_authentication_failure_without_planned_tasks(self):
+        from execution.console import ConsolePaths, ConsoleReader
+        from execution.runs import fail_automated_run, prepare_automated_run, start_automated_run
+        from tests.execution.test_launch import AutomatedRunLaunchTests, FakeTime, LaunchClient
+
+        fixture = AutomatedRunLaunchTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        reader = ConsoleReader(ConsolePaths(fixture.database_path, fixture.settings_path,
+            self.reader.paths.run_config, fixture.environment_path))
+        self.server.reader = self.server.jobs.reader = reader
+        run = prepare_automated_run(fixture.database_path, fixture.settings_path,
+            account_scope=reader.account_scope, limits=fixture._limits(),
+            created_at="2026-08-30T00:00:00+08:00")
+        start_automated_run(fixture.database_path, run.run_id, started_at="2026-08-30T00:00:01+08:00")
+        fail_automated_run(fixture.database_path, run.run_id,
+            failed_at="2026-08-30T00:00:10+08:00", reason="request_failure_limit_reached",
+            request_failure_code="worldquant_authentication_request_failed:SSLEOFError")
+        row = self.request("/api/runs")[1]["items"][0]
+        self.assertTrue(row["can_resume"])
+        self.assertEqual(row["planned"], 0)
+        self.server.jobs.read_only = False
+        headers = {"Content-Type": "application/json", "Idempotency-Key": "resume-before-planning",
+                   "X-Console-Token": self.server.csrf_token}
+        client = LaunchClient()
+        clock = FakeTime("2026-08-30T00:01:00+08:00")
+        with patch("execution.launch._default_client_factory", return_value=client), \
+                patch.object(self.server.jobs, "_clock", clock.now), \
+                patch.object(self.server.jobs, "_wait", clock.wait):
+            self.assertEqual(self.request("/api/jobs", "POST",
+                {"kind": "resume", "run_id": run.run_id}, headers)[0], 202)
+            self.server.jobs._thread.join(10)
+            self.assertFalse(self.server.jobs.snapshot()["busy"])
+        job = self.request("/api/jobs")[1]["items"][0]
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["result"]["run_id"], run.run_id)
+        self.assertTrue(job["result"]["completed"])
+        row = self.request("/api/runs")[1]["items"][0]
+        self.assertEqual((row["status"], row["finished"], row["planned"]), ("completed", 1, 1))
+        self.assertEqual(client.calls.count("authenticate"), 1)
+        self.assertEqual(client.calls.count("submit"), 1)
+
     def test_event_stream_notifies_changes_without_running_business_reads(self):
         def frame(response):
             while True:

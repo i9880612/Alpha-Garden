@@ -942,8 +942,10 @@ def resume_request_failed_run(database_path: str | Path, run_id: str) -> None:
         if list_active_automated_runs(connection):
             raise ValueError("automated_run_already_active")
         links = list_automated_run_backtests(connection, run_id)
-        if not any(get_backtest_task(connection, link.task_id).task.failure_code
-                   == "automated_run_stopped_before_submission" for link in links):
+        # Authentication can exhaust retries before any candidates are planned.
+        # That empty plan still needs reopening under its original authority.
+        if links and not any(get_backtest_task(connection, link.task_id).task.failure_code
+                             == "automated_run_stopped_before_submission" for link in links):
             return
         if not run.real_backtests_authorized or automated_run_has_unresolved_formal_submission(connection, run_id):
             raise ValueError("automated_run_request_failure_resume_blocked")
