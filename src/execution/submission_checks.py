@@ -140,24 +140,33 @@ def _check_needs_retry(assessment, research_only: bool) -> bool:
         and dict(assessment.statuses).get("SELF_CORRELATION") not in {"PASS", "FAIL"})
 
 
+def next_deferred_submission_check(connection, *, account_scope: str, observed_at: str,
+                                   run_id: str | None = None) -> tuple[str, float] | None:
+    """Select saved retryable work and its delay without changing any evidence."""
+    rows = connection.execute(
+        "SELECT c.task_id FROM submission_checks c JOIN backtest_tasks t ON t.task_id=c.task_id "
+        "LEFT JOIN automated_run_backtests b ON b.task_id=c.task_id "
+        "WHERE t.account_scope=? AND t.status='completed' AND c.attempt_count>=? "
+        "AND (? IS NULL OR b.run_id=?) "
+        "ORDER BY c.observed_at, c.task_id", (account_scope, MAX_SUBMISSION_CHECK_ATTEMPTS, run_id, run_id),
+    ).fetchall()
+    selected = None
+    for row in rows:
+        snapshot = get_backtest_task(connection, row["task_id"])
+        delay = remaining_submission_check_seconds(connection, snapshot, observed_at, include_deferred=True)
+        if delay is not None and (selected is None or delay < selected[1]):
+            selected = (row["task_id"], delay)
+            if delay == 0:
+                break
+    return selected
+
+
 def advance_deferred_submission_check(database_path, client, *, account_scope: str, observed_at: str,
                                       run_id: str | None = None) -> bool:
     """Read at most one due deferred check; never wait or reopen a backtest."""
     with open_database(database_path) as connection:
-        rows = connection.execute(
-            "SELECT c.task_id FROM submission_checks c JOIN backtest_tasks t ON t.task_id=c.task_id "
-            "LEFT JOIN automated_run_backtests b ON b.task_id=c.task_id "
-            "WHERE t.account_scope=? AND t.status='completed' AND c.attempt_count>=? "
-            "AND (? IS NULL OR b.run_id=?) "
-            "ORDER BY c.observed_at, c.task_id", (account_scope, MAX_SUBMISSION_CHECK_ATTEMPTS, run_id, run_id),
-        ).fetchall()
-        selected = None
-        for row in rows:
-            snapshot = get_backtest_task(connection, row["task_id"])
-            delay = remaining_submission_check_seconds(connection, snapshot, observed_at, include_deferred=True)
-            if delay == 0:
-                selected = row["task_id"]
-                break
-    return selected is not None and check_completed_backtest(
-        database_path, client, selected, observed_at=observed_at, recovered=True, include_deferred=True,
+        selected = next_deferred_submission_check(connection, account_scope=account_scope,
+                                                  observed_at=observed_at, run_id=run_id)
+    return selected is not None and selected[1] == 0 and check_completed_backtest(
+        database_path, client, selected[0], observed_at=observed_at, recovered=True, include_deferred=True,
     )

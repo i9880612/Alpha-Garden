@@ -16,6 +16,7 @@ from execution.cycle_backtests import failed_automated_run_has_local_work
 from execution.catalog import load_generation_catalog
 from execution.process_lock import exclusive_run_process
 from execution.run_recovery import settle_stopped_run_results
+from execution.submission_checks import next_deferred_submission_check
 from execution.runs import (
     AutomatedRunLimits,
     AutomatedRunPaused,
@@ -200,6 +201,10 @@ def _require_run_account_scope(
 def run_resume_rejection(connection, run: AutomatedRunRecord) -> str | None:
     """Read the existing recovery boundary without changing the run or its tasks."""
     if run.status == "completed":
+        if (run.self_correlation_plan_json is not None
+                and next_deferred_submission_check(connection, account_scope=run.account_scope,
+                    run_id=run.run_id, observed_at=_utc_now().isoformat()) is not None):
+            return None
         return "automated_run_already_completed"
     if (run.status == "failed"
             and run.stop_reason not in {"submission_reconciliation_required", "request_failure_limit_reached"}

@@ -8,22 +8,23 @@ import pytest
 from execution.backtest_batches import AutomatedCandidateBacktest, prepare_automated_candidate_backtest_batch
 from execution.backtests import record_submission_accepted
 from execution.cycles import plan_automated_cycle
+from execution.console import ConsolePaths, ConsoleReader
 from execution.cycle_backtests import settle_failed_automated_cycle_if_terminal
-from execution.launch import launch_automated_run
+from execution.launch import launch_automated_run, resume_automated_run
 from execution.run_config import load_automated_run_limits
 from execution.runner import run_automated_run
 from execution.run_recovery import advance_stopped_run_check
-from execution.runs import fail_automated_run, prepare_automated_run, start_automated_run
+from execution.runs import fail_automated_run, prepare_automated_run, start_automated_run, record_automated_cycle_settlement
 from execution.submission_checks import check_completed_backtest, advance_deferred_submission_check
 from generation.candidate import exploration_candidate
 from generation.parser import parse_formula
 from persistence.backtests import get_backtest_task
 from persistence.database import open_database
 from persistence.pnl import save_pnl_series
-from persistence.runs import get_automated_run, get_automated_cycle_settlement
-from persistence.submission_checks import get_submission_check
+from persistence.runs import get_automated_run, get_automated_cycle_settlement, list_automated_run_backtests
+from persistence.submission_checks import get_submission_check, save_submission_check, SubmissionCheckRecord
 from persistence.submission_queue import list_formal_submission_queue
-from persistence.submitted_sync import complete_submitted_sync
+from persistence.submitted_sync import complete_submitted_sync, invalidate_submitted_sync
 from tests.execution import test_sc_research as sc_fixture
 from tests.execution.test_launch import FakeTime, LaunchClient
 from tests.learning.test_seed_correlation import series
@@ -188,3 +189,153 @@ def test_sc_deferred_checks_keep_owner_scope_and_stop_after_six_attempts(researc
         assert get_backtest_task(connection, task_id).task.status == "completed"
         assert get_submission_check(connection, task_id).retry_not_before is None
         assert list_formal_submission_queue(connection) == ()
+
+
+@pytest.fixture
+def finished_research(research):
+    """Finish the frozen six-backtest plan with saved, deferred SC checks."""
+    database = research.fixture.database_path
+    run = research.start()
+    time = FakeTime("2026-08-30T00:10:00+08:00")
+    client = SimpleNamespace(fetch_formal_submission_check=Mock(side_effect=WorldQuantRequestError(
+        "temporary", status_code=503, retryable=True, outcome_unknown=False)))
+    for cycle in range(1, 4):
+        plan = plan_automated_cycle(database, run_id=run.run_id, created_at=time.now().isoformat())
+        time.wait(60)
+        research.fixture._complete_plan(plan, observed_at=time.now().isoformat())
+        for _ in range(3):
+            for item in plan.backtests:
+                assert check_completed_backtest(database, client, item.task.task_id, observed_at=time.now().isoformat())
+            time.wait(120)
+        with open_database(database) as connection:
+            record_automated_cycle_settlement(connection, run.run_id, cycle_number=cycle,
+                outcome="not_qualified", frontier_advanced=False, observed_at=time.now().isoformat())
+    environment = database.parent / "resume.env"
+    environment.write_text("WQB_ACCOUNT_SCOPE=group-account\nWQB_BASE_URL=https://api.worldquantbrain.com\n"
+                           "WQB_SESSION_TOKEN=synthetic-test-token\n", encoding="utf-8")
+    with open_database(database) as connection:
+        save_pnl_series(connection, replace(series("submitted-alpha", [i % 3 - 1 for i in range(300)],
+            account="group-account"), observed_at=time.now().isoformat()))
+        complete_submitted_sync(connection, account_scope="group-account", alpha_ids=("submitted-alpha",),
+                                completed_at=time.now().isoformat())
+        frozen = get_automated_run(connection, run.run_id)
+        assert frozen.status == "completed"
+    return database, environment, frozen, time
+
+
+def test_completed_sc_resume_collects_due_checks_without_reopening_research(finished_research, research):
+    database, environment, frozen, time = finished_research
+    time.wait(600)
+    client = LaunchClient()
+    client.fetch_formal_submission_check = Mock(return_value=FormalCheckObservation(low_quality_check(), None))
+    reader = ConsoleReader(ConsolePaths(database, research.fixture.policy_path,
+        Path(__file__).resolve().parents[2] / "config/run.default.json", environment))
+    # An unrelated deferred candidate in the same account must not be collected.
+    unrelated = SubmissionCheckRecord(research.parent_id, frozen.finished_at, None,
+                                     "temporary", 3, time.now().isoformat())
+    with open_database(database) as connection:
+        save_submission_check(connection, replace(unrelated, attempt_count=2, retry_not_before=None))
+        save_submission_check(connection, unrelated)
+        links = list_automated_run_backtests(connection, frozen.run_id)
+        snapshots = [get_backtest_task(connection, link.task_id) for link in links]
+        settlements = [get_automated_cycle_settlement(connection, frozen.run_id, cycle) for cycle in range(1, 4)]
+    before_read = database.read_bytes()
+    assert reader.require_run(frozen.run_id)["can_resume"]
+    assert database.read_bytes() == before_read
+    result = resume_automated_run(database, environment, frozen.run_id,
+        clock=time.now, waiter=time.wait, client_factory=lambda _: client)
+    assert result.run == frozen
+    assert result.platform_request_count == 6
+    assert result.authentication_performed
+    assert client.fetch_formal_submission_check.call_count == 6
+    assert set(client.calls) == {"authenticate"}
+    with open_database(database) as connection:
+        assert list_automated_run_backtests(connection, frozen.run_id) == links
+        assert [get_backtest_task(connection, link.task_id) for link in links] == snapshots
+        assert [get_automated_cycle_settlement(connection, frozen.run_id, cycle) for cycle in range(1, 4)] == settlements
+        assert all(get_submission_check(connection, link.task_id).attempt_count == 4 for link in links)
+        assert get_submission_check(connection, research.parent_id) == unrelated
+        assert list_formal_submission_queue(connection) == ()
+    assert not reader.require_run(frozen.run_id)["can_resume"]
+    factory = Mock()
+    with pytest.raises(ValueError, match="automated_run_already_completed"):
+        resume_automated_run(database, environment, frozen.run_id, client_factory=factory)
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("response", ["503", "quality_failed_sc_pending"])
+def test_completed_sc_resume_respects_cooldown_and_cumulative_check_limit(finished_research, response):
+    database, environment, frozen, time = finished_research
+    time.wait(600)
+    client = LaunchClient()
+    if response == "503":
+        client.fetch_formal_submission_check = Mock(side_effect=WorldQuantRequestError(
+            "temporary", status_code=503, retryable=True, outcome_unknown=False, retry_after_seconds=1200))
+    else:
+        client.fetch_formal_submission_check = Mock(return_value=FormalCheckObservation(low_quality_check("PENDING"), 1200))
+    for attempt in range(4, 7):
+        result = resume_automated_run(database, environment, frozen.run_id,
+            clock=time.now, waiter=time.wait, client_factory=lambda _: client)
+        assert result.run == frozen
+        assert result.platform_request_count == 6
+        with open_database(database) as connection:
+            checks = [get_submission_check(connection, link.task_id)
+                      for link in list_automated_run_backtests(connection, frozen.run_id)]
+        assert all(check.attempt_count == attempt for check in checks)
+        if attempt < 6:
+            # Even after the default cooldown, a longer Retry-After still applies.
+            time.wait(600)
+            early_client = LaunchClient()
+            early_client.fetch_formal_submission_check = Mock()
+            waits = list(time.waits)
+            early = resume_automated_run(database, environment, frozen.run_id,
+                clock=time.now, waiter=time.wait, client_factory=lambda _: early_client)
+            assert early.run == frozen
+            assert early.platform_request_count == 0
+            assert early_client.calls == []
+            early_client.fetch_formal_submission_check.assert_not_called()
+            assert time.waits == waits
+            time.wait(600)
+    assert client.fetch_formal_submission_check.call_count == 18
+    assert all(check.retry_not_before is None for check in checks)
+    factory = Mock()
+    with pytest.raises(ValueError, match="automated_run_already_completed"):
+        resume_automated_run(database, environment, frozen.run_id, client_factory=factory)
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_completed_sc_resume_stops_on_account_error_without_changing_terminal_run(finished_research, status):
+    database, environment, frozen, time = finished_research
+    time.wait(600)
+    client = LaunchClient()
+    error = WorldQuantRequestError("account_error", status_code=status, retryable=False, outcome_unknown=False)
+    client.fetch_formal_submission_check = Mock(side_effect=error)
+    with pytest.raises(WorldQuantRequestError) as raised:
+        resume_automated_run(database, environment, frozen.run_id,
+            clock=time.now, waiter=time.wait, client_factory=lambda _: client)
+    assert raised.value is error
+    client.fetch_formal_submission_check.assert_called_once()
+    assert client.calls == ["authenticate"]
+    with open_database(database) as connection:
+        assert get_automated_run(connection, frozen.run_id) == frozen
+        assert all(get_submission_check(connection, link.task_id).attempt_count == 3
+                   for link in list_automated_run_backtests(connection, frozen.run_id))
+
+
+@pytest.mark.parametrize("boundary", ["account", "baseline"])
+def test_completed_sc_resume_preserves_account_and_baseline_gate(finished_research, boundary):
+    database, environment, frozen, time = finished_research
+    if boundary == "account":
+        environment.write_text(environment.read_text(encoding="utf-8").replace(
+            "WQB_ACCOUNT_SCOPE=group-account", "WQB_ACCOUNT_SCOPE=other-account"), encoding="utf-8")
+        expected = "automated_run_account_scope_mismatch"
+    else:
+        with open_database(database) as connection:
+            invalidate_submitted_sync(connection, account_scope="group-account")
+        expected = "submitted_baseline"
+    factory = Mock()
+    with pytest.raises(ValueError, match=expected):
+        resume_automated_run(database, environment, frozen.run_id,
+            clock=time.now, waiter=time.wait, client_factory=factory)
+    factory.assert_not_called()

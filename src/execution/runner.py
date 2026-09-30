@@ -19,7 +19,9 @@ from execution.backtest_reconciliation import (
 from execution.driver import advance_automated_run
 from execution.progress import RunProgress
 from execution.run_recovery import advance_stopped_run_backtest, advance_stopped_run_check, remaining_stopped_run_seconds
-from execution.submission_checks import advance_deferred_submission_check
+from execution.submission_checks import (
+    advance_deferred_submission_check, check_completed_backtest, next_deferred_submission_check,
+)
 from execution.request_failures import (
     handle_automated_request_failure,
     remaining_automated_request_retry_seconds,
@@ -79,15 +81,7 @@ def run_automated_run(
     if initial_run.stop_reason == "user_paused":
         raise AutomatedRunPaused()
     progress = RunProgress(database_path, run_id)
-    if initial_run.status == "completed":
-        return _completion(
-            database_path,
-            initial_run,
-            step_count=0,
-            platform_request_count=0,
-            authentication_performed=False,
-        )
-    if not initial_run.real_backtests_authorized:
+    if initial_run.status != "completed" and not initial_run.real_backtests_authorized:
         raise ValueError("automated_run_backtests_not_authorized")
 
     authentication_performed = False
@@ -98,6 +92,24 @@ def run_automated_run(
         observed = _aware_time(current_time())
         run = _load_run(database_path, run_id)
         if run.status == "completed":
+            # Explicit recovery can collect due evidence without reopening the
+            # frozen plan. Future retries remain saved for a later invocation.
+            selected = None
+            if run.self_correlation_plan_json is not None:
+                with open_database(database_path) as connection:
+                    selected = next_deferred_submission_check(connection,
+                        account_scope=run.account_scope, run_id=run.run_id, observed_at=observed.isoformat())
+            if selected is not None and selected[1] == 0:
+                if not run.real_backtests_authorized:
+                    raise ValueError("automated_run_backtests_not_authorized")
+                if not client.authenticated:
+                    client.authenticate()
+                    authentication_performed = True
+                if check_completed_backtest(database_path, client, selected[0],
+                        observed_at=observed.isoformat(), recovered=True, include_deferred=True):
+                    step_count += 1
+                    platform_request_count += 1
+                    continue
             return _completion(
                 database_path,
                 run,
