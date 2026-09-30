@@ -16,6 +16,7 @@ from execution.backtest_batches import AutomatedCandidateBacktest, prepare_autom
 from execution.cycles import plan_automated_cycle
 from execution.cycle_backtests import advance_automated_cycle_backtests
 from execution.driver import advance_automated_run
+from execution.launch import launch_automated_run, resume_automated_run
 from execution.run_config import load_automated_run_limits
 from execution.runs import prepare_automated_run, start_automated_run, record_automated_cycle_settlement
 from execution.sc_research import SelfCorrelationResearchPlan, preview_self_correlation_research_plan
@@ -27,9 +28,10 @@ from persistence.database import open_database
 from persistence.runs import get_automated_run, replace_automated_run
 from persistence.seeds import list_signal_seeds
 from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
-from persistence.pnl import list_pnl_series
+from persistence.pnl import list_pnl_series, save_pnl_series
 from persistence.submission_queue import list_formal_submission_queue
 from persistence.submissions import list_platform_submitted_alphas, record_platform_submitted_alphas
+from persistence.submitted_sync import complete_submitted_sync, invalidate_submitted_sync
 from selection.settings import load_backtest_settings_policy
 from worldquant.backtests import BacktestSettings, STANDARD_REGULAR_CHECK_NAMES
 from worldquant.pnl import PnlObservation
@@ -104,6 +106,60 @@ class SelfCorrelationResearchTests(unittest.TestCase):
             after = tuple(c.execute("SELECT count(*) FROM " + t).fetchone()[0]
                           for t in ("backtest_tasks", "signal_seeds", "automated_runs"))
         self.assertEqual(before, after)
+
+    def test_launch_and_resume_keep_baseline_gate_and_frozen_sc_budget(self):
+        f = self.fixture
+        environment = f.database_path.parent / "fixture.env"
+        environment.write_text("WQB_ACCOUNT_SCOPE=group-account\n"
+                               "WQB_BASE_URL=https://api.worldquantbrain.com\n"
+                               "WQB_SESSION_TOKEN=synthetic-test-token\n", encoding="utf-8")
+        config = Path(__file__).resolve().parents[2] / "config" / "run.default.json"
+        limits = load_automated_run_limits(config, cycles=3,
+            self_correlation_parent_task_id=self.parent_id)
+        clock = lambda: datetime.fromisoformat("2026-08-30T00:04:00+08:00")
+        factory = Mock(side_effect=RuntimeError("fixture_stop_before_platform_access"))
+        with self.assertRaisesRegex(ValueError, "submitted_baseline_incomplete"):
+            launch_automated_run(f.database_path, f.policy_path, environment,
+                limits=limits, clock=clock, client_factory=factory)
+        factory.assert_not_called()
+        with open_database(f.database_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM automated_runs").fetchone()[0], 0)
+            self.assertEqual(list_signal_seeds(connection), ())
+            save_pnl_series(connection, replace(series("submitted-alpha", [i % 3 - 1 for i in range(300)],
+                account="group-account"), observed_at="2026-08-30T00:03:00+08:00"))
+            complete_submitted_sync(connection, account_scope="group-account",
+                alpha_ids=("submitted-alpha",), completed_at="2026-08-30T00:03:00+08:00")
+        created = []
+        with self.assertRaisesRegex(RuntimeError, "fixture_stop_before_platform_access"):
+            launch_automated_run(f.database_path, f.policy_path, environment,
+                limits=limits, clock=clock, client_factory=factory, run_created=created.append)
+        factory.assert_called_once()
+        frozen = created[0]
+        self.assertEqual((frozen.backtest_count, frozen.max_cycles, frozen.max_backtests), (2, 3, 6))
+        self.assertFalse(frozen.automatic_submissions_enabled)
+        self.assertEqual(SelfCorrelationResearchPlan.from_json(frozen.self_correlation_plan_json).remaining_attempts, 20)
+        factory.reset_mock()
+        with self.assertRaisesRegex(ValueError, "existing_run_active_resume_required"):
+            launch_automated_run(f.database_path, f.policy_path, environment,
+                limits=limits, clock=clock, client_factory=factory)
+        factory.assert_not_called()
+        with open_database(f.database_path) as connection:
+            self.assertEqual(get_automated_run(connection, frozen.run_id), frozen)
+            invalidate_submitted_sync(connection, account_scope="group-account")
+        with self.assertRaisesRegex(ValueError, "submitted_baseline_incomplete"):
+            resume_automated_run(f.database_path, environment, frozen.run_id, client_factory=factory)
+        factory.assert_not_called()
+        with open_database(f.database_path) as connection:
+            self.assertEqual(get_automated_run(connection, frozen.run_id), frozen)
+            complete_submitted_sync(connection, account_scope="group-account",
+                alpha_ids=("submitted-alpha",), completed_at="2026-08-30T00:04:00+08:00")
+        with self.assertRaisesRegex(RuntimeError, "fixture_stop_before_platform_access"):
+            resume_automated_run(f.database_path, environment, frozen.run_id, client_factory=factory)
+        factory.assert_called_once()
+        with open_database(f.database_path) as connection:
+            self.assertEqual(get_automated_run(connection, frozen.run_id), frozen)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM automated_runs").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM backtest_mutations").fetchone()[0], 0)
 
     def test_frozen_six_trials_keep_original_parent_after_frontier_advances_and_resume(self):
         preview = self.preview()

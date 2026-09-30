@@ -495,6 +495,24 @@ class WorldQuantClientTests(unittest.TestCase):
             },
         )
 
+    def test_submitted_alpha_request_matches_observed_browser_query(self) -> None:
+        payload = {"count": 0, "next": None, "previous": None, "results": []}
+        executor = FakeExecutor(self._response(200, {}), self._response(200, payload))
+        client = self._client(executor)
+        client.authenticate()
+        client.fetch_user_alpha_page(limit=100, offset=0, hidden=False,
+                                     exclude_status="UNSUBMITTED", order="-dateSubmitted")
+        request = executor.requests[1]
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(parse_qs(urlsplit(request.full_url).query), {
+            "limit": ["100"], "offset": ["0"], "status!": ["UNSUBMITTED"],
+            "order": ["-dateSubmitted"], "hidden": ["false"]})
+        with self.assertRaisesRegex(ValueError, "status_invalid"):
+            client.fetch_user_alpha_page(limit=100, offset=0, hidden=False,
+                                         status="ACTIVE", exclude_status="UNSUBMITTED")
+        with self.assertRaisesRegex(ValueError, "order_invalid"):
+            client.fetch_user_alpha_page(limit=100, offset=0, hidden=False, order="arbitrary")
+
     def test_user_alpha_page_error_is_read_only_failure(self) -> None:
         executor = FakeExecutor(self._response(200, {}), self._response(503, {}))
         client = self._client(executor)

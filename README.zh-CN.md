@@ -118,6 +118,16 @@ alpha-garden init
 
 初始化会准备本地数据库与研究定义。如果缺少完整且匹配的数据目录，会认证 WorldQuant BRAIN 并同步字段和算子，不会启动回测或提交公式。更新项目时保留已有配置和研究数据。
 
+首次开始研究前，再建立同账号的已提交公式与 PnL 基线：
+
+```powershell
+alpha-garden sync-submitted
+```
+
+该命令按 `status!=UNSUBMITTED`、`order=-dateSubmitted` 分页读取可见和隐藏记录，核对完整详情并保存 PnL，包括已停用的历史提交。只写已提交事实与曲线，不导入历史种子或回测，不提交公式。前后两次完整列表不一致、缺页、身份冲突或不支持的公式类型会明确失败；曲线暂缺时保留已完成的数据和重试时间，再次执行可接续。所有参考曲线已抓取才记录同步完成；过短、平坦或缺少必要 Sharpe 的证据仍由现有相关性规则保持待定，并不因此视为 SC 通过。
+
+账号认证失败或 HTTP 429 限流耗尽有界重试时，立即停止后续请求；按输出的 `Retry-After` 等待后再执行同步。未完成全量同步的账号不能启动或恢复研究；经完整扫描确认零提交的账号可以从探索冷启动。保持 `WQB_ACCOUNT_SCOPE` 与实际账号的对应关系，切换账号时不要复用其范围。该命令使用现有 `--env` 文件和 `--database` 路径；系统环境变量不替代账号文件。升级前一版数据库时，显式执行 `sync-submitted` 会仅新增同步完整性表，不改写历史研究；其他旧结构须先按对应迁移升级。新的空数据库仍先执行 `init`。
+
 ### 3. 构建并打开网页
 
 ```powershell
@@ -149,6 +159,7 @@ alpha-garden web --read-only
 
 | 操作 | 命令 |
 | --- | --- |
+| 同步全部已提交公式与 PnL | `alpha-garden sync-submitted` |
 | 运行一轮 | `alpha-garden run` |
 | 连续运行五轮 | `alpha-garden run 5` |
 | 专项优化合格公式 | `alpha-garden run -opt` |
@@ -169,7 +180,7 @@ SC 定向入口用于前三类方向的首次六条比较：父代必须仅 SC �
 
 每批只采集本批候选及全部已提交参照的证据，不补采其他历史候选。即使变异导致其他质量检查失败，仍采集它的 SC 检查和收益曲线以评价研究效果；采集失败候选不改变提交资格或 SC 待修复种子的准入规则。平台明确报告的 `DECOMMISSIONED` 参照仍可作为冲突目标，不能因退役状态忽略当前 SC 阻挡。
 
-现有数据库需要经明确授权后依次执行 `persistence.schema.add_mutation_reference_storage` 和 `add_sc_research_plan_storage`，同一 `BEGIN IMMEDIATE` 事务内完成。两项 SC 升级只添加冲突绑定表和冻结计划列，历史任务、额度与结果保留；运行命令不自动迁移。若仍使用较早的正式提交来源约束，先在同一事务内执行既有的 `add_optimization_submission_source` 升级；这不改变本次正式提交关闭的设置。
+现有数据库需要经明确授权后依次执行 `persistence.schema.add_mutation_reference_storage` 和 `add_sc_research_plan_storage`，同一 `BEGIN IMMEDIATE` 事务内完成。两项 SC 升级只添加冲突绑定表和冻结计划列，历史任务、额度与结果保留；运行命令不自动迁移。若仍使用较早的正式提交来源约束，先在同一事务内执行既有的 `add_optimization_submission_source` 升级；这不改变本次正式提交关闭的设置。若尚无已提交基线同步表，可在 SC 升级后执行 `add_submitted_sync_storage`，或退出事务后通过显式的 `sync-submitted` 命令新增该表并建立基线。SC 定向运行和恢复同样要求全量基线同步完成。
 
 ## 研究规则
 

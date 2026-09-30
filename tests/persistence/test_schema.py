@@ -22,6 +22,7 @@ from persistence.schema import (
     add_submission_source_storage,
     add_optimization_submission_source,
     add_sc_research_plan_storage,
+    add_submitted_sync_storage,
 )
 
 
@@ -29,6 +30,7 @@ class DatabaseSchemaTests(unittest.TestCase):
     def test_existing_local_schema_upgrades_before_sc_storage_without_losing_history(self):
         with open_database(":memory:") as connection:
             initialize_database_schema(connection)
+            connection.execute("DROP TABLE platform_submitted_alpha_syncs")
             connection.execute("DROP TABLE backtest_mutation_references")
             connection.execute("ALTER TABLE automated_runs DROP COLUMN self_correlation_plan_json")
             sql = connection.execute("SELECT sql FROM sqlite_master WHERE name='formal_submission_attempts'").fetchone()[0]
@@ -44,6 +46,7 @@ class DatabaseSchemaTests(unittest.TestCase):
             add_optimization_submission_source(connection)
             add_mutation_reference_storage(connection)
             add_sc_research_plan_storage(connection)
+            add_submitted_sync_storage(connection)
             initialize_database_schema(connection)
             connection.rollback()
             self.assertEqual(connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall(), before)
@@ -51,6 +54,7 @@ class DatabaseSchemaTests(unittest.TestCase):
             add_optimization_submission_source(connection)
             add_mutation_reference_storage(connection)
             add_sc_research_plan_storage(connection)
+            add_submitted_sync_storage(connection)
             initialize_database_schema(connection)
             self.assertEqual(tuple(connection.execute("SELECT value,horizon FROM generation_windows").fetchone()), (22,"month"))
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])

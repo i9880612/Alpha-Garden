@@ -120,6 +120,16 @@ Initialization prepares the local database and research definitions. If a comple
 
 ### 3. Build and open the console
 
+Before starting research, build the account's submitted-alpha and PnL baseline:
+
+```powershell
+alpha-garden sync-submitted
+```
+
+This reads every visible and hidden page using `status!=UNSUBMITTED` and `order=-dateSubmitted`, verifies full details, and captures PnL, including decommissioned submissions. It imports no historical seeds or backtests and submits no formulas. Inconsistent snapshots, missing pages, conflicting identities, and unsupported alpha types fail explicitly. Pending PnL keeps its retry time and completed captures; rerun the command to continue. Completion means all reference curves were captured, not that they satisfy local SC requirements: insufficient overlap, flat curves, or missing required Sharpe remain unknown under the existing rules.
+
+Authentication failures and HTTP 429 throttles that exhaust bounded retries stop all subsequent requests. Wait for the reported `Retry-After` before rerunning. Starting or resuming research requires a completed baseline for the configured account. A verified zero-submission account can cold-start exploration. Keep `WQB_ACCOUNT_SCOPE` bound to the actual account. The command uses the existing `--env` file and `--database` options; process environment variables do not replace the file. For the immediately preceding database schema, this explicit command adds only the completeness metadata table and preserves research history. Other old schemas require their corresponding migrations. A fresh database still needs `init` first.
+
 ```powershell
 pnpm --dir webui install --frozen-lockfile
 pnpm --dir webui build
@@ -149,6 +159,7 @@ New runs started from the console have **automatic submission disabled**. Closin
 
 | Action | Command |
 | --- | --- |
+| Sync all submitted alphas and PnL | `alpha-garden sync-submitted` |
 | Run one cycle | `alpha-garden run` |
 | Run five cycles | `alpha-garden run 5` |
 | Optimize qualified formulas | `alpha-garden run -opt` |
@@ -169,7 +180,7 @@ Explicit SC targets use current blocker evidence and the original parent budget;
 
 Each batch gathers evidence for its own candidates and all submitted references, without backfilling unrelated historical candidates. SC checks and PnL are still collected when a mutation fails other quality checks, so research outcomes can be assessed; evidence collection does not relax submission eligibility or SC repair seed-admission rules. A `DECOMMISSIONED` reference explicitly reported by the platform remains a valid conflict target.
 
-Existing databases require explicitly authorized additive upgrades: call `persistence.schema.add_mutation_reference_storage`, then `add_sc_research_plan_storage` in the same `BEGIN IMMEDIATE` transaction. They add the conflict-binding table and frozen-plan column while preserving historical tasks, budgets and results. Run commands do not migrate automatically. If the database still uses the earlier formal-submission source constraint, apply the existing `add_optimization_submission_source` upgrade first in that transaction; focused SC submission remains disabled.
+Existing databases require explicitly authorized additive upgrades: call `persistence.schema.add_mutation_reference_storage`, then `add_sc_research_plan_storage` in the same `BEGIN IMMEDIATE` transaction. They add the conflict-binding table and frozen-plan column while preserving historical tasks, budgets and results. Run commands do not migrate automatically. If the database still uses the earlier formal-submission source constraint, apply the existing `add_optimization_submission_source` upgrade first in that transaction; focused SC submission remains disabled. If the submitted-baseline sync table is still absent, apply `add_submitted_sync_storage` after the SC upgrades, or leave the transaction and run the explicit `sync-submitted` command to add that table and establish the baseline. Focused SC launch and resume also require a completed full baseline sync.
 
 ## Research rules
 
