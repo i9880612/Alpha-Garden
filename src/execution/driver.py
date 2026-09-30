@@ -100,7 +100,7 @@ def advance_automated_run(
     with open_database(database_path) as connection:
         cycle_number = scheduled_cycle_number(connection, run)
     if not _cycle_has_tasks(database_path, run.run_id, cycle_number):
-        old_check = advance_stopped_run_check(
+        old_check = None if run.self_correlation_plan_json is not None else advance_stopped_run_check(
             database_path, client, account_scope=run.account_scope, observed_at=observed_at,
         )
         if old_check is not None:
@@ -110,15 +110,17 @@ def advance_automated_run(
                 platform_request_performed=old_check.platform_request_performed,
                 retry_after_seconds=old_check.retry_after_seconds,
             )
-        seed_delay = capture_next_seed_series(
-            database_path, client, account_scope=run.account_scope, observed_at=observed_at,
-            admit_seeds=not run.optimization_only,
-        )
-        if seed_delay is not None:
-            return _result(run, action="seed_evidence_captured", cycle_number=cycle_number,
-                           platform_request_performed=True, retry_after_seconds=seed_delay)
         try:
-            delay = None if run.optimization_only else capture_next_recovery_series(
+            seed_delay = None if run.self_correlation_plan_json is not None else capture_next_seed_series(
+                database_path, client, account_scope=run.account_scope, observed_at=observed_at,
+                admit_seeds=not run.optimization_only,
+            )
+            if seed_delay is not None:
+                if seed_delay == 0:
+                    run = clear_automated_request_failures(database_path, run.run_id)
+                return _result(run, action="seed_evidence_captured", cycle_number=cycle_number,
+                               platform_request_performed=True, retry_after_seconds=seed_delay)
+            delay = None if run.optimization_only or run.self_correlation_plan_json is not None else capture_next_recovery_series(
                 database_path,
                 client,
                 account_scope=run.account_scope,

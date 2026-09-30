@@ -153,6 +153,9 @@ def add_optimization_submission_source(connection: sqlite3.Connection) -> None:
     reference_key = ("table", "backtest_mutation_references", "backtest_mutation_references")
     if reference_key not in actual:
         expected.pop(reference_key)
+    run_key = ("table", "automated_runs", "automated_runs")
+    if "self_correlation_plan_json" not in {row[1] for row in connection.execute("PRAGMA table_info(automated_runs)")}:
+        expected[run_key] = expected[run_key].replace(", self_correlation_plan_json TEXT", "")
     if actual == expected:
         return
     key = ("table", "formal_submission_attempts", "formal_submission_attempts")
@@ -214,6 +217,11 @@ def add_mutation_reference_storage(connection: sqlite3.Connection) -> None:
     """Explicit additive migration; old repairs stay unbound, never guessed."""
     expected = _reference_schema_objects()
     actual = _schema_objects(connection)
+    # The existing binding upgrade must remain usable before the focused-plan
+    # upgrade; historical repairs deliberately acquire no guessed bindings.
+    run_key = ("table", "automated_runs", "automated_runs")
+    if "self_correlation_plan_json" not in {row[1] for row in connection.execute("PRAGMA table_info(automated_runs)")}:
+        expected[run_key] = expected[run_key].replace(", self_correlation_plan_json TEXT", "")
     if actual == expected:
         return
     previous = {key: value for key, value in expected.items() if key[2] != "backtest_mutation_references"}
@@ -222,6 +230,23 @@ def add_mutation_reference_storage(connection: sqlite3.Connection) -> None:
     if not connection.in_transaction:
         raise ValueError("mutation_reference_migration_requires_transaction")
     initialize_mutation_reference_schema(connection)
+    _require_current_schema(connection, expected)
+
+
+def add_sc_research_plan_storage(connection: sqlite3.Connection) -> None:
+    """Explicit additive migration; freeze focused plans without changing history."""
+    expected = _reference_schema_objects()
+    actual = _schema_objects(connection)
+    if actual == expected:
+        return
+    key = ("table", "automated_runs", "automated_runs")
+    previous = dict(expected)
+    previous[key] = expected[key].replace(", self_correlation_plan_json TEXT", "")
+    if actual != previous:
+        raise ValueError("sc_research_plan_migration_schema_mismatch")
+    if not connection.in_transaction:
+        raise ValueError("sc_research_plan_migration_requires_transaction")
+    connection.execute("ALTER TABLE automated_runs ADD COLUMN self_correlation_plan_json TEXT")
     _require_current_schema(connection, expected)
 
 
@@ -337,6 +362,13 @@ def _schema_objects(
         # ALTER TABLE can move whitespace before commas and closing parentheses.
         # Normalize SQL spacing without changing quoted CHECK/default values.
         parts = re.split(r"('(?:''|[^'])*')", sql)
-        return "".join(re.sub(r"\s+([,)])", r"\1", part) if i % 2 == 0 else part
-                       for i, part in enumerate(parts))
+        sql = "".join(re.sub(r"\s+([,)])", r"\1", part) if i % 2 == 0 else part
+                      for i, part in enumerate(parts))
+        # Either explicit additive run migration may be applied first. Column
+        # order has no meaning because every run write names its columns.
+        plan_column = ", self_correlation_plan_json TEXT"
+        mode_column = "optimization_only INTEGER NOT NULL DEFAULT 0 CHECK (optimization_only IN (0, 1))"
+        if sql.startswith("CREATE TABLE automated_runs ") and plan_column in sql and mode_column in sql:
+            sql = sql.replace(plan_column, "").replace(mode_column, mode_column + plan_column)
+        return sql
     return {(row[0], row[1], row[2]): normalized(row[3]) for row in rows}

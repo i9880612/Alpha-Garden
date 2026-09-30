@@ -118,6 +118,16 @@ def _prepare_automated_items(
         eligible_parent_ids = set(
             load_signal_frontiers(connection, optimization_only=run.optimization_only).active_branch_task_ids
         )
+        if run.self_correlation_plan_json is not None:
+            from execution.sc_research import SelfCorrelationResearchPlan
+            plan = SelfCorrelationResearchPlan.from_json(run.self_correlation_plan_json)
+            expected = plan.candidates[(cycle_number - 1) * 2:cycle_number * 2]
+            if (len(items) != 2 or tuple(item.mutation for item in items) != expected
+                    or any(item.settings.as_platform_dict() != json.loads(plan.settings_json) for item in items)):
+                raise ValueError("sc_research_frozen_candidates_mismatch")
+            # A better child may advance the frontier during the six-trial plan.
+            # The frozen original parent retains its own remaining attempt budget.
+            eligible_parent_ids.add(plan.parent_task_id)
         for item in items:
             if run.optimization_only and (
                 item.mutation is None or item.mutation.change is None

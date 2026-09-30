@@ -25,6 +25,19 @@ from worldquant.client import WorldQuantRequestError
 
 
 class CommandLineTests(unittest.TestCase):
+    def test_sc_mode_has_six_trial_limit_and_rejects_expanded_or_submission_modes(self):
+        with patch("alpha_garden.cli.launch_automated_run", return_value=self._completion(status="completed")) as launch, redirect_stdout(io.StringIO()):
+            self.assertEqual(run(["run", "3", "--sc-parent", "parent-1"]), 0)
+            limits = launch.call_args.kwargs["limits"]
+            self.assertEqual((limits.backtest_count, limits.max_cycles, limits.max_backtests), (2,3,6))
+            self.assertEqual(limits.self_correlation_parent_task_id, "parent-1")
+            self.assertFalse(limits.automatic_submissions_enabled)
+        for extra in (["--auto-submit"], ["-opt"], []):
+            args = ["run", *([] if not extra else ["3"]), "--sc-parent", "parent-1", *extra]
+            with self.subTest(args=args), patch("alpha_garden.cli.launch_automated_run") as launch, redirect_stderr(io.StringIO()):
+                self.assertEqual(run(args), 1)
+                launch.assert_not_called()
+
     def test_qualified_submission_command_count_and_recovery_guidance(self):
         for arguments, count, grade in ((["submit", "good"], None, "GOOD"),
                                          (["submit", "GOOD", "2"], 2, "GOOD"),
@@ -590,6 +603,7 @@ class CommandLineTests(unittest.TestCase):
                 max_in_flight_backtests=3,
                 automatic_submissions_enabled=False,
                 optimization_only=False,
+                self_correlation_plan_json=None,
             ),
             step_count=5,
             platform_request_count=4,

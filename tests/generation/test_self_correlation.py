@@ -65,6 +65,21 @@ class SelfCorrelationGenerationTests(unittest.TestCase):
             )
         )
 
+    def test_cross_dataset_search_requires_known_coverage_and_matching_type(self):
+        catalog = replace(self.catalog, fields=(*self.catalog.fields,
+            FieldDefinition("other_price", "other", "sample", "sample", "MATRIX", 0.9),
+            FieldDefinition("uncovered", "other", "sample", "sample", "MATRIX", None),
+            FieldDefinition("vector_field", "other", "sample", "sample", "VECTOR", 1.0)))
+        parent = parse_formula("rank(close)").expression
+        reference = parse_formula("zscore(close)").expression
+        fields = ("other_price", "uncovered", "vector_field")
+        self.assertEqual(shared_field_replacements(parent, reference, catalog, fields), ())
+        self.assertEqual(shared_field_replacements(parent, reference, catalog, fields, cross_dataset=True), ("other_price",))
+        leaves = tuple(iter_self_correlation_leaves(parent, reference, catalog,
+            families=SELF_CORRELATION_INTERNAL_FAMILIES, neutralization="NONE",
+            field_candidates=fields, cross_dataset=True))
+        self.assertEqual([render_formula(leaf.expression) for leaf in leaves], ["rank(other_price)"])
+
     def test_retired_actions_are_only_available_for_historical_verification(self):
         source, reference = (parse_formula(f"rank({field})").expression for field in ("close", "open"))
         residual = parse_formula("vector_neut(zscore(rank(close)),zscore(rank(open)))").expression
@@ -238,3 +253,97 @@ class SelfCorrelationGenerationTests(unittest.TestCase):
                     source, reference, parse_formula(text).expression,
                     action=action, location=position,
                 ))
+
+
+class SelfCorrelationResearchTests(unittest.TestCase):
+    def setUp(self):
+        x, d = OperatorParameter("x", "expr"), OperatorParameter("d", "window")
+        def op(name, parameters, roles=()):
+            return OperatorDefinition(name, "sample", ("REGULAR",), parameters, roles, "signal")
+        self.catalog = GenerationCatalog(CatalogContext("EQUITY", "USA", "TOP3000", 1), (
+            FieldDefinition("model", "m1", "model", "score", "MATRIX", 1),
+            FieldDefinition("earnings", "f1", "fundamental", "earnings", "MATRIX", 1),
+            FieldDefinition("estimate", "a1", "analyst", "estimates", "MATRIX", 1),
+            FieldDefinition("sentiment", "n1", "news", "sentiment", "MATRIX", 1),
+            FieldDefinition("unknown", "u1", None, None, "MATRIX", 1),
+            FieldDefinition("missing", "f2", "fundamental", "earnings", "MATRIX", None),
+            FieldDefinition("news_vector", "n2", "news", "sentiment", "VECTOR", 1),
+        ), (
+            op("rank", (x,), ("cross_sectional_normalization",)),
+            op("ts_delta", (x,d), ("time_series_change",)),
+            op("ts_av_diff", (x,d), ("time_series_change",)),
+            op("ts_mean", (x,d), ("time_series_smoothing",)),
+            op("days_from_last_change", (x,)),
+            op("trade_when", (x,OperatorParameter("y", "expr"),OperatorParameter("z", "expr"))),
+        ), (WindowDefinition(22,"month"), WindowDefinition(66,"quarter")))
+        self.parent = parse_formula("rank(model)").expression
+
+    def leaves(self, family, parent=None, catalog=None):
+        return tuple(iter_self_correlation_leaves(parent or self.parent, self.parent, catalog or self.catalog,
+            families=(family,), neutralization="NONE", field_candidates=tuple(f.field_id for f in self.catalog.fields)))
+
+    def test_sources_change_at_normalization_boundary_with_catalog_provenance(self):
+        from generation.self_correlation import SELF_CORRELATION_SOURCE_CHANGE
+        leaves = self.leaves(SELF_CORRELATION_SOURCE_CHANGE)
+        self.assertEqual({render_formula(leaf.expression) for leaf in leaves}, {
+            "rank(ts_delta(earnings,66))", "rank(ts_delta(estimate,66))", "rank(sentiment)"})
+        for leaf in leaves:
+            self.assertTrue(matches_self_correlation_repair(self.parent, self.parent, leaf.expression,
+                action=leaf.family, location=leaf.change.location, before=leaf.change.before,
+                after=leaf.change.after, catalog=self.catalog))
+        # No normalization boundary means raw physical units cannot be proved compatible.
+        self.assertEqual(self.leaves(SELF_CORRELATION_SOURCE_CHANGE, parse_formula("model").expression), ())
+        same_dataset = replace(self.catalog, fields=tuple(replace(f, dataset_id="m1") for f in self.catalog.fields))
+        self.assertEqual(self.leaves(SELF_CORRELATION_SOURCE_CHANGE, catalog=same_dataset), ())
+
+    def test_source_changes_a_normalized_component_and_retains_its_time_window(self):
+        from generation.self_correlation import SELF_CORRELATION_SOURCE_CHANGE
+        catalog = replace(self.catalog, operators=self.catalog.operators + (
+            OperatorDefinition("ts_rank", "Time Series", ("REGULAR",), (
+                OperatorParameter("x", "expr"), OperatorParameter("d", "window")),
+                ("time_series_normalization",), "signal"),
+        ))
+        parent = parse_formula("rank(ts_rank(model,22)+rank(estimate))").expression
+        leaves = self.leaves(SELF_CORRELATION_SOURCE_CHANGE, parent, catalog)
+        selected = next(x for x in leaves if render_formula(x.expression) == "rank(ts_rank(ts_delta(earnings,66),22)+rank(estimate))")
+        self.assertTrue(matches_self_correlation_repair(parent, self.parent, selected.expression,
+            action=selected.family, location=selected.change.location, before=selected.change.before,
+            after=selected.change.after, catalog=catalog))
+
+    def test_level_change_acts_before_rank_and_is_recoverable(self):
+        from generation.self_correlation import SELF_CORRELATION_LEVEL_CHANGE
+        leaves = self.leaves(SELF_CORRELATION_LEVEL_CHANGE)
+        self.assertEqual([render_formula(leaf.expression) for leaf in leaves[:2]],
+                         ["rank(ts_delta(model,66))", "rank(ts_av_diff(model,66))"])
+        for leaf in leaves:
+            self.assertTrue(matches_self_correlation_repair(self.parent, self.parent, leaf.expression,
+                action=leaf.family, location=leaf.change.location, before=leaf.change.before,
+                after=leaf.change.after, catalog=self.catalog))
+        nested = parse_formula("rank(model)+rank(earnings)").expression
+        self.assertTrue(any(render_formula(leaf.expression) == "rank(ts_delta(model,66))+rank(earnings)"
+                            for leaf in self.leaves(SELF_CORRELATION_LEVEL_CHANGE, nested)))
+
+    def test_update_checks_raw_event_and_holds_between_events(self):
+        from generation.self_correlation import SELF_CORRELATION_CONDITIONAL_UPDATE
+        from generation.unit_validation import find_coarse_unit_issues
+        from selection.risks import assess_candidate_risk
+        leaves = self.leaves(SELF_CORRELATION_CONDITIONAL_UPDATE)
+        self.assertEqual({render_formula(leaf.expression) for leaf in leaves}, {
+            f"trade_when(days_from_last_change({name}){condition},rank(model),0>1)"
+            for name in ("earnings", "estimate") for condition in ("==0", "<=1")})
+        for leaf in leaves:
+            self.assertFalse(find_coarse_unit_issues(leaf.expression, self.catalog))
+            self.assertTrue(assess_candidate_risk(leaf.expression, self.catalog).eligible)
+            self.assertTrue(matches_self_correlation_repair(self.parent, self.parent, leaf.expression,
+                action=leaf.family, location="formula", before=leaf.change.before,
+                after=leaf.change.after, catalog=self.catalog))
+            self.assertFalse(matches_self_correlation_repair(self.parent, self.parent, leaf.expression,
+                action=leaf.family, location="formula", before="rank(earnings)",
+                after=leaf.change.after, catalog=self.catalog))
+        self.assertEqual(self.leaves(SELF_CORRELATION_CONDITIONAL_UPDATE, leaves[0].expression), ())
+        missing = replace(self.catalog, operators=tuple(op for op in self.catalog.operators if op.name != "trade_when"))
+        self.assertEqual(self.leaves(SELF_CORRELATION_CONDITIONAL_UPDATE, catalog=missing), ())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -65,6 +65,7 @@ from learning.quality_proximity import (
 )
 from persistence.backtests import (
     BacktestCheckRecord,
+    BacktestMutationRecord,
     BacktestResultRecord,
     BacktestSnapshot,
     BacktestTaskRecord,
@@ -623,22 +624,23 @@ class ImprovementCandidatePoolTests(unittest.TestCase):
         self.assertIn(SINGLE_WINDOW_MUTATION, families)
         self.assertTrue(families.intersection(STRUCTURAL_TRANSFORMATION_FAMILIES))
 
-    def test_high_or_unknown_sc_keeps_ordinary_candidates_before_deduplication(self):
+    def test_high_sc_can_use_targeted_edits_while_unknown_sc_remains_ordinary(self):
         parent = self._parent_snapshot("parent-sc", "rank(ts_mean(close,5))")
         def pool(correlation):
             return self._pools(eligible_parent_task_ids=(parent.task.task_id,),
                 completed_by_task_id={parent.task.task_id: parent}, stage=QUALIFIED_EVOLUTION_STAGE,
                 self_correlation_references=(SelfCorrelationReference(parent.task.task_id,
                     "ts_mean(close,22)", correlation=correlation),))[0]
-        for correlation in (0.85, 0.99, None):
+        for correlation in (None,):
             result = pool(correlation)
             self.assertFalse(any(x.family.startswith("self_correlation_") for x in result.candidates))
             ordinary = next(x for x in result.candidates if x.candidate.formula == "rank(ts_mean(open,5))")
             self.assertEqual(ordinary.family, "internal_field_replacement")
-        middle = pool(0.8)
-        same = [x for x in middle.candidates if x.candidate.formula == "rank(ts_mean(open,5))"]
-        self.assertEqual(len(same), 1)
-        self.assertIn(same[0].family, SELF_CORRELATION_INTERNAL_FAMILIES)
+        for correlation in (0.8, 0.85, 0.99):
+            result = pool(correlation)
+            same = [x for x in result.candidates if x.candidate.formula == "rank(ts_mean(open,5))"]
+            self.assertEqual(len(same), 1)
+            self.assertIn(same[0].family, SELF_CORRELATION_INTERNAL_FAMILIES)
 
     def test_targeted_internal_edits_keep_sc_identity_when_ordinary_edits_overlap(self):
         parent = self._parent_snapshot("parent-sc", "rank(ts_mean(close,5))")
@@ -700,6 +702,26 @@ class ImprovementCandidatePoolTests(unittest.TestCase):
                 self.assertNotIn(item.candidate.fingerprint, {c.candidate.fingerprint for c in repeated.candidates})
             excluded = pool(excluded_formula_fingerprints=frozenset({item.candidate.fingerprint}))
             self.assertNotIn(item.candidate.fingerprint, {c.candidate.fingerprint for c in excluded.candidates})
+
+    def test_sc_trial_history_survives_catalog_changes_and_counts_pending_once(self):
+        from generation.self_correlation import SELF_CORRELATION_SOURCE_CHANGE
+        tasks = tuple(self._task_record(task_id=f"trial-{status}", formula=f"rank(removed_{status})",
+            formula_fingerprint=parse_formula(f"rank(removed_{status})").fingerprint, account_scope="group-account",
+            settings_json=self.settings_json, status=status) for status in ("completed", "pending", "created"))
+        mutations = tuple(BacktestMutationRecord(task.task_id, self.parent.task.task_id,
+            SELF_CORRELATION_SOURCE_CHANGE, "formula", self.parent.task.formula, task.formula,
+            "conflict", "rank(close)") for task in tasks)
+        pools = build_improvement_candidate_pools(self.catalog, self.policy,
+            eligible_parent_task_ids=(self.parent.task.task_id,),
+            improvement_stages=ParentImprovementStageSet((ParentImprovementStage(
+                parent_task_id=self.parent.task.task_id, stage=QUALIFIED_EVOLUTION_STAGE, proximity=None),)),
+            completed_by_task_id={self.parent.task.task_id: self.parent}, field_candidates=("close", "open"),
+            group_candidates=(), reserved_tasks=tasks, mutations=mutations,
+            self_correlation_references=(SelfCorrelationReference(self.parent.task.task_id, "rank(close)", "conflict", .9),))
+        usage = next(item for item in pools[0].family_usage if item.family == SELF_CORRELATION_SOURCE_CHANGE)
+        self.assertEqual(usage.attempted_request_count, 2)
+        self.assertEqual(usage.unsubmitted_request_count, 1)
+        self.assertFalse(any(item.family == SELF_CORRELATION_SOURCE_CHANGE for item in pools[0].candidates))
 
     def _pool(
         self,

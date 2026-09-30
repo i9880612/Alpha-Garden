@@ -108,6 +108,9 @@ def is_proven_dimensionless(
         return False
     if definition.output_kind == "condition":
         return True
+    if expression.operator == "days_from_last_change":
+        # An integer observation count, independent of the input field's units.
+        return True
     if "cross_sectional_normalization" in definition.roles:
         return True
     expression_arguments = _call_expression_arguments(expression, catalog)

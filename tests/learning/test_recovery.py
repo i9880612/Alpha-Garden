@@ -50,7 +50,7 @@ def test_real_series_shape_is_compared_as_increments_not_cumulative_levels():
             comparison,
             (*records[:-1], replace(records[-1], points=records[-1].points[1:])),
         )
-        is None
+        is not None
     )
     assert (
         recovery_correlations(
@@ -72,3 +72,15 @@ def test_submitted_parent_can_be_its_own_recovery_reference_without_duplicate_se
     assert parent_corr > .999 and abs(child_corr) < .01
     assert recovery_task_ids((comparison,), records) == frozenset({"task"})
     assert recovery_correlations(comparison, records[:1]) is None
+
+
+def test_common_intervals_do_not_bridge_missing_dates_and_keep_the_252_floor():
+    comparison = RecoveryComparison("task", "repair", "parent-task", "account", "child", "parent", "reference")
+    records = (series("parent", [math.sin(i) for i in range(255)]),
+               series("child", [math.cos(i) for i in range(255)]),
+               series("reference", [math.sin(i) for i in range(255)]))
+    # Removing one interior endpoint loses two daily intervals, not one.
+    missing = replace(records[1], points=records[1].points[:10] + records[1].points[11:])
+    assert recovery_correlations(comparison, (records[0], missing, records[2])) is not None
+    missing = replace(missing, points=missing.points[:20] + missing.points[21:])
+    assert recovery_correlations(comparison, (records[0], missing, records[2])) is None

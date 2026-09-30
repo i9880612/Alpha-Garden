@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
 from generation.polishing import SINGLE_WINDOW_MUTATION
 from generation.internal_edits import INTERNAL_EDIT_FAMILIES
 from generation.self_correlation import (
+    SELF_CORRELATION_RESEARCH_FAMILIES,
     SELF_CORRELATION_FIELD_REPLACEMENT, SELF_CORRELATION_REPAIR_FAMILIES,
     SELF_CORRELATION_LIGHT_FAMILIES, SELF_CORRELATION_INTERNAL_FAMILIES,
     SELF_CORRELATION_HALF_FAMILIES,
@@ -50,6 +51,7 @@ from selection.allocations import (
     SignalImprovementSource,
     allocate_backtest_sources,
     direction_validation_limit,
+    allowed_self_correlation_families,
 )
 
 
@@ -124,12 +126,67 @@ class BacktestSourceAllocationTests(unittest.TestCase):
         self.assertEqual([a.parent_task_id for a in result.signal_improvements[2:]], ["unsubmitted"] * 4)
         self.assertEqual((result.exploration_count, result.direction_validation_count), (3, 1))
 
-    def test_sc_bands_only_allocate_allowed_actions_and_high_band_returns_to_ordinary(self):
+    def test_initial_sc_trials_cover_each_direction_twice_across_batches(self):
+        from collections import Counter
+        counts = Counter()
+        for cycle in range(3):
+            source = self._source("root", "parent", 32, self_correlation=0.9,
+                stage=QUALIFIED_EVOLUTION_STAGE, families=QUALIFIED_EVOLUTION_FAMILIES,
+                family_counts={**{family: 4 for family in SELF_CORRELATION_RESEARCH_FAMILIES}, SINGLE_WINDOW_MUTATION: 20},
+                attempted_by_family=dict(counts), remaining_attempts=20-sum(counts.values()))
+            result = self._allocate(requested_count=4, minimum_exploration_count=2,
+                sources=(source,), settings=(self._settings("parent", risk=None),),
+                targets=(self._branch_targets("parent", (self._target("SELF_CORRELATION"),)),))
+            counts.update(item.candidate_family for item in result.signal_improvements)
+            self.assertEqual(len(result.signal_improvements), 2)
+            self.assertEqual(result.exploration_count, 2)
+        self.assertEqual(counts, dict.fromkeys(SELF_CORRELATION_RESEARCH_FAMILIES, 2))
+
+    def test_initial_sc_trials_respect_small_remaining_budget(self):
+        source = self._source("root", "parent", 6, self_correlation=0.9,
+            stage=QUALIFIED_EVOLUTION_STAGE, families=QUALIFIED_EVOLUTION_FAMILIES,
+            family_counts={family: 2 for family in SELF_CORRELATION_RESEARCH_FAMILIES}, remaining_attempts=1)
+        result = self._allocate(requested_count=4, minimum_exploration_count=2,
+            sources=(source,), settings=(self._settings("parent", risk=None),),
+            targets=(self._branch_targets("parent", (self._target("SELF_CORRELATION"),)),))
+        self.assertEqual(len(result.signal_improvements), 1)
+        self.assertEqual(result.exploration_count, 3)
+
+    def test_after_initial_sc_trials_supported_direction_receives_the_exploitation_slot(self):
+        preferred = SELF_CORRELATION_RESEARCH_FAMILIES[-1]
+        source = self._source("root", "parent", 9, self_correlation=0.9,
+            stage=QUALIFIED_EVOLUTION_STAGE, families=QUALIFIED_EVOLUTION_FAMILIES,
+            family_counts=dict.fromkeys(SELF_CORRELATION_RESEARCH_FAMILIES, 3),
+            attempted_by_family=dict.fromkeys(SELF_CORRELATION_RESEARCH_FAMILIES, 2), remaining_attempts=14)
+        strategy = self._action_strategy("parent", "SELF_CORRELATION", preferred=(preferred,),
+            action_states={family: ACTION_STATE_PREFERRED if family == preferred else ACTION_STATE_INSUFFICIENT
+                           for family in SELF_CORRELATION_RESEARCH_FAMILIES})
+        result = self._allocate(requested_count=4, minimum_exploration_count=2,
+            sources=(source,), settings=(self._settings("parent", risk=None),),
+            targets=(self._branch_targets("parent", (self._target("SELF_CORRELATION"),)),),
+            action_strategies=(strategy,))
+        self.assertEqual(result.signal_improvements[0].candidate_family, preferred)
+        self.assertEqual(len(result.signal_improvements), 2)
+
+    def test_initial_trials_cannot_expand_or_enable_sc_budget(self):
+        source = self._source("root", "parent", 9, self_correlation=0.9,
+            stage=QUALIFIED_EVOLUTION_STAGE, families=QUALIFIED_EVOLUTION_FAMILIES,
+            family_counts={**dict.fromkeys(SELF_CORRELATION_RESEARCH_FAMILIES, 2), SINGLE_WINDOW_MUTATION: 3})
+        for percent, initial_count in ((0,0), (10,1)):
+            with self.subTest(percent=percent):
+                result = self._allocate(requested_count=4, minimum_exploration_count=2,
+                    self_correlation_percent=percent, sources=(source,),
+                    settings=(self._settings("parent", risk=None),),
+                    targets=(self._branch_targets("parent", (self._target("SELF_CORRELATION"),)),))
+                self.assertEqual(sum(a.candidate_family in SELF_CORRELATION_RESEARCH_FAMILIES
+                                     for a in result.signal_improvements), initial_count)
+
+    def test_sc_bands_keep_scopes_and_high_band_has_wider_research(self):
         for correlation, expected in (
-            (0.74, SELF_CORRELATION_LIGHT_FAMILIES),
-            (0.75, SELF_CORRELATION_INTERNAL_FAMILIES),
-            (0.849999, SELF_CORRELATION_INTERNAL_FAMILIES),
-            (0.85, ()), (1.0, ()), (None, ()),
+            (0.74, (*SELF_CORRELATION_RESEARCH_FAMILIES, *SELF_CORRELATION_LIGHT_FAMILIES)),
+            (0.75, (*SELF_CORRELATION_RESEARCH_FAMILIES, *SELF_CORRELATION_INTERNAL_FAMILIES)),
+            (0.849999, (*SELF_CORRELATION_RESEARCH_FAMILIES, *SELF_CORRELATION_INTERNAL_FAMILIES)),
+            (0.85, allowed_self_correlation_families(0.85)), (1.0, allowed_self_correlation_families(1.0)), (None, ()),
         ):
             with self.subTest(correlation=correlation):
                 source = self._source("root", "parent", len(SELF_CORRELATION_REPAIR_FAMILIES)+2,
@@ -143,7 +200,8 @@ class BacktestSourceAllocationTests(unittest.TestCase):
                 actions = [a.candidate_family for a in result.signal_improvements]
                 self.assertEqual(len(actions), 2)
                 if expected:
-                    self.assertEqual(len(set(actions)), 2)
+                    if correlation < 0.85:
+                        self.assertEqual(len(set(actions)), 2)
                     self.assertTrue(set(actions) <= set(expected))
                 else:
                     self.assertEqual(actions, [SINGLE_WINDOW_MUTATION]*2)
@@ -235,6 +293,35 @@ class BacktestSourceAllocationTests(unittest.TestCase):
         self.assertEqual(Counter(a.parent_task_id for a in actions if a.parent_task_id != "ordinary"),
                          {f"parent-{i}": 1 for i in range(len(families))})
         self.assertEqual((result.exploration_count, result.direction_validation_count, len(actions)), (10, 1, 9))
+
+    def test_sc_target_uses_learned_actions_without_expanding_parent_or_batch_budget(self):
+        good, bad = SELF_CORRELATION_INTERNAL_FAMILIES
+        result = self._allocate(requested_count=4, minimum_exploration_count=2,
+            sources=(self._source("root", "parent", 4, self_correlation=.90, stage=QUALIFIED_EVOLUTION_STAGE,
+                families=QUALIFIED_EVOLUTION_FAMILIES, family_counts={good: 2, bad: 2},
+                attempted_by_family={good: 10, bad: 0}),),
+            settings=(self._settings("parent", risk=None),),
+            targets=(self._branch_targets("parent", (self._target("SELF_CORRELATION"),)),),
+            action_strategies=(self._action_strategy("parent", "SELF_CORRELATION", preferred=(good,),
+                deprioritized=(bad,), action_states={good: ACTION_STATE_PREFERRED, bad: ACTION_STATE_DEPRIORITIZED}),))
+        self.assertEqual([item.candidate_family for item in result.signal_improvements], [good, good])
+        self.assertEqual(result.exploration_count, 2)
+        self.assertTrue(all(item.target.check_name == "SELF_CORRELATION" for item in result.signal_improvements))
+
+    def test_supported_sc_success_rate_orders_the_exploitation_slot(self):
+        good, weaker = SELF_CORRELATION_INTERNAL_FAMILIES
+        strategy = self._action_strategy("parent", "SELF_CORRELATION", preferred=(good, weaker),
+            action_states={good: ACTION_STATE_PREFERRED, weaker: ACTION_STATE_PREFERRED})
+        strategy = replace(strategy, actions=tuple(replace(item, resolved_count=20,
+            safe_progress_count=18 if item.action == good else 12) for item in strategy.actions))
+        result = self._allocate(requested_count=3, minimum_exploration_count=2,
+            sources=(self._source("root", "parent", 2, self_correlation=.90, stage=QUALIFIED_EVOLUTION_STAGE,
+                families=QUALIFIED_EVOLUTION_FAMILIES, family_counts={good: 1, weaker: 1},
+                attempted_by_family={good: 20, weaker: 0}),),
+            settings=(self._settings("parent", risk=None),),
+            targets=(self._branch_targets("parent", (self._target("SELF_CORRELATION"),)),),
+            action_strategies=(strategy,))
+        self.assertEqual([item.candidate_family for item in result.signal_improvements], [good])
 
     def test_sc_actions_explore_less_tried_allowed_family_first(self):
         source = self._source("root", "parent", 20, stage=QUALIFIED_EVOLUTION_STAGE,
@@ -1205,7 +1292,7 @@ class BacktestSourceAllocationTests(unittest.TestCase):
         family_counts = {family: 1 for family in QUALIFIED_EVOLUTION_FAMILIES}
         least_used_family = SELF_CORRELATION_INTERNAL_FAMILIES[-1]
         attempted_by_family = {
-            family: 0 if family == least_used_family else 1
+            family: 0 if family == least_used_family else 2
             for family in QUALIFIED_EVOLUTION_FAMILIES
         }
         allocation = self._allocate(
@@ -1245,6 +1332,7 @@ class BacktestSourceAllocationTests(unittest.TestCase):
                     stage=QUALIFIED_EVOLUTION_STAGE,
                     families=QUALIFIED_EVOLUTION_FAMILIES,
                     family_counts=family_counts,
+                    attempted_by_family=dict.fromkeys(SELF_CORRELATION_RESEARCH_FAMILIES, 2),
                 ),
             ),
             settings=(self._settings("branch-qualified", risk=None),),

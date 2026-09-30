@@ -123,7 +123,7 @@ def advance_stopped_run_backtest(
         return replace(result, snapshot=deferred)
     with open_database(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        synchronize_signal_seeds(connection, candidate_task_ids=(selected.task.task_id,))
+        synchronize_signal_seeds(connection, observed_at=observed_at, candidate_task_ids=(selected.task.task_id,))
         synchronize_qualified_alpha_archive(connection, observed_at=observed_at)
     while settle_failed_automated_cycle_if_terminal(
         database_path, owner.run_id, observed_at=observed_at
@@ -146,7 +146,7 @@ def settle_stopped_run_results(
             if get_backtest_task(connection, link.task_id).task.status == "completed"
         )
         if completed:
-            synchronize_signal_seeds(connection, candidate_task_ids=completed)
+            synchronize_signal_seeds(connection, observed_at=observed_at, candidate_task_ids=completed)
         synchronize_qualified_alpha_archive(connection, observed_at=observed_at)
     for owner in owners:
         while settle_failed_automated_cycle_if_terminal(

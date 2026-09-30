@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
+from execution.self_correlation import load_self_correlation_references
 from execution.qualified_candidates import load_qualified_evolution
 from generation.direction import DIRECTION_REVERSAL, reverse_direction_candidate
 from generation.parser import parse_formula
@@ -41,6 +43,7 @@ def synchronize_signal_seeds(
     connection: sqlite3.Connection,
     *,
     candidate_task_ids: tuple[str, ...] | None = None,
+    observed_at: str | None = None,
 ) -> tuple[SignalSeedRecord, ...]:
     requested = None if candidate_task_ids is None else _candidate_ids(candidate_task_ids)
     if requested is not None and not requested:
@@ -62,6 +65,16 @@ def synchronize_signal_seeds(
         + [s.task.platform_alpha_id for s in candidates if s.task.platform_alpha_id is not None]
     ))
     correlations = PnlCorrelations(series)
+    cutoff = datetime.fromisoformat(observed_at) if observed_at is not None else datetime.now().astimezone()
+    repair_roots = {
+        reference.parent_task_id
+        for account in {snapshot.task.account_scope for snapshot in candidates}
+        for reference in load_self_correlation_references(
+            connection, parents=tuple(candidates), submitted_alphas=references,
+            account_scope=account, observed_at=cutoff,
+        )
+        if reference.correlation is not None and reference.required_sharpe is not None
+    }
     for snapshot in candidates:
         mutation = mutation_children.get(snapshot.task.task_id)
         if mutation is not None:
@@ -91,7 +104,8 @@ def synchronize_signal_seeds(
             continue
         if get_signal_seed(connection, snapshot.task.task_id) is not None:
             continue
-        if assess_seed_correlation(snapshot, references, series, correlations=correlations).state not in {"passed", "submitted"}:
+        if (assess_seed_correlation(snapshot, references, series, correlations=correlations).state not in {"passed", "submitted"}
+                and snapshot.task.task_id not in repair_roots):
             continue
         assert snapshot.task.finished_at is not None
         created.append(
@@ -99,7 +113,7 @@ def synchronize_signal_seeds(
                 connection,
                 SignalSeedRecord(
                     root_task_id=snapshot.task.task_id,
-                    promoted_at=snapshot.task.finished_at,
+                    promoted_at=cutoff.isoformat() if snapshot.task.task_id in repair_roots else snapshot.task.finished_at,
                 ),
             )
         )

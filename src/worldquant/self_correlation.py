@@ -4,8 +4,8 @@ import math
 from collections.abc import Mapping
 
 
-def maximum_self_correlation_reference(payload: object) -> str | None:
-    """Read a reported maximum peer; unavailable detail is not an SC result."""
+def self_correlation_peers(payload: object) -> tuple[tuple[str, float], ...] | None:
+    """Read every reported peer without deciding which one blocks submission."""
     metrics = payload.get("is") if isinstance(payload, Mapping) else None
     detail = metrics.get("selfCorrelated") if isinstance(metrics, Mapping) else None
     if not isinstance(detail, Mapping):
@@ -28,7 +28,7 @@ def maximum_self_correlation_reference(payload: object) -> str | None:
         not _correlation(value)
         or not _correlation(limit)
         or value != maximum
-        or value <= limit
+        or value < limit
     ):
         return None
     schema = detail.get("schema")
@@ -43,7 +43,7 @@ def maximum_self_correlation_reference(payload: object) -> str | None:
         return None
     id_index = names.index("id")
     correlation_index = names.index("correlation")
-    references: set[str] = set()
+    references: dict[str, float] = {}
     for row in records:
         if not isinstance(row, list) or len(row) != len(names):
             return None
@@ -55,10 +55,12 @@ def maximum_self_correlation_reference(payload: object) -> str | None:
             or correlation > maximum
         ):
             return None
-        if correlation == maximum:
-            references.add(reference)
-    # Deterministic tie breaking is not a quality preference.
-    return min(references) if references else None
+        if reference in references:
+            return None
+        references[reference] = correlation
+    if not references or max(references.values()) != maximum:
+        return None
+    return tuple(sorted(references.items()))
 
 
 def _correlation(value: object) -> bool:

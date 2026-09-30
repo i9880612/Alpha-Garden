@@ -152,6 +152,8 @@ New runs started from the console have **automatic submission disabled**. Closin
 | Run one cycle | `alpha-garden run` |
 | Run five cycles | `alpha-garden run 5` |
 | Optimize qualified formulas | `alpha-garden run -opt` |
+| Preview six SC trials locally | `alpha-garden sc-plan <parent_task_id>` |
+| Run three focused SC batches | `alpha-garden run 3 --sc-parent <parent_task_id> --sc-plan-key <preview_fingerprint>` |
 | Resume an existing plan | `alpha-garden resume <run_id>` |
 | Submit two formulas from the Spectacular queue | `alpha-garden submit 2` |
 | Submit two currently eligible Good formulas | `alpha-garden submit good 2` |
@@ -160,6 +162,14 @@ New runs started from the console have **automatic submission disabled**. Closin
 Grade-based submission also supports `average`, `excellent` and `inferior`. Omitting the count processes eligible candidates selected at launch. Counts mean **successful submissions**: fresh-check failures are skipped, insufficient candidates end the operation early, and uncertain outcomes are reconciled before another request is sent.
 
 Backtesting does not submit by default. CLI runs can explicitly enable automatic submission; inspect `alpha-garden run --help` before choosing run options.
+
+Focused SC research compares the first two trials of each of the three directions. The parent must fail only SC, have complete current blocker evidence, belong to an existing seed lineage or satisfy new seed admission, and retain at least six attempts; new SC seeds use the existing admission rules. Resume already started trials with `resume` or normal research. Preview reads local history only. Launch freezes all six candidates and their original settings, executes two per batch for at most three batches, and shares the parent's 20-attempt budget. The fixed SC plan ignores normal exploration percentages, disables formal submission, and retains existing timeout, request-fault and account-fault boundaries. An optional `--sc-plan-key` rejects changes since preview. Finish or resume an existing active account run first.
+
+Explicit SC targets use current blocker evidence and the original parent budget; Sharpe/Fitness frontier ranking and unresolved historical repair bindings do not replace that decision. Already started trials cannot create a fresh allocation.
+
+Each batch gathers evidence for its own candidates and all submitted references, without backfilling unrelated historical candidates. SC checks and PnL are still collected when a mutation fails other quality checks, so research outcomes can be assessed; evidence collection does not relax submission eligibility or SC repair seed-admission rules. A `DECOMMISSIONED` reference explicitly reported by the platform remains a valid conflict target.
+
+Existing databases require explicitly authorized additive upgrades: call `persistence.schema.add_mutation_reference_storage`, then `add_sc_research_plan_storage` in the same `BEGIN IMMEDIATE` transaction. They add the conflict-binding table and frozen-plan column while preserving historical tasks, budgets and results. Run commands do not migrate automatically. If the database still uses the earlier formal-submission source constraint, apply the existing `add_optimization_submission_source` upgrade first in that transaction; focused SC submission remains disabled.
 
 ## Research rules
 
@@ -174,6 +184,8 @@ Backtesting does not submit by default. CLI runs can explicitly enable automatic
 <summary>Correlation screening, the 10% improvement rule, and near duplicates</summary>
 
 Local submission screening follows the platform's window: it compares daily PnL increments ending in the **four most recent calendar years** against every recorded submitted Alpha for the same account, using at least **252 matching intervals**. Correlation **≥ 0.7** requires Sharpe at least **10% higher** than that reference. Missing curves, insufficient overlap or a required missing Sharpe keep eligibility pending. Research collects daily PnL at batch boundaries for every result that passes all non-SC checks, whether or not its platform check has run. Qualified-history backfill checks only the fetched candidate for seed admission; deferred seeds are reconciled before research advances. Collection resumes from stored facts and retry times, without a separate persistent queue.
+
+For a parent failing only SC with complete blocker evidence, the initial research compares three directions within the existing SC allocation: change signal source, turn levels into changes, and update holdings on changes in the original data. Each direction gets two initial trials across normal batches; stored task history survives restarts and new runs. Missing catalog support or budget may leave fewer than six trials. Source changes use catalog-confirmed fundamental, analyst or news-sentiment categories and replace signals at a normalization boundary, with type, coverage and coarse-unit checks. Unknown physical units are not treated as interchangeable raw inputs. Subsequent allocation uses real backtests and full platform checks; a local correlation decrease is not success. Combining independently qualified signals and removing common components are outside this initial SC strategy.
 
 Candidate ordering also protects fully checked formulas still being optimized and preserves successive improvement opportunities. For highly correlated Sharpes of **1.50 → 1.60 → 1.70**, with 1.70 still being optimized, the selector can offer 1.50 first and defer 1.60. It replans after every confirmed submission; local screening never substitutes for live platform checks.
 

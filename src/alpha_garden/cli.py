@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+from datetime import datetime
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -84,6 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
         "-opt", dest="optimization_only", action="store_true",
         help="仅变异全部官方检查通过、评级不足且仍有额度的活动父代；候选不足时按实际数量运行。",
     )
+    automated_run.add_argument("--sc-parent", help="指定仅 SC 失败的父任务；固定三批、每批两条，共六条 SC 研究，正式提交关闭。")
+    automated_run.add_argument("--sc-plan-key", help="sc-plan 给出的计划指纹；本地事实变化时拒绝启动。")
     automated_run.add_argument(
         "--auto-submit",
         action="store_true",
@@ -116,6 +119,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path(".env"),
         help="WQB 账号环境文件路径（默认：.env）。",
     )
+    sc_plan = commands.add_parser("sc-plan", help="只读预览指定父公式的六条 SC 研究计划，不访问平台或写入数据库。")
+    sc_plan.add_argument("parent_task_id")
+    sc_plan.add_argument("--database", type=Path, default=Path("data/alpha_garden.sqlite3"))
+    sc_plan.add_argument("--settings", type=Path, default=Path("config/backtest.default.json"))
     resume = commands.add_parser(
         "resume",
         help="使用已经冻结的边界恢复一个中断的自动运行。",
@@ -194,6 +201,23 @@ def run(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "run":
         with run_progress_console():
             return _run_automated(arguments)
+    if arguments.command == "sc-plan":
+        from execution.sc_research import preview_self_correlation_research_plan
+        from selection.settings import load_backtest_settings_policy
+        try:
+            plan = preview_self_correlation_research_plan(
+                arguments.database, load_backtest_settings_policy(arguments.settings),
+                parent_task_id=arguments.parent_task_id, observed_at=datetime.now().astimezone(),
+            )
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            print(f"SC 计划不可用：{exc}", file=sys.stderr)
+            return 1
+        print(f"父任务：{plan.parent_task_id}\n计划指纹：{plan.fingerprint}")
+        print(f"夏普 {plan.sharpe}，Fitness {plan.fitness}，阻挡对象 {len(plan.blockers)}，所需夏普 {plan.required_sharpe}")
+        print(f"原父代可用额度 {plan.remaining_attempts}；三批，每批两条；正式提交关闭")
+        for index, candidate in enumerate(plan.candidates, 1):
+            print(f"第 {(index + 1) // 2} 批/{index}：{candidate.change.action}\n{candidate.formula}")
+        return 0
     if arguments.command == "resume":
         with run_progress_console():
             return _resume_automated(arguments)
@@ -227,11 +251,16 @@ def run(argv: Sequence[str] | None = None) -> int:
 
 def _run_automated(arguments: argparse.Namespace) -> int:
     try:
+        sc_options = {}
+        if arguments.sc_parent is not None or arguments.sc_plan_key is not None:
+            sc_options = dict(self_correlation_parent_task_id=arguments.sc_parent,
+                              self_correlation_plan_key=arguments.sc_plan_key)
         limits = load_automated_run_limits(
             arguments.run_config,
             cycles=arguments.cycles,
             automatic_submissions_enabled=arguments.auto_submit,
             optimization_only=arguments.optimization_only,
+            **sc_options,
         )
         completion = launch_automated_run(
             arguments.database,
@@ -387,6 +416,10 @@ def _print_automated_run_completion(completion: AutomatedRunCompletion) -> None:
 
 def _print_automated_run_created(run: AutomatedRunRecord) -> None:
     print(f"自动运行已创建，可恢复 ID：{run.run_id}", flush=True)
+    if run.self_correlation_plan_json is not None:
+        from execution.sc_research import SelfCorrelationResearchPlan
+        plan = SelfCorrelationResearchPlan.from_json(run.self_correlation_plan_json)
+        print(f"运行模式：SC 定向研究；父任务 {plan.parent_task_id}；前三类各两条，共用原父代20次额度。", flush=True)
     if run.optimization_only:
         print("运行模式：评级提升专项；不分配探索、SC治理或反转；共用父代20次额度，候选不足按实际数量运行。", flush=True)
     if run.max_cycles == -1 and run.max_backtests == 0:

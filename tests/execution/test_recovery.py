@@ -17,6 +17,7 @@ from generation.self_correlation import (
     SELF_CORRELATION_LIGHT_FAMILIES,
     SELF_CORRELATION_INTERNAL_FAMILIES,
     SELF_CORRELATION_HALF_FAMILIES,
+    SELF_CORRELATION_RESEARCH_FAMILIES,
     iter_self_correlation_leaves, SelfCorrelationLeaf,
 )
 from generation.parser import parse_formula
@@ -130,14 +131,19 @@ def test_other_recovery_errors_preserve_their_existing_boundary(pending_recovery
         assert list_pnl_series(connection) == before
 
 
-@pytest.mark.parametrize("bound_reference", (False, True))
-@pytest.mark.parametrize("repair_action,base_passed", (
-    *((action, False) for action in SELF_CORRELATION_REPAIR_FAMILIES),
-    (SELF_CORRELATION_INTERNAL_FAMILIES[0], True),
+@pytest.mark.parametrize("repair_action,base_passed,bound_reference", (
+    (action, base_passed, bound)
+    for action, base_passed in (
+        *((action, False) for action in SELF_CORRELATION_REPAIR_FAMILIES),
+        (SELF_CORRELATION_INTERNAL_FAMILIES[0], True),
+    ) for bound in (False, True)
+    # New actions are always created with immutable conflict bindings.
+    if bound or action not in SELF_CORRELATION_RESEARCH_FAMILIES
 ))
 def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submit(repair_action, base_passed, bound_reference):
+    research = repair_action in SELF_CORRELATION_RESEARCH_FAMILIES
     expected_band = (
-        SELF_CORRELATION_LIGHT_FAMILIES if repair_action in SELF_CORRELATION_LIGHT_FAMILIES
+        SELF_CORRELATION_RESEARCH_FAMILIES if research else SELF_CORRELATION_LIGHT_FAMILIES if repair_action in SELF_CORRELATION_LIGHT_FAMILIES
         else SELF_CORRELATION_INTERNAL_FAMILIES if repair_action in SELF_CORRELATION_INTERNAL_FAMILIES
         else SELF_CORRELATION_HALF_FAMILIES
     )
@@ -149,9 +155,14 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
     fixture.setUp()
     try:
         fixture._replace_catalog(
-            fields=("close", "open", "returns", "volume"),
+            fields=("close", "open", "returns", "volume", "earnings") if research else ("close", "open", "returns", "volume"),
+            field_categories={"earnings": "fundamental"}, field_datasets={"earnings": "financials"},
+            extra_operators=(
+                fixture._operator("days_from_last_change", "Time Series", (("x", "expr"),)),
+                fixture._operator("trade_when", "Logical", (("x", "expr"), ("y", "expr"), ("z", "expr"))),
+            ) if research else (),
             cross_sectional=("rank", "zscore"),
-            time_series=("ts_rank", "ts_zscore", "ts_decay_linear"),
+            time_series=("ts_rank", "ts_zscore", "ts_decay_linear", "ts_delta", "ts_av_diff") if research else ("ts_rank", "ts_zscore", "ts_decay_linear"),
             group_fields=("industry",), group=("group_rank", "group_neutralize"),
             windows=(5, 22, 66, 120, 250),
             pairwise=("vector_neut",),
@@ -161,7 +172,7 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
             generation_count=8, backtest_count=batch_count,
             max_cycles=2, max_backtests=2 * batch_count,
         )
-        parent_formula = "ts_rank(ts_rank(close,5),22)"
+        parent_formula = "rank(ts_rank(close,5))" if research else "ts_rank(ts_rank(close,5),22)"
         prepare_automated_candidate_backtest_batch(
             fixture.database_path, run_id=run_id,
             candidates=tuple(AutomatedCandidateBacktest(
@@ -230,10 +241,10 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
                 connection, FieldCatalogContext("EQUITY", "USA", "TOP3000", 1),
                 account_scope="group-account",
             )
-        if repair_action in (*SELF_CORRELATION_LIGHT_FAMILIES, *SELF_CORRELATION_INTERNAL_FAMILIES):
+        if repair_action in (*SELF_CORRELATION_LIGHT_FAMILIES, *SELF_CORRELATION_INTERNAL_FAMILIES, *SELF_CORRELATION_RESEARCH_FAMILIES):
             leaf = next(item for item in iter_self_correlation_leaves(
                 parse_formula(parent.task.formula).expression,
-                parse_formula(reference).expression, catalog, field_candidates=("open",),
+                parse_formula(reference).expression, catalog, field_candidates=("open", "earnings") if research else ("open",),
                 families=(repair_action,), neutralization=fixture.settings["neutralization"],
             ) if item.family == repair_action)
         else:
@@ -369,7 +380,7 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
         )
         allocations = plan.planned_source_allocation.signal_improvements
         parent_allocations = [a for a in allocations if a.parent_task_id == parent.task.task_id]
-        if correlation < 0.85:
+        if correlation < 0.85 or research:
             assert parent_allocations
             assert parent_allocations[0].candidate_family in expected_band, [a.candidate_family for a in parent_allocations]
         else:
@@ -384,7 +395,7 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
             item for item in allocations if item.parent_task_id == child_id
         )
         if base_passed:
-            assert recovery_allocation.target is None
+            assert recovery_allocation.target.check_name == "SELF_CORRELATION"
             assert recovery_allocation.candidate_family in SELF_CORRELATION_LIGHT_FAMILIES
         else:
             assert recovery_allocation.target.check_name in {"LOW_SHARPE", "LOW_FITNESS"}
@@ -415,5 +426,55 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
             connection.execute("DELETE FROM formal_submission_attempts")
             connection.execute("DELETE FROM platform_submitted_alphas")
             assert (comparison in load_recovery_comparisons(connection)) == bound_reference
+    finally:
+        fixture.doCleanups()
+
+
+@pytest.mark.parametrize("action", ("internal_field_replacement", "single_window_mutation", "temporal_persistence_reframe"))
+def test_sc_bound_ordinary_edits_keep_measured_recovery_in_the_original_lineage(action):
+    from generation.internal_edits import iter_internal_edit_candidates
+    from generation.polishing import iter_window_mutation_leaves
+    from generation.transformations import iter_transformation_leaves
+    fixture = fixtures.AutomatedCyclePlanningTests()
+    fixture.setUp()
+    try:
+        fixture._replace_catalog(fields=("close", "open"), cross_sectional=("rank", "zscore"),
+            time_series=("ts_rank", "ts_mean", "ts_decay_linear"), windows=(5, 22, 66))
+        with open_database(fixture.database_path) as connection:
+            fixtures.replace_operator_roles(connection, tuple(fixtures.OperatorRoleRecord(name, role) for name, role in (
+                ("rank", "cross_sectional_normalization"), ("zscore", "cross_sectional_normalization"),
+                ("ts_rank", "time_series_normalization"), ("ts_mean", "time_series_smoothing"),
+                ("ts_decay_linear", "time_series_smoothing"))))
+        parent_id = fixture._signal_seed("rank(ts_rank(close,22))", sharpe_status="PASS", fitness_status="PASS")
+        with open_database(fixture.database_path) as connection:
+            parent = get_backtest_task(connection, parent_id)
+            catalog = load_generation_catalog(connection, FieldCatalogContext("EQUITY", "USA", "TOP3000", 1), account_scope="group-account")
+        expression = parse_formula(parent.task.formula).expression
+        if action == "internal_field_replacement":
+            leaf = next(iter_internal_edit_candidates(expression, catalog, parent_task_id=parent_id,
+                families=(action,), field_candidates=("open",)))
+        elif action == "single_window_mutation":
+            leaf = next(iter_window_mutation_leaves(expression, catalog))
+        else:
+            leaf = next(iter_transformation_leaves(expression, catalog, families=(action,)))
+        formula = render_formula(leaf.expression)
+        child_id = fixture._completed_backtest(formula, sharpe=1.05, fitness=.75,
+            sharpe_status="FAIL", fitness_status="FAIL", time_offset=3)
+        mutation = BacktestMutationRecord(child_id, parent_id, action, leaf.change.location,
+            leaf.change.before, leaf.change.after, "original-conflict", parent.task.formula)
+        with open_database(fixture.database_path) as connection:
+            create_backtest_mutation(connection, mutation)
+            comparisons = load_recovery_comparisons(connection)
+            assert len(comparisons) == 1
+            child = get_backtest_task(connection, child_id)
+            refs = {child_id: SelfCorrelationReference(parent_id, parent.task.formula, "original-conflict")}
+            assert not recovery_comparisons((parent, child), (replace(mutation, before="forged"),), refs, catalog=catalog)
+            assert not recovery_comparisons((parent, child), (mutation,), refs, catalog=None)
+            for alpha in (parent.task.platform_alpha_id, "original-conflict"):
+                save_pnl_series(connection, series(alpha, [math.sin(i) for i in range(300)], "group-account"))
+            save_pnl_series(connection, series(child.task.platform_alpha_id, [math.cos(i) for i in range(300)], "group-account"))
+            assert child_id in load_signal_frontiers(connection).active_branch_task_ids
+            assert synchronize_signal_seeds(connection) == ()
+            assert connection.execute("SELECT COUNT(*) FROM signal_seeds").fetchone()[0] == 1
     finally:
         fixture.doCleanups()

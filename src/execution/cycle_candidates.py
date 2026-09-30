@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import chain
 from hashlib import sha256
 
@@ -11,6 +11,7 @@ from execution.progress import phase
 from generation.candidate import (
     CandidateChange,
     FormulaCandidate,
+    exploration_candidate,
     mutation_candidate,
 )
 from generation.catalog import GenerationCatalog
@@ -23,10 +24,12 @@ from generation.internal_edits import (
 from generation.self_correlation import (
     SELF_CORRELATION_REPAIR_FAMILIES,
     SELF_CORRELATION_INTERNAL_FAMILIES,
+    SELF_CORRELATION_RESEARCH_FAMILIES,
     iter_self_correlation_leaves,
     shared_field_replacements,
+    self_correlation_research_fields,
 )
-from generation.transformations import iter_transformation_leaves
+from generation.transformations import COMPLEMENTARY_SIGNAL_REFRAME, iter_transformation_leaves
 from learning.quality_proximity import (
     LOCAL_POLISHING_STAGE,
     ParentImprovementStageSet,
@@ -39,6 +42,7 @@ from persistence.backtests import (
     BACKTEST_TERMINAL_STATUSES,
     BacktestSnapshot,
     BacktestTaskRecord,
+    BacktestMutationRecord,
 )
 from persistence.run_diagnostics import (
     CandidatePlanningDiagnostic,
@@ -56,6 +60,25 @@ from worldquant.backtests import BacktestSettings
 
 class OptimizationCandidatesExhausted(ValueError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class SupportedFormulaIdentities:
+    formulas: tuple[str, ...]
+    formula_fingerprints: frozenset[str]
+
+
+def supported_formula_identities(formulas: tuple[str, ...]) -> SupportedFormulaIdentities:
+    supported_formulas = []
+    fingerprints = set()
+    for formula in formulas:
+        try:
+            candidate = exploration_candidate(parse_formula(formula).expression)
+        except (FormulaSyntaxError, ValueError):
+            continue
+        supported_formulas.append(candidate.formula)
+        fingerprints.add(candidate.fingerprint)
+    return SupportedFormulaIdentities(tuple(supported_formulas), frozenset(fingerprints))
 
 
 class CycleCandidatePlanningStopped(ValueError):
@@ -117,6 +140,7 @@ class ImprovementFamilyUsage:
     blocked_request_count: int
     consumed_request_count: int
     attempted_request_count: int
+    unsubmitted_request_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +174,7 @@ def build_improvement_candidate_pools(
     field_candidates: tuple[str, ...],
     group_candidates: tuple[str, ...],
     reserved_tasks: tuple[BacktestTaskRecord, ...],
+    mutations: tuple[BacktestMutationRecord, ...] = (),
     excluded_formula_fingerprints: frozenset[str] = frozenset(),
     self_correlation_references: tuple[SelfCorrelationReference, ...] = (),
     internal_field_candidates: tuple[str, ...] | None = None,
@@ -179,6 +204,7 @@ def build_improvement_candidate_pools(
     }
     if len(references_by_parent) != len(self_correlation_references):
         raise ValueError("self_correlation_parent_reference_duplicate")
+    tasks_by_id = {task.task_id: task for task in reserved_tasks}
     pools: list[ImprovementCandidatePool] = []
     for parent_task_id in sorted(eligible_parent_task_ids):
         stage = stages_by_parent[parent_task_id].stage
@@ -239,12 +265,26 @@ def build_improvement_candidate_pools(
                 leaves = chain(
                     iter_self_correlation_leaves(
                         parsed.expression, reference, catalog,
-                        families=sc_families, neutralization=settings.neutralization,
+                        families=SELF_CORRELATION_RESEARCH_FAMILIES,
+                        neutralization=settings.neutralization,
+                        field_candidates=explore_internal_fields(
+                            self_correlation_research_fields(catalog,
+                                field_candidates if internal_field_candidates is None else internal_field_candidates),
+                            rotation_key=f"{parent_task_id}|sc-research",
+                        ),
+                    ),
+                    iter_self_correlation_leaves(
+                        parsed.expression, reference, catalog,
+                        families=tuple(f for f in sc_families if f in SELF_CORRELATION_REPAIR_FAMILIES
+                                       and f not in SELF_CORRELATION_RESEARCH_FAMILIES),
+                        neutralization=settings.neutralization,
+                        cross_dataset=sc_reference.correlation >= 0.85,
                         field_candidates=explore_internal_fields(
                             shared_field_replacements(
                                 parsed.expression, reference, catalog,
                                 field_candidates if internal_field_candidates is None
                                 else internal_field_candidates,
+                                cross_dataset=sc_reference.correlation >= 0.85,
                             ),
                             rotation_key=f"{rotation_key}|{parent_task_id}|sc",
                         ),
@@ -266,6 +306,11 @@ def build_improvement_candidate_pools(
             ),
         )
         for leaf in leaves:
+            if (sc_reference is not None and sc_reference.correlation is not None
+                    and not isinstance(leaf, FormulaCandidate) and leaf.family == COMPLEMENTARY_SIGNAL_REFRAME):
+                # Mixing an untested raw field is not evidence for combining two
+                # independently qualified, low-return-correlation signals.
+                continue
             candidate = (
                 leaf
                 if isinstance(leaf, FormulaCandidate)
@@ -291,6 +336,10 @@ def build_improvement_candidate_pools(
                 )
             )
             assert candidate.change is not None
+            if sc_reference is not None and sc_reference.correlation is not None and sc_reference.platform_alpha_id:
+                candidate = replace(candidate, change=replace(candidate.change,
+                    conflict_reference_alpha_id=sc_reference.platform_alpha_id,
+                    conflict_reference_formula=sc_reference.formula))
             family = candidate.change.action
             leaf_id = (
                 f"{family}:{candidate.fingerprint}"
@@ -351,6 +400,23 @@ def build_improvement_candidate_pools(
                     family=family,
                 )
             )
+        # Trial history comes from saved task/mutation facts, not re-enumeration
+        # of today's catalog. A missing field or a new run cannot reset it.
+        unsubmitted_by_family: Counter[str] = Counter()
+        for family in SELF_CORRELATION_RESEARCH_FAMILIES:
+            attempted_by_family.pop(family, None)
+        for mutation in mutations:
+            task = tasks_by_id.get(mutation.child_task_id)
+            if (mutation.parent_task_id != parent_task_id
+                    or mutation.action not in SELF_CORRELATION_RESEARCH_FAMILIES
+                    or task is None or task.account_scope != parent.task.account_scope
+                    or task.settings_json != parent.task.settings_json
+                    or backtest_was_cancelled_before_submission(task)):
+                continue
+            if task.submission_started_at is not None:
+                attempted_by_family[mutation.action] += 1
+            elif task.status in BACKTEST_ACTIVE_STATUSES:
+                unsubmitted_by_family[mutation.action] += 1
         pools.append(
             ImprovementCandidatePool(
                 parent_task_id=parent_task_id,
@@ -374,11 +440,13 @@ def build_improvement_candidate_pools(
                         blocked_request_count=blocked_by_family[family],
                         consumed_request_count=consumed_by_family[family],
                         attempted_request_count=attempted_by_family[family],
+                        unsubmitted_request_count=unsubmitted_by_family[family],
                     )
                     for family in sorted(
                         set(blocked_by_family)
                         | set(consumed_by_family)
                         | set(attempted_by_family)
+                        | set(unsubmitted_by_family)
                     )
                 ),
             )

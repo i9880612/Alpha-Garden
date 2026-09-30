@@ -56,6 +56,8 @@ class AutomatedRunLimits:
     real_backtests_authorized: bool = False
     automatic_submissions_enabled: bool = False
     optimization_only: bool = False
+    self_correlation_parent_task_id: str | None = None
+    self_correlation_plan_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +141,21 @@ def validate_automated_run_limits(limits: AutomatedRunLimits) -> None:
         raise ValueError("automated_run_automatic_submission_setting_invalid")
     if not isinstance(limits.optimization_only, bool):
         raise ValueError("automated_run_optimization_mode_invalid")
+    if limits.self_correlation_parent_task_id is not None:
+        if (not isinstance(limits.self_correlation_parent_task_id, str)
+                or not limits.self_correlation_parent_task_id.strip()
+                or limits.optimization_only or limits.automatic_submissions_enabled
+                or not limits.real_backtests_authorized
+                or (limits.generation_count, limits.backtest_count, limits.max_cycles, limits.max_backtests) != (2, 2, 3, 6)
+                or limits.max_in_flight_backtests > 2):
+            raise ValueError("automated_run_sc_research_limits_invalid")
+    if limits.self_correlation_plan_key is not None and (
+        limits.self_correlation_parent_task_id is None
+        or not isinstance(limits.self_correlation_plan_key, str)
+        or len(limits.self_correlation_plan_key) != 64
+        or any(c not in "0123456789abcdef" for c in limits.self_correlation_plan_key)
+    ):
+        raise ValueError("automated_run_sc_plan_key_invalid")
     if limits.max_backtests < 0:
         raise ValueError("automated_run_backtest_limit_invalid")
     if limits.real_backtests_authorized:
@@ -307,6 +324,17 @@ def prepare_automated_run(
                 connection,
                 account_scope,
             )
+        if limits.self_correlation_parent_task_id is not None:
+            from execution.sc_research import build_self_correlation_research_plan
+            from execution.seeds import synchronize_signal_seeds
+            plan = build_self_correlation_research_plan(
+                connection, settings_policy, parent_task_id=limits.self_correlation_parent_task_id,
+                observed_at=_timestamp(created_at, "automated_run_created_at_invalid"), account_scope=account_scope,
+            )
+            if limits.self_correlation_plan_key is not None and plan.fingerprint != limits.self_correlation_plan_key:
+                raise ValueError("sc_research_reviewed_plan_changed")
+            synchronize_signal_seeds(connection, candidate_task_ids=(plan.parent_task_id,), observed_at=created_at)
+            record = replace(record, self_correlation_plan_json=plan.canonical_json())
         result = create_automated_run(connection, record)
         create_run_allocation(connection, RunAllocationRecord(
             run_id=record.run_id,
@@ -1131,6 +1159,8 @@ def _run_id(
             "settingsPolicy": json.loads(settings_policy_json),
             "limits": {
                 name: getattr(limits, name) for name in limits.__dataclass_fields__
+                if name not in {"self_correlation_parent_task_id", "self_correlation_plan_key"}
+                or getattr(limits, name) is not None
             },
             "created_at": created_at,
         },

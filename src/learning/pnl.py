@@ -52,6 +52,16 @@ def daily_pnl_correlation(first, second, *, minimum_intervals: int) -> float | N
     return _correlation(*(tuple(values[key] for key in intervals) for values in increments), minimum_intervals)
 
 
+def common_pnl_correlations(parent, child, reference, *, minimum_intervals: int):
+    """Compare both pairs on the same original intervals, including both endpoints."""
+    increments = tuple(_increments(points) for points in (parent, child, reference))
+    intervals = sorted(increments[0].keys() & increments[1].keys() & increments[2].keys())
+    values = tuple(tuple(item[key] for key in intervals) for item in increments)
+    before = _correlation(values[0], values[2], minimum_intervals)
+    after = _correlation(values[1], values[2], minimum_intervals)
+    return (before, after) if before is not None and after is not None else None
+
+
 def _increments(points):
     return {(a[0], b[0]): b[1] - a[1] for a, b in zip(points, points[1:])}
 

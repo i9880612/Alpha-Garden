@@ -52,6 +52,7 @@ class AutomatedRunRecord:
     stop_reason: str | None
     candidate_planning_stop_diagnostic_json: str | None
     optimization_only: bool = False
+    self_correlation_plan_json: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +180,7 @@ def _create_automated_run_table(
             stop_reason TEXT,
             candidate_planning_stop_diagnostic_json TEXT,
             optimization_only INTEGER NOT NULL DEFAULT 0 CHECK (optimization_only IN (0, 1)),
+            self_correlation_plan_json TEXT,
             CHECK (
                 CASE
                     WHEN stop_reason IN (
@@ -223,8 +225,8 @@ def create_automated_run(
             last_request_failure_at, last_request_retry_after_seconds,
             created_at,
             started_at, retry_not_before, finished_at, stop_reason,
-            candidate_planning_stop_diagnostic_json, optimization_only
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            candidate_planning_stop_diagnostic_json, optimization_only, self_correlation_plan_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         _record_values(record),
     )
@@ -626,6 +628,13 @@ def _validate_record(record: AutomatedRunRecord) -> None:
         raise ValueError("automated_run_automatic_submission_setting_invalid")
     if not isinstance(record.optimization_only, bool):
         raise ValueError("automated_run_optimization_mode_invalid")
+    if record.self_correlation_plan_json is not None:
+        plan = json.loads(record.self_correlation_plan_json)
+        if (not isinstance(plan, dict) or plan.get("account_scope") != record.account_scope
+                or not isinstance(plan.get("candidates"), list) or len(plan["candidates"]) != 6
+                or record.optimization_only or record.automatic_submissions_enabled
+                or (record.generation_count, record.backtest_count, record.max_cycles, record.max_backtests) != (2, 2, 3, 6)):
+            raise ValueError("automated_run_sc_plan_invalid")
     if record.max_backtests < 0:
         raise ValueError("automated_run_backtest_limit_invalid")
     if record.real_backtests_authorized:
@@ -848,6 +857,7 @@ def _record_identity(record: AutomatedRunRecord) -> tuple[object, ...]:
         record.automatic_submissions_enabled,
         record.created_at,
         record.optimization_only,
+        record.self_correlation_plan_json,
     )
 
 
@@ -884,6 +894,7 @@ def _record_values(record: AutomatedRunRecord) -> tuple[object, ...]:
         record.stop_reason,
         record.candidate_planning_stop_diagnostic_json,
         record.optimization_only,
+        record.self_correlation_plan_json,
     )
 
 
@@ -906,6 +917,7 @@ def _record_from_row(row: sqlite3.Row) -> AutomatedRunRecord:
         real_backtests_authorized=bool(row["real_backtests_authorized"]),
         automatic_submissions_enabled=bool(row["automatic_submissions_enabled"]),
         optimization_only=bool(row["optimization_only"]),
+        self_correlation_plan_json=row["self_correlation_plan_json"],
         status=row["status"],
         current_cycle=row["current_cycle"],
         consecutive_failures=row["consecutive_failures"],

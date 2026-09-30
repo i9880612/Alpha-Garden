@@ -24,8 +24,13 @@ MAX_SUBMISSION_CHECK_ATTEMPTS = 3
 DEFERRED_SUBMISSION_CHECK_SECONDS = 600
 
 
-def remaining_submission_check_seconds(connection, snapshot, observed_at: str, *, include_deferred: bool = False) -> float | None:
-    if not local_formal_submission_eligible(snapshot):
+def remaining_submission_check_seconds(connection, snapshot, observed_at: str, *, include_deferred: bool = False,
+                                       research_only: bool = False) -> float | None:
+    if research_only:
+        if (snapshot.task.status != "completed" or snapshot.task.platform_alpha_id is None
+                or snapshot.result is None):
+            return None
+    elif not local_formal_submission_eligible(snapshot):
         return None
     if get_formal_submission_attempt(connection, snapshot.task.task_id) is not None:
         return None
@@ -54,14 +59,15 @@ def remaining_submission_check_seconds(connection, snapshot, observed_at: str, *
 
 def check_completed_backtest(
     database_path: str | Path, client: WorldQuantClient, task_id: str, *, observed_at: str,
-    recovered: bool = False, include_deferred: bool = False,
+    recovered: bool = False, include_deferred: bool = False, research_only: bool = False,
 ) -> bool:
     """Run one due check read; terminal checks are not repeated, transient reads are bounded."""
     with open_database(database_path) as connection:
         snapshot = get_backtest_task(connection, task_id)
-        if snapshot is None or not local_formal_submission_eligible(snapshot):
+        if snapshot is None:
             return False
-        delay = remaining_submission_check_seconds(connection, snapshot, observed_at, include_deferred=include_deferred)
+        delay = remaining_submission_check_seconds(connection, snapshot, observed_at,
+            include_deferred=include_deferred, research_only=research_only)
         if delay is None or delay > 0:
             return False
         previous = get_submission_check(connection, task_id)
@@ -75,7 +81,9 @@ def check_completed_backtest(
         retryable = state == "pending"
         retry_after = observation.retry_after_seconds
     except (WorldQuantRequestError, WorldQuantProtocolError) as exc:
-        if isinstance(exc, WorldQuantRequestError) and exc.status_code in {401, 403}:
+        if isinstance(exc, WorldQuantRequestError) and (
+            exc.status_code in {401, 403, 429} or exc.code.startswith("worldquant_authentication_")
+        ):
             raise
         payload, error_code = None, exc.code
         state = "error"

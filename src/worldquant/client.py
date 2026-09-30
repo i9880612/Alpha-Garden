@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
+from http.client import IncompleteRead
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
@@ -615,7 +616,7 @@ class WorldQuantClient:
                 response = self._request_executor(request, self.timeout_seconds)
             except WorldQuantRequestError:
                 raise
-            except (OSError, TimeoutError, URLError, socket.timeout) as exc:
+            except (OSError, TimeoutError, URLError, socket.timeout, IncompleteRead) as exc:
                 raise WorldQuantRequestError(
                     code, retryable=True, outcome_unknown=outcome_unknown,
                     transport_error_type=type(getattr(exc, "reason", exc)).__name__,

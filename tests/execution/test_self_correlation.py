@@ -2,6 +2,8 @@ import json
 import unittest
 from dataclasses import replace
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from execution.self_correlation import load_self_correlation_references
 from persistence.backtests import get_backtest_task
@@ -31,18 +33,31 @@ class SelfCorrelationReferenceTests(unittest.TestCase):
             parent = get_backtest_task(connection, tasks[0])
             reference = PlatformSubmittedAlphaRecord("group-account", "conflict-alpha", "rank(open)",
                 "ACTIVE", "2026-09-01T00:00:00+00:00", False,
-                {"settings": json.loads(parent.task.settings_json)}, observed)
+                {"settings": json.loads(parent.task.settings_json), "is": {"sharpe": 2.0}}, observed)
             original_settings = parent.task.settings_json
             for settings in (json.loads(original_settings),
                              {**json.loads(original_settings), "neutralization": "SUBINDUSTRY", "truncation": .05}):
                 with self.subTest(settings=settings):
                     selected = load_self_correlation_references(connection, parents=(parent,),
-                        submitted_alphas=(replace(reference, raw_payload={"settings": settings}),),
+                        submitted_alphas=(replace(reference, raw_payload={"settings": settings, "is": {"sharpe": 2.0}}),),
                         account_scope="group-account", observed_at=datetime.fromisoformat(observed))
                     self.assertEqual(len(selected), 1)
                     self.assertEqual((selected[0].parent_task_id, selected[0].formula, selected[0].correlation),
                                      (tasks[0], "rank(open)", .9))
                     self.assertEqual(get_backtest_task(connection, tasks[0]).task.settings_json, original_settings)
             self.assertEqual(list_formal_submission_attempts(connection), ())
+            # A newer transport error must invalidate current repair permission in both readers.
+            from execution.cycles import _explicit_self_correlation_evidence
+            attempt = SimpleNamespace(task_id=tasks[0], check_observed_at=observed,
+                                      check_payload_json=json.dumps(payload), status="ineligible")
+            latest = "2026-09-04T00:09:00+00:00"
+            save_submission_check(connection, SubmissionCheckRecord(tasks[0], latest, None, "read_error", 2))
+            with patch("execution.self_correlation.list_formal_submission_attempts", return_value=(attempt,)):
+                self.assertEqual(load_self_correlation_references(connection, parents=(parent,),
+                    submitted_alphas=(reference,), account_scope="group-account",
+                    observed_at=datetime.fromisoformat(latest)), ())
+                facts = _explicit_self_correlation_evidence(connection, account_scope="group-account",
+                    evidence_cutoff=datetime.fromisoformat(latest))
+                self.assertEqual(facts[0].status, "PENDING")
             self.assertEqual(load_self_correlation_references(connection, parents=(parent,),
                 submitted_alphas=(reference,), account_scope="other-account", observed_at=datetime.fromisoformat(observed)), ())

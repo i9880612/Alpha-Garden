@@ -100,6 +100,19 @@ def test_failed_request_does_not_fail_seed_or_research_batch(pending_seed, caplo
         assert record.points is None and record.retry_not_before is not None
 
 
+@pytest.mark.parametrize("status", (401, 403, 429))
+def test_account_errors_escape_without_recording_an_object_retry(pending_seed, status):
+    case, snapshot = pending_seed
+    client = Mock()
+    client.fetch_pnl.side_effect = WorldQuantRequestError("pnl_account_error", status_code=status,
+        retryable=status == 429, outcome_unknown=False, retry_after_seconds=120)
+    with pytest.raises(WorldQuantRequestError) as raised:
+        advance(case, snapshot, client)
+    assert raised.value.status_code == status
+    with open_database(case.database_path) as connection:
+        assert list_pnl_series(connection) == ()
+
+
 def checked_result(connection, identity, *, failed_check=None):
     task = prepare_backtest_task(connection, account_scope="group-account", formula=f"ts_mean(close,{identity})",
                                  settings={"delay": 1}, created_at=f"2026-09-01T00:0{identity}:00+00:00")
@@ -133,6 +146,27 @@ def test_unchecked_result_passing_non_sc_checks_collects_local_sc_evidence(pendi
     assert [call.kwargs["platform_alpha_id"] for call in client.fetch_pnl.call_args_list] == [
         "reference", eligible.task.platform_alpha_id]
     client.fetch_formal_submission_check.assert_not_called()
+    client.submit_formal_alpha.assert_not_called()
+
+
+def test_sc_research_collects_failed_candidate_evidence_without_historical_backfill(pending_seed):
+    case, _ = pending_seed
+    with open_database(case.database_path) as connection:
+        checked_result(connection, "7")
+        candidate = checked_result(connection, "8", failed_check="LOW_FITNESS")
+    client = Mock()
+    client.fetch_pnl.side_effect = lambda *, platform_alpha_id: PnlObservation(
+        series(platform_alpha_id, [math.cos(i) for i in range(300)]).points)
+    ids = (candidate.task.task_id,)
+    outcomes = [capture_next_seed_series(case.database_path, client, account_scope="group-account",
+        observed_at="2026-09-09T00:00:00+00:00", candidate_task_ids=ids, research_task_ids=ids)
+        for _ in range(3)]
+    assert outcomes == [0.0, 0.0, None]
+    assert [call.kwargs["platform_alpha_id"] for call in client.fetch_pnl.call_args_list] == [
+        "reference", candidate.task.platform_alpha_id]
+    with open_database(case.database_path) as connection:
+        assert {s.platform_alpha_id for s in list_pnl_series(connection)} == {"reference", "alpha_8"}
+        assert not list_signal_seeds(connection)
     client.submit_formal_alpha.assert_not_called()
 
 

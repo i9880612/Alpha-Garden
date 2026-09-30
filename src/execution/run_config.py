@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 from execution.runs import AutomatedRunLimits, validate_automated_run_limits
@@ -28,6 +29,8 @@ def load_automated_run_limits(
     cycles: int,
     automatic_submissions_enabled: bool = False,
     optimization_only: bool = False,
+    self_correlation_parent_task_id: str | None = None,
+    self_correlation_plan_key: str | None = None,
 ) -> AutomatedRunLimits:
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -36,6 +39,8 @@ def load_automated_run_limits(
             cycles=cycles,
             automatic_submissions_enabled=automatic_submissions_enabled,
             optimization_only=optimization_only,
+            self_correlation_parent_task_id=self_correlation_parent_task_id,
+            self_correlation_plan_key=self_correlation_plan_key,
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("automated_run_config_file_invalid") from exc
@@ -48,6 +53,8 @@ def automated_run_limits_from_config(
     cycles: int,
     automatic_submissions_enabled: bool = False,
     optimization_only: bool = False,
+    self_correlation_parent_task_id: str | None = None,
+    self_correlation_plan_key: str | None = None,
 ) -> AutomatedRunLimits:
     if not isinstance(payload, Mapping) or set(payload) != set(_CONFIG_KEYS):
         raise ValueError("automated_run_config_invalid")
@@ -69,5 +76,17 @@ def automated_run_limits_from_config(
         automatic_submissions_enabled=automatic_submissions_enabled,
         optimization_only=optimization_only,
     )
+    validate_automated_run_limits(limits)
+    if self_correlation_parent_task_id is not None:
+        if cycles != 3:
+            raise ValueError("sc_research_requires_three_cycles")
+        limits = replace(
+            limits, generation_count=2, backtest_count=2, max_backtests=6,
+            max_in_flight_backtests=min(2, limits.max_in_flight_backtests),
+            self_correlation_parent_task_id=self_correlation_parent_task_id,
+            self_correlation_plan_key=self_correlation_plan_key,
+        )
+    elif self_correlation_plan_key is not None:
+        raise ValueError("automated_run_sc_plan_key_invalid")
     validate_automated_run_limits(limits)
     return limits

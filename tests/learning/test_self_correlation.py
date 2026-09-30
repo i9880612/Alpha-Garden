@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from learning.self_correlation import (
     SelfCorrelationCheckEvidence,
+    assess_self_correlation_peers,
     select_self_correlation_reference,
 )
 from persistence.backtests import (
@@ -118,6 +119,23 @@ class SelfCorrelationEligibilityTests(unittest.TestCase):
             observed_at=self.now,
         )
 
+    def test_all_peers_use_sharpe_and_missing_values_remain_unknown(self):
+        a = replace(self.reference, platform_alpha_id="A", raw_payload={"is": {"sharpe": 1.5}})
+        b = replace(self.reference, platform_alpha_id="B", raw_payload={"is": {"sharpe": 2.0}})
+        result = assess_self_correlation_peers(1.8, (("A", .82), ("B", .78)), (a, b))
+        self.assertEqual(result.state, "failed")
+        self.assertEqual([item.reference_id for item in result.blockers], ["B"])
+        self.assertEqual(result.required_sharpe, 2.2)
+        self.assertEqual(assess_self_correlation_peers(2.2, (("B", .7),), (b,)).state, "passed")
+        self.assertEqual(assess_self_correlation_peers(2.19, (("B", .7),), (b,)).state, "failed")
+        unknown = assess_self_correlation_peers(1.8, (("A", .82), ("B", .78)), (a,))
+        self.assertEqual(unknown.state, "pending")
+        self.assertIsNone(unknown.required_sharpe)
+        # Solving A cannot hide a new blocker C in the child's full check.
+        c = replace(b, platform_alpha_id="C", raw_payload={"is": {"sharpe": 2.5}})
+        after = assess_self_correlation_peers(2.2, (("A", .6), ("B", .78), ("C", .71)), (a, b, c))
+        self.assertEqual([item.reference_id for item in after.blockers], ["C"])
+
     def test_complete_failure_selects_same_setting_peer_despite_old_pending_sc(self):
         selected = self.select()
         self.assertEqual(selected.correlation, 0.8)
@@ -135,6 +153,18 @@ class SelfCorrelationEligibilityTests(unittest.TestCase):
             },
         )
         self.assertEqual(self.select(reference=reference), selected)
+
+    def test_official_conflict_can_still_reference_a_decommissioned_submission(self):
+        reference = replace(self.reference, status="DECOMMISSIONED", raw_payload={
+            "settings": {**self.settings, "simulationMode": "FULL", "startDate": "2019-01-01", "endDate": "2023-12-31"}})
+        selected = self.select(reference=reference)
+        self.assertEqual((selected.platform_alpha_id, selected.correlation), ("reference", .8))
+        for check in (None, replace(self.check, reference_id="other")):
+            self.assertIsNone(select_self_correlation_reference(
+                self.parent, check, (reference,), observed_at=self.now))
+        for mode in ("IS", None, "UNKNOWN"):
+            self.assertIsNone(self.select(reference=replace(reference, raw_payload={
+                "settings": {**self.settings, "simulationMode": mode}})))
 
     def test_submitted_parent_uses_own_structure_without_inventing_sc_result(self):
         reference = replace(self.reference, platform_alpha_id="alpha-parent", formula="rank(close)")

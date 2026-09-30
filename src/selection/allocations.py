@@ -10,8 +10,10 @@ from generation.self_correlation import (
     SELF_CORRELATION_REPAIR_FAMILIES,
     SELF_CORRELATION_LIGHT_FAMILIES,
     SELF_CORRELATION_INTERNAL_FAMILIES,
+    SELF_CORRELATION_RESEARCH_FAMILIES,
 )
 from generation.transformations import (
+    COMPLEMENTARY_SIGNAL_REFRAME,
     DISTRIBUTION_STABILIZATION,
     GROUP_RELATIVE_REFRAME,
     STRUCTURAL_TRANSFORMATION_FAMILIES,
@@ -46,6 +48,7 @@ LOW_SUB_UNIVERSE_SHARPE_STRUCTURAL_FAMILIES = (
     TEMPORAL_PERSISTENCE_REFRAME,
 )
 MAX_QUALIFIED_EVOLUTION_BACKTESTS_PER_LINEAGE = 2
+INITIAL_SC_TRIALS_PER_FAMILY = 2
 QUALIFIED_EVOLUTION_FAMILIES = (
     *INTERNAL_EDIT_FAMILIES,
     *POLISHING_FAMILIES,
@@ -65,6 +68,7 @@ class SignalImprovementFamilyCapacity:
     available_leaf_count: int
     blocked_leaf_count: int = 0
     attempted_leaf_count: int = 0
+    unsubmitted_leaf_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,23 +237,23 @@ def allocate_backtest_sources(
             raise ValueError("source_allocation_parent_evidence_mismatch")
         source = source_by_branch[branch_task_id]
         if source.stage == QUALIFIED_EVOLUTION_STAGE:
-            if target_record.targets:
+            if any(target.check_name != "SELF_CORRELATION" for target in target_record.targets):
                 raise ValueError("source_allocation_qualified_parent_target_invalid")
-            allocation_targets: list[OptimizationTarget | None] = [None]
+            allocation_targets: list[OptimizationTarget | None] = list(target_record.targets) or [None]
         else:
             allocation_targets = list(target_record.targets)
-            expected_defects = tuple(
-                sorted(target.check_name for target in target_record.targets)
+        expected_defects = tuple(
+            sorted(target.check_name for target in target_record.targets)
+        )
+        for target in target_record.targets:
+            strategy = strategies_by_target.get(
+                (branch_task_id, target.check_name)
             )
-            for target in target_record.targets:
-                strategy = strategies_by_target.get(
-                    (branch_task_id, target.check_name)
-                )
-                if strategy is not None and (
-                    strategy.settings_key != target_record.settings_key
-                    or strategy.defect_checks != expected_defects
-                ):
-                    raise ValueError("source_allocation_action_strategy_mismatch")
+            if strategy is not None and (
+                strategy.settings_key != target_record.settings_key
+                or strategy.defect_checks != expected_defects
+            ):
+                raise ValueError("source_allocation_action_strategy_mismatch")
         targets_by_root.setdefault(source.root_task_id, {})[
             branch_task_id
         ] = allocation_targets
@@ -415,6 +419,12 @@ def _round_robin_roots(
         for source in source_by_branch.values()
         for family in source.family_capacities
     }
+    scheduled_research_by_family = {
+        (source.branch_task_id, family.family): family.attempted_leaf_count + family.unsubmitted_leaf_count
+        for source in source_by_branch.values()
+        for family in source.family_capacities
+        if family.family in SELF_CORRELATION_RESEARCH_FAMILIES
+    }
     exploited_contexts: set[
         tuple[str, str, str, tuple[str, ...], str]
     ] = set()
@@ -428,7 +438,7 @@ def _round_robin_roots(
             and qualified_evolution_counts[root_task_id]
             < MAX_QUALIFIED_EVOLUTION_BACKTESTS_PER_LINEAGE
             and any(remaining_by_family.get((branch_task_id, family), 0) > 0
-                    for family in SELF_CORRELATION_REPAIR_FAMILIES)
+                    for family in allowed_self_correlation_families(source_by_branch[branch_task_id].self_correlation))
             for root_task_id, ranked_branches in ranked_by_root.items()
             for branch_task_id, _targets in ranked_branches
         )
@@ -466,7 +476,7 @@ def _round_robin_roots(
                 if prefer_sc_repair and (
                     source.stage != QUALIFIED_EVOLUTION_STAGE
                     or not any(remaining_by_family.get((branch_task_id, family), 0) > 0
-                               for family in SELF_CORRELATION_REPAIR_FAMILIES)
+                                for family in allowed_self_correlation_families(source.self_correlation))
                 ):
                     continue
                 if remaining_by_parent[branch_task_id] == 0:
@@ -504,7 +514,21 @@ def _round_robin_roots(
                         and strategy.mode == ACTION_STRATEGY_EXPLOITATION
                         and exploitation_context not in exploited_contexts
                     )
-                    family_order = _candidate_family_order(
+                    initial_families = tuple(
+                        family for family in SELF_CORRELATION_RESEARCH_FAMILIES
+                        if source.self_correlation is not None and sc_capacity > 0
+                        and scheduled_research_by_family.get((branch_task_id, family), 0) < INITIAL_SC_TRIALS_PER_FAMILY
+                        and remaining_by_family.get((branch_task_id, family), 0) > 0
+                    )
+                    initial_research = bool(initial_families)
+                    if initial_research and not prefer_sc_repair:
+                        # Finish the initial comparisons in SC slots; never
+                        # expand the run's SC reserve to force six trials.
+                        continue
+                    family_order = tuple(sorted(initial_families, key=lambda family: (
+                        scheduled_research_by_family.get((branch_task_id, family), 0),
+                        SELF_CORRELATION_RESEARCH_FAMILIES.index(family),
+                    ))) if initial_research else _candidate_family_order(
                         target,
                         (
                             allowed_self_correlation_families(source.self_correlation)
@@ -542,7 +566,7 @@ def _round_robin_roots(
                     selected_family = family
                     selected_target_position = current_position
                     if (
-                        use_preference
+                        use_preference and not initial_research
                         and strategy is not None
                         and family in strategy.preferred_actions
                     ):
@@ -558,11 +582,15 @@ def _round_robin_roots(
                         selected_family,
                     )
                 )
-                if selected_family in SELF_CORRELATION_REPAIR_FAMILIES:
+                if prefer_sc_repair or selected_family in SELF_CORRELATION_REPAIR_FAMILIES:
                     sc_selected += 1
                 remaining_by_family[(branch_task_id, selected_family)] -= 1
                 remaining_by_parent[branch_task_id] -= 1
                 attempted_by_family[(branch_task_id, selected_family)] += 1
+                if selected_family in SELF_CORRELATION_RESEARCH_FAMILIES:
+                    scheduled_research_by_family[(branch_task_id, selected_family)] = (
+                        scheduled_research_by_family.get((branch_task_id, selected_family), 0) + 1
+                    )
                 if selected_exploitation_context is not None:
                     exploited_contexts.add(selected_exploitation_context)
                 if source.stage == QUALIFIED_EVOLUTION_STAGE:
@@ -620,6 +648,8 @@ def _candidate_families_for_target(
     source_families = tuple(item.family for item in source.family_capacities
                             if item.family not in SELF_CORRELATION_REPAIR_FAMILIES
                             or item.family in allowed_self_correlation_families(source.self_correlation))
+    if target is not None and target.check_name == "SELF_CORRELATION":
+        return tuple(family for family in source_families if family != COMPLEMENTARY_SIGNAL_REFRAME)
     if target is None or target.check_name != "LOW_SUB_UNIVERSE_SHARPE":
         return source_families
     allowed = set(
@@ -688,6 +718,9 @@ def _validate_sources(sources: tuple[SignalImprovementSource, ...]) -> None:
             or isinstance(item.attempted_leaf_count, bool)
             or not isinstance(item.attempted_leaf_count, int)
             or item.attempted_leaf_count < 0
+            or isinstance(item.unsubmitted_leaf_count, bool)
+            or not isinstance(item.unsubmitted_leaf_count, int)
+            or item.unsubmitted_leaf_count < 0
             for item in source.family_capacities
         ):
             raise ValueError("source_allocation_improvement_sources_invalid")
@@ -723,10 +756,12 @@ def allowed_self_correlation_families(correlation: float | None) -> tuple[str, .
             or not math.isfinite(correlation) or not 0 < correlation <= 1):
         return ()
     if correlation < 0.75:
-        return SELF_CORRELATION_LIGHT_FAMILIES
+        return (*SELF_CORRELATION_RESEARCH_FAMILIES, *SELF_CORRELATION_LIGHT_FAMILIES)
     if correlation < 0.85:
-        return SELF_CORRELATION_INTERNAL_FAMILIES
-    return ()
+        return (*SELF_CORRELATION_RESEARCH_FAMILIES, *SELF_CORRELATION_INTERNAL_FAMILIES)
+    return (*SELF_CORRELATION_RESEARCH_FAMILIES, *SELF_CORRELATION_INTERNAL_FAMILIES, *INTERNAL_EDIT_FAMILIES,
+            *(family for family in STRUCTURAL_TRANSFORMATION_FAMILIES if family != COMPLEMENTARY_SIGNAL_REFRAME),
+            *POLISHING_FAMILIES)
 
 
 def _high_sc_risk(record: ParentSettingsEvidence) -> bool:
@@ -779,6 +814,11 @@ def _candidate_family_order(
         if action_strategy is not None
         else set()
     )
+    sc_success_rates = {
+        item.action: item.safe_progress_count / item.resolved_count
+        for item in action_strategy.actions
+        if item.action in preferred and item.resolved_count > 0
+    } if target is not None and target.check_name == "SELF_CORRELATION" and action_strategy is not None else {}
     return tuple(
         sorted(
             transformations,
@@ -788,6 +828,7 @@ def _candidate_family_order(
                     if action in preferred
                     else 2 if action in deprioritized else 1
                 ),
+                -sc_success_rates.get(action, 0.0),
                 comparison_counts.get(action, 0),
                 attempted_by_family.get(action, 0),
                 _rotation_identity(

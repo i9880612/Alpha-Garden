@@ -288,12 +288,12 @@ def run_automated_run(
             continue
 
         try:
-            recovered = advance_stopped_run_backtest(
+            recovered = None if run.self_correlation_plan_json is not None else advance_stopped_run_backtest(
                 database_path, client, account_scope=run.account_scope,
                 observed_at=observed.isoformat(),
             ) if run.status == "running" else None
             observed = _aware_time(current_time())
-            if run.status == "running" and advance_deferred_submission_check(
+            if run.status == "running" and run.self_correlation_plan_json is None and advance_deferred_submission_check(
                 database_path, client, account_scope=run.account_scope, observed_at=observed.isoformat(),
             ):
                 step_count += 1

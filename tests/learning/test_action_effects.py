@@ -46,6 +46,50 @@ _RUN_DIVERSE_ASSIGNMENTS = (
 
 
 class DefectActionEffectTests(unittest.TestCase):
+    def test_sc_learning_rewards_full_pass_and_keeps_partial_progress_and_errors_separate(self):
+        from datetime import datetime
+        roots = tuple(f"root-{i}" for i in range(5))
+        records = [self._record(root, defects=(), fitness=1.2, sharpe=1.8) for root in roots]
+        checks = [ExplicitSelfCorrelationEvidence(root, "FAIL", "failed", "2026-09-01T00:00:00+00:00",
+                   other_checks_passed=True, blocker_count=2, sharpe_gap=.4) for root in roots]
+        mutations, runs = [], []
+        for action, status, state, other in (("repaired", "PASS", "passed", True),
+                ("still_blocked", "FAIL", "failed", True), ("read_error", "PENDING", "pending", None),
+                ("quality_regression", "PASS", "failed", False),
+                ("quality_regression_pending_sc", "PENDING", "failed", False),
+                ("missing_checks", "FAIL", "failed", None)):
+            for index, (root, run) in enumerate(_RUN_DIVERSE_ASSIGNMENTS):
+                child = f"{action}-{index}"
+                records.append(self._record(child, defects=(), fitness=1.1, sharpe=1.9))
+                mutations.append(BacktestMutationRecord(child, root, action, "formula", root, child))
+                runs.append(TaskRunEvidence(child, run))
+                checks.append(ExplicitSelfCorrelationEvidence(child, status, state, "2026-09-01T01:00:00+00:00",
+                    other_checks_passed=other, blocker_count=0 if state == "passed" else 1 if status == "FAIL" else None,
+                    sharpe_gap=0 if state == "passed" else .2 if status == "FAIL" else None))
+        evidence = LearningEvidenceSet(tuple(records), ())
+        def build(start):
+            return build_defect_action_strategies(evidence, build_mutation_learning_evidence(evidence, tuple(mutations)),
+                (DefectActionRequest(roots[0], "SELF_CORRELATION", ("repaired", "still_blocked", "read_error", "quality_regression", "quality_regression_pending_sc", "missing_checks")),),
+                seed_root_task_ids=roots, task_runs=runs, explicit_self_correlations=checks,
+                sc_observation_start=datetime.fromisoformat(start))
+        result = build("2026-08-01T00:00:00+00:00")
+        strategy = result.records[0]
+        self.assertEqual(strategy.preferred_actions, ("repaired",))
+        self.assertEqual(set(strategy.deprioritized_actions), {"still_blocked", "quality_regression", "quality_regression_pending_sc"})
+        pending_sc = next(item for item in result.observations if item.action == "quality_regression_pending_sc")
+        self.assertEqual(pending_sc.outcome, ACTION_EFFECT_CONFLICT)
+        self.assertIsNone(pending_sc.sc_passed)
+        self.assertFalse(pending_sc.other_checks_passed)
+        self.assertEqual(self._action(strategy, "read_error").unresolved_count, 10)
+        self.assertEqual(self._action(strategy, "read_error").resolved_count, 0)
+        self.assertEqual(self._action(strategy, "missing_checks").resolved_count, 0)
+        partial = next(item for item in result.observations if item.action == "still_blocked")
+        self.assertEqual(partial.blocker_count_delta, -1)
+        self.assertAlmostEqual(partial.sharpe_gap_delta, -.2)
+        self.assertEqual(partial.outcome, "no_progress")
+        self.assertAlmostEqual(partial.fitness_delta, -.1)
+        self.assertEqual(build("2026-09-02T00:00:00+00:00").records[0].preferred_actions, ())
+
     def test_direction_seed_owns_later_repairs_without_learning_from_the_reversal(self):
         negative = self._record(
             "negative", defects=("LOW_FITNESS", "LOW_SHARPE"), fitness=-1.1, sharpe=-1.4

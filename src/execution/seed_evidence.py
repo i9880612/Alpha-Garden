@@ -22,6 +22,7 @@ def capture_next_seed_series(
     database_path, client, *, account_scope: str, observed_at: str,
     candidate_task_ids: tuple[str, ...] | None = None,
     admit_seeds: bool = True,
+    research_task_ids: tuple[str, ...] | None = None,
 ) -> float | None:
     """One due PnL read at a batch boundary; missing evidence never admits seeds.
 
@@ -31,7 +32,8 @@ def capture_next_seed_series(
     now = datetime.fromisoformat(observed_at)
     with open_database(database_path) as connection:
         completed = tuple(s for s in list_completed_backtests(connection)
-                          if s.task.account_scope == account_scope)
+                          if s.task.account_scope == account_scope
+                          and (research_task_ids is None or s.task.task_id in research_task_ids))
         references = list_platform_submitted_alphas(connection, account_scope=account_scope)
         series = list_pnl_series(connection, account_scope=account_scope)
         existing = {s.platform_alpha_id for s in series
@@ -41,7 +43,7 @@ def capture_next_seed_series(
         # backlog without rebuilding frontiers and rechecking every seed per read.
         submitted_ids = {r.platform_alpha_id for r in references}
         checked = tuple(s for s in completed if s.task.platform_alpha_id not in submitted_ids
-                        and local_formal_submission_eligible(s))
+                        and (research_task_ids is not None or local_formal_submission_eligible(s)))
         if not references and len(checked) < 2:
             checked = ()  # No pair to compare yet.
         required = tuple(dict.fromkeys((
@@ -69,7 +71,7 @@ def capture_next_seed_series(
             candidates = tuple(s for s in completed if admit_seeds and s.task.task_id in parents
                                and assess_signal_seed(s).eligible)
             if admit_seeds:
-                synchronize_signal_seeds(connection, candidate_task_ids=tuple(s.task.task_id for s in candidates))
+                synchronize_signal_seeds(connection, observed_at=observed_at, candidate_task_ids=tuple(s.task.task_id for s in candidates))
             correlations = PnlCorrelations(series)
             required_candidates = tuple(s for s in candidates
                                         if assess_seed_correlation(s, references, series,
@@ -95,13 +97,17 @@ def capture_next_seed_series(
         observation = client.fetch_pnl(platform_alpha_id=alpha)
         points, retry_after = observation.points, observation.retry_after_seconds
     except (WorldQuantRequestError, WorldQuantProtocolError) as exc:
+        if isinstance(exc, WorldQuantRequestError) and (
+            exc.status_code in {401, 403, 429} or exc.code.startswith("worldquant_authentication_")
+        ):
+            raise
         points, retry_after = None, getattr(exc, "retry_after_seconds", None)
         error_code = exc.code
     retry_at = (now + timedelta(seconds=max(600, retry_after or 0))).isoformat() if points is None else None
     with open_database(database_path) as connection:
         save_pnl_series(connection, PnlSeriesRecord(account_scope, alpha, observed_at, points, retry_at))
         if points is not None and candidates:
-            synchronize_signal_seeds(connection, candidate_task_ids=tuple(s.task.task_id for s in candidates))
+            synchronize_signal_seeds(connection, observed_at=observed_at, candidate_task_ids=tuple(s.task.task_id for s in candidates))
     if points is None:
         logger.warning("种子相关性：时序数据 %s %s，证据待定，%g 秒后可重试", alpha,
                        f"读取失败（{error_code}）" if error_code else "暂未就绪", max(600, retry_after or 0))

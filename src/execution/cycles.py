@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
@@ -19,14 +19,14 @@ from execution.cycle_candidates import (
     OptimizationCandidatesExhausted,
     build_cycle_candidates,
     build_improvement_candidate_pools,
+    supported_formula_identities,
 )
 from execution.seeds import load_signal_frontiers
-from execution.self_correlation import load_self_correlation_references
+from execution.self_correlation import load_self_correlation_references, load_latest_submission_checks
 from execution.cycle_schedule import scheduled_cycle_number
 from execution.runs import remaining_automated_run_backtests
 from execution.progress import phase
-from generation.candidate import exploration_candidate
-from generation.parser import FormulaSyntaxError, parse_formula
+from generation.parser import parse_formula
 from learning.action_effects import (
     DefectActionRequest,
     ExplicitSelfCorrelationEvidence,
@@ -38,6 +38,7 @@ from learning.evidence import (
     build_mutation_learning_evidence,
 )
 from learning.optimization_targets import (
+    include_self_correlation_targets,
     ParentOptimizationTargetSet,
     build_parent_optimization_targets,
 )
@@ -50,6 +51,7 @@ from learning.quality_proximity import (
     STRUCTURAL_EVOLUTION_STAGE,
     build_parent_improvement_stages,
 )
+from learning.self_correlation import assess_self_correlation_peers
 from learning.seed_correlation import submitted_seed
 from persistence.backtests import (
     backtest_was_cancelled_before_submission,
@@ -70,9 +72,7 @@ from persistence.runs import (
     list_automated_run_backtests,
 )
 from persistence.seeds import list_signal_seeds
-from persistence.submission_checks import list_submission_checks
 from persistence.submissions import (
-    list_formal_submission_attempts,
     list_platform_submitted_alphas,
 )
 from selection.allocations import (
@@ -84,8 +84,7 @@ from selection.allocations import (
     direction_validation_limit,
 )
 from selection.settings import BacktestSettingsPolicy
-from submission.formal import assess_formal_check_payload
-from worldquant.backtests import BacktestSettings
+from worldquant.backtests import BacktestSettings, STANDARD_NON_SC_CHECK_NAMES
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +177,10 @@ def plan_automated_cycle(
                 ),
                 recovered=True,
             )
+        if run.self_correlation_plan_json is not None:
+            return _prepare_sc_research_cycle(
+                database_path, run, cycle_number=cycle_number, created_at=created_at,
+            )
 
         allocation_policy = get_run_allocation(connection, run.run_id)
         if allocation_policy is None:
@@ -204,7 +207,7 @@ def plan_automated_cycle(
             connection,
             account_scope=run.account_scope,
         )
-        submitted_formula_identities = _supported_formula_identities(
+        submitted_formula_identities = supported_formula_identities(
             tuple(record.formula for record in submitted_alphas),
         )
         completed = list_completed_backtests(connection)
@@ -300,6 +303,7 @@ def plan_automated_cycle(
             observed_at=evidence_cutoff,
         )
         sc_by_parent = {item.parent_task_id: item.correlation for item in sc_references}
+        optimization_targets = include_self_correlation_targets(optimization_targets, evidence, sc_references)
         improvement_pools = build_improvement_candidate_pools(
             catalog,
             settings_policy,
@@ -312,6 +316,7 @@ def plan_automated_cycle(
             group_candidates=groups,
             reserved_tasks=reserved_tasks,
             self_correlation_references=sc_references,
+            mutations=planning_mutations,
             excluded_formula_fingerprints=(
                 submitted_formula_identities.formula_fingerprints
                 | frozenset(item.candidate.fingerprint for item in direction_candidates)
@@ -358,6 +363,10 @@ def plan_automated_cycle(
                                     if family in usage_by_family
                                     else 0
                                 ),
+                                unsubmitted_leaf_count=(
+                                    usage_by_family[family].unsubmitted_request_count
+                                    if family in usage_by_family else 0
+                                ),
                             )
                             for family in families
                         ),
@@ -393,7 +402,6 @@ def plan_automated_cycle(
                     ),
                 )
                 for source in improvement_sources
-                if source.stage != QUALIFIED_EVOLUTION_STAGE
                 for target in targets_by_parent[source.branch_task_id].targets
             ),
             seed_root_task_ids=tuple(
@@ -409,6 +417,7 @@ def plan_automated_cycle(
                 TaskRunEvidence(task_id=link.task_id, run_id=link.run_id)
                 for link in list_all_automated_run_backtests(connection)
             ),
+            sc_observation_start=evidence_cutoff - timedelta(days=30),
             explicit_self_correlations=_explicit_self_correlation_evidence(
                 connection,
                 account_scope=run.account_scope,
@@ -494,6 +503,31 @@ def plan_automated_cycle(
     )
 
 
+def _prepare_sc_research_cycle(
+    database_path: str | Path, run: AutomatedRunRecord, *, cycle_number: int, created_at: str,
+) -> AutomatedCyclePlan:
+    from execution.sc_research import SelfCorrelationResearchPlan
+    plan = SelfCorrelationResearchPlan.from_json(run.self_correlation_plan_json)
+    candidates = plan.candidates[(cycle_number - 1) * 2:cycle_number * 2]
+    if len(candidates) != 2:
+        raise ValueError("sc_research_cycle_invalid")
+    settings = BacktestSettings.from_platform_dict(json.loads(plan.settings_json))
+    prepared = prepare_automated_candidate_backtest_batch(
+        database_path, run_id=run.run_id,
+        candidates=tuple(AutomatedCandidateBacktest(c, settings) for c in candidates),
+        created_at=created_at, cycle_number=cycle_number,
+    )
+    phase(cycle_number, 2, "SC 定向研究：已冻结本批两条任务，共用原父代额度")
+    return AutomatedCyclePlan(
+        run_id=run.run_id, cycle_number=cycle_number, planned_source_allocation=None,
+        catalog_fingerprint=plan.catalog_fingerprint, requested_generation_count=2,
+        requested_backtest_count=2, exploration_backtest_count=0,
+        structural_evolution_backtest_count=0, local_polishing_backtest_count=0,
+        backtests=tuple(sorted(prepared, key=lambda s: (s.task.formula_fingerprint, s.task.settings_json))),
+        recovered=False,
+    )
+
+
 def _required_snapshots(
     connection: sqlite3.Connection,
     links: tuple[AutomatedRunBacktestRecord, ...],
@@ -529,38 +563,30 @@ def _explicit_self_correlation_evidence(
     account_scope: str,
     evidence_cutoff: datetime,
 ) -> tuple[ExplicitSelfCorrelationEvidence, ...]:
-    observations = [
-        (attempt.task_id, attempt.check_observed_at, attempt.check_payload_json)
-        for attempt in list_formal_submission_attempts(connection, account_scope=account_scope)
-        if attempt.check_observed_at is not None
-    ]
-    observations.extend((check.task_id, check.observed_at, check.payload_json)
-                        for check in list_submission_checks(connection, account_scope=account_scope))
-    latest: dict[str, ExplicitSelfCorrelationEvidence] = {}
-    for task_id, observed_at, payload_json in observations:
-        timestamp = _timestamp(observed_at, "action_effect_formal_check_timestamp_invalid")
-        if timestamp > evidence_cutoff:
-            continue
-        previous = latest.get(task_id)
-        if previous is not None and timestamp < datetime.fromisoformat(previous.observed_at):
-            continue
-        try:
-            payload = json.loads(payload_json) if payload_json is not None else None
-        except json.JSONDecodeError as exc:
-            raise ValueError("action_effect_formal_check_payload_invalid") from exc
-        assessment = assess_formal_check_payload(payload)
-        status = dict(assessment.statuses).get("SELF_CORRELATION")
-        if status not in {"PASS", "FAIL"}:
-            status = "PENDING"
-        current = ExplicitSelfCorrelationEvidence(
-            task_id=task_id, status=status, formal_check_state=assessment.state, observed_at=observed_at,
-        )
-        # Equal-time contradictory observations have no trustworthy ordering.
-        if (previous is not None and timestamp == datetime.fromisoformat(previous.observed_at)
-                and (previous.status, previous.formal_check_state) != (current.status, current.formal_check_state)):
-            current = ExplicitSelfCorrelationEvidence(task_id, "PENDING", "pending", observed_at)
-        latest[task_id] = current
-    return tuple(latest[task_id] for task_id in sorted(latest))
+    checks = load_latest_submission_checks(connection, account_scope=account_scope, observed_at=evidence_cutoff)
+    snapshots = {item.task.task_id: item for item in list_completed_backtests(connection)
+                 if item.task.account_scope == account_scope}
+    references = tuple(ref for ref in list_platform_submitted_alphas(connection, account_scope=account_scope)
+                       if datetime.fromisoformat(ref.observed_at) <= evidence_cutoff)
+    evidence = []
+    for task_id, check in sorted(checks.items()):
+        statuses = dict(check.assessment.statuses)
+        status = statuses.get("SELF_CORRELATION", "PENDING")
+        status = status if status in {"PASS", "FAIL"} else "PENDING"
+        snapshot = snapshots.get(task_id)
+        sharpe = snapshot.result.sharpe if snapshot is not None and snapshot.result is not None else None
+        peers = assess_self_correlation_peers(sharpe, check.peers, references)
+        complete = peers.unresolved_count == 0 and status in {"PASS", "FAIL"}
+        evidence.append(ExplicitSelfCorrelationEvidence(
+            task_id, status, check.assessment.state, check.observed_at,
+            other_checks_passed=(False if any(statuses.get(name) == "FAIL" for name in STANDARD_NON_SC_CHECK_NAMES)
+                else True if all(statuses.get(name) == "PASS" for name in STANDARD_NON_SC_CHECK_NAMES) else None),
+            blocker_count=0 if check.assessment.state == "passed" else len(peers.blockers) if complete else None,
+            sharpe_gap=0.0 if check.assessment.state == "passed" else (max(0.0, peers.required_sharpe - sharpe)
+                        if complete and peers.required_sharpe is not None and sharpe is not None else None),
+        ))
+    return tuple(evidence)
+
 
 
 def _eligible_improvement_parent_task_ids(
@@ -624,30 +650,6 @@ def _validate_frozen_cycle(run, snapshots: tuple[BacktestSnapshot, ...]) -> None
             != task.request_fingerprint
         ):
             raise ValueError("automated_cycle_recovery_identity_conflict")
-
-
-@dataclass(frozen=True, slots=True)
-class _SupportedFormulaIdentities:
-    formulas: tuple[str, ...]
-    formula_fingerprints: frozenset[str]
-
-
-def _supported_formula_identities(
-    formulas: tuple[str, ...],
-) -> _SupportedFormulaIdentities:
-    supported_formulas: list[str] = []
-    fingerprints: set[str] = set()
-    for formula in formulas:
-        try:
-            candidate = exploration_candidate(parse_formula(formula).expression)
-        except (FormulaSyntaxError, ValueError):
-            continue
-        supported_formulas.append(candidate.formula)
-        fingerprints.add(candidate.fingerprint)
-    return _SupportedFormulaIdentities(
-        formulas=tuple(supported_formulas),
-        formula_fingerprints=frozenset(fingerprints),
-    )
 
 
 def _cycle_seed_start(run_id: str, cycle_number: int) -> int:

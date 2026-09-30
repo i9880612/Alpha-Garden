@@ -14,6 +14,7 @@ from learning.evidence import (
 )
 from learning.optimization_targets import normalized_failure_gap
 from learning.seeds import SIGNAL_TARGET_CHECKS, signal_branch_is_safe
+from worldquant.backtests import STANDARD_NON_SC_CHECK_NAMES
 
 
 ACTION_EFFECT_SAFE_PROGRESS = "safe_progress"
@@ -51,6 +52,9 @@ class ExplicitSelfCorrelationEvidence:
     status: str
     formal_check_state: str
     observed_at: str
+    other_checks_passed: bool | None = None
+    blocker_count: int | None = None
+    sharpe_gap: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +76,12 @@ class ActionEffectObservation:
     target_check_name: str
     action: str
     outcome: str
+    sc_passed: bool | None = None
+    other_checks_passed: bool | None = None
+    blocker_count_delta: int | None = None
+    sharpe_gap_delta: float | None = None
+    fitness_delta: float | None = None
+    turnover_delta: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +125,7 @@ def build_defect_action_strategies(
     seed_root_task_ids: Iterable[str],
     task_runs: Iterable[TaskRunEvidence],
     explicit_self_correlations: Iterable[ExplicitSelfCorrelationEvidence],
+    sc_observation_start: datetime | None = None,
 ) -> DefectActionStrategySet:
     if not isinstance(evidence, LearningEvidenceSet):
         raise ValueError("action_effect_learning_evidence_invalid")
@@ -144,6 +155,7 @@ def build_defect_action_strategies(
         parent_by_child=parent_by_child,
         runs_by_task=runs_by_task,
         explicit_sc_by_task=explicit_sc_by_task,
+        sc_observation_start=sc_observation_start,
     )
     observations_by_group: defaultdict[
         tuple[str, str, tuple[str, ...], str, str],
@@ -168,7 +180,7 @@ def build_defect_action_strategies(
         parent = records_by_task.get(request.parent_task_id)
         if parent is None:
             raise ValueError("action_effect_parent_result_missing")
-        defect_checks = _eligible_defect_checks(parent)
+        defect_checks = _eligible_defect_checks(parent, explicit_sc_by_task.get(parent.task_id))
         if defect_checks is None or request.target_check_name not in defect_checks:
             raise ValueError("action_effect_parent_target_invalid")
 
@@ -232,6 +244,7 @@ def _build_observations(
     parent_by_child: dict[str, str],
     runs_by_task: dict[str, str],
     explicit_sc_by_task: dict[str, ExplicitSelfCorrelationEvidence],
+    sc_observation_start: datetime | None,
 ) -> tuple[ActionEffectObservation, ...]:
     built: list[ActionEffectObservation] = []
     for mutation in mutation_records:
@@ -247,10 +260,15 @@ def _build_observations(
             roots=roots,
         )
         run_id = runs_by_task.get(child.task_id)
-        defect_checks = _eligible_defect_checks(parent)
+        parent_sc = explicit_sc_by_task.get(parent.task_id)
+        child_sc = explicit_sc_by_task.get(child.task_id)
+        defect_checks = _eligible_defect_checks(parent, parent_sc)
         if root_task_id is None or run_id is None or defect_checks is None:
             continue
         for target_check_name in defect_checks:
+            if (target_check_name == _SELF_CORRELATION and sc_observation_start is not None
+                    and datetime.fromisoformat(child.finished_at) < sc_observation_start):
+                continue
             built.append(
                 ActionEffectObservation(
                     child_task_id=child.task_id,
@@ -269,6 +287,16 @@ def _build_observations(
                         target_check_name=target_check_name,
                         explicit_sc=explicit_sc_by_task.get(child.task_id),
                     ),
+                    sc_passed=(child_sc.status == "PASS" if child_sc is not None
+                               and child_sc.status != "PENDING" else None),
+                    other_checks_passed=child_sc.other_checks_passed if child_sc is not None else None,
+                    blocker_count_delta=(child_sc.blocker_count - parent_sc.blocker_count
+                        if parent_sc is not None and child_sc is not None
+                        and parent_sc.blocker_count is not None and child_sc.blocker_count is not None else None),
+                    sharpe_gap_delta=(child_sc.sharpe_gap - parent_sc.sharpe_gap
+                        if parent_sc is not None and child_sc is not None
+                        and parent_sc.sharpe_gap is not None and child_sc.sharpe_gap is not None else None),
+                    fitness_delta=mutation.fitness_delta, turnover_delta=mutation.turnover_delta,
                 )
             )
     return tuple(
@@ -291,6 +319,7 @@ def _build_observations(
 
 def _eligible_defect_checks(
     parent: LearningEvidenceRecord,
+    explicit_sc: ExplicitSelfCorrelationEvidence | None = None,
 ) -> tuple[str, ...] | None:
     passed = set(parent.passed_checks)
     failed = set(parent.failed_checks)
@@ -301,6 +330,11 @@ def _eligible_defect_checks(
     ):
         return None
     defects = tuple(sorted(failed & SIGNAL_TARGET_CHECKS))
+    if (not defects and STANDARD_NON_SC_CHECK_NAMES <= passed
+            and explicit_sc is not None and explicit_sc.status == "FAIL"
+            and explicit_sc.other_checks_passed is True
+            and datetime.fromisoformat(explicit_sc.observed_at) >= datetime.fromisoformat(parent.finished_at)):
+        return (_SELF_CORRELATION,)
     return defects or None
 
 
@@ -312,6 +346,17 @@ def _classify_observation(
     target_check_name: str,
     explicit_sc: ExplicitSelfCorrelationEvidence | None,
 ) -> str:
+    if target_check_name == _SELF_CORRELATION:
+        if (explicit_sc is None
+                or datetime.fromisoformat(explicit_sc.observed_at) < datetime.fromisoformat(child.finished_at)):
+            return ACTION_EFFECT_UNRESOLVED
+        if explicit_sc.other_checks_passed is False:
+            return ACTION_EFFECT_CONFLICT
+        if explicit_sc.status == "PENDING" or explicit_sc.other_checks_passed is None:
+            return ACTION_EFFECT_UNRESOLVED
+        if explicit_sc.status == "PASS" and explicit_sc.formal_check_state == "passed":
+            return ACTION_EFFECT_SAFE_PROGRESS if _child_has_no_safety_regression(child, mutation) else ACTION_EFFECT_CONFLICT
+        return ACTION_EFFECT_NO_PROGRESS if explicit_sc.status == "FAIL" else ACTION_EFFECT_UNRESOLVED
     progress = _target_progress(
         parent,
         child,
@@ -598,7 +643,7 @@ def _validate_requests(requests: tuple[DefectActionRequest, ...]) -> None:
             not isinstance(request, DefectActionRequest)
             or not isinstance(request.parent_task_id, str)
             or not request.parent_task_id.strip()
-            or request.target_check_name not in SIGNAL_TARGET_CHECKS
+            or request.target_check_name not in (SIGNAL_TARGET_CHECKS | {_SELF_CORRELATION})
             or not isinstance(request.candidate_actions, tuple)
             or not request.candidate_actions
             or any(

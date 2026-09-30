@@ -1465,6 +1465,132 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             second_mutation[0].task.formula_fingerprint,
         )
 
+    def test_six_initial_sc_trials_span_three_frozen_batches_and_original_budget(self):
+        from collections import Counter
+        from generation.self_correlation import SELF_CORRELATION_RESEARCH_FAMILIES
+        from persistence.seeds import list_signal_seeds
+        self._replace_catalog(fields=("model", "earnings", "estimate", "close", "open"),
+            field_categories={"model": "model", "earnings": "fundamental", "estimate": "analyst"},
+            field_datasets={"model": "models", "earnings": "accounts", "estimate": "forecasts"},
+            cross_sectional=("rank", "zscore"), time_series=("ts_delta", "ts_av_diff", "ts_mean", "ts_rank"),
+            windows=(5,22,66,120), extra_operators=(
+                self._operator("days_from_last_change", "Time Series", (("x", "expr"),)),
+                self._operator("trade_when", "Logical", (("x", "expr"), ("y", "expr"), ("z", "expr"))),
+            ))
+        with open_database(self.database_path) as connection:
+            replace_operator_roles(connection, (
+                OperatorRoleRecord("rank", "cross_sectional_normalization"),
+                OperatorRoleRecord("zscore", "cross_sectional_normalization"),
+                OperatorRoleRecord("ts_delta", "time_series_change"),
+                OperatorRoleRecord("ts_av_diff", "time_series_change"),
+                OperatorRoleRecord("ts_mean", "time_series_smoothing"),
+                OperatorRoleRecord("ts_rank", "time_series_normalization"),
+            ))
+        parent_id = self._signal_seed("rank(model)", sharpe_status="PASS", fitness_status="PASS")
+        with open_database(self.database_path) as connection:
+            connection.execute("INSERT INTO backtest_yearly_stats(task_id,stage,year,sharpe) VALUES (?, 'IS', 2023, 1.1)", (parent_id,))
+        self._record_submitted_alpha("zscore(model)", settings=self.settings, sharpe=2,
+            observed_at="2026-08-30T00:02:30+08:00")
+        run_id = self._start_run(generation_count=6, backtest_count=4, max_cycles=3, max_backtests=12)
+        from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
+        payload = {"is": {"checks": [
+            {"name": name, "result": "FAIL" if name == "SELF_CORRELATION" else "PASS", "value": .9, "limit": .7}
+            for name in STANDARD_REGULAR_CHECK_NAMES],
+            "selfCorrelated": {"max": .9, "schema": {"properties": [{"name": "id"}, {"name": "correlation"}]},
+                "records": [["submitted-alpha", .9]]}}}
+        with open_database(self.database_path) as connection:
+            save_submission_check(connection, SubmissionCheckRecord(parent_id,
+                "2026-08-30T00:03:00+08:00", json.dumps(payload), None))
+        counts, identities = Counter(), set()
+        for cycle in range(1,4):
+            minute = cycle * 10
+            plan = plan_automated_cycle(self.database_path, run_id=run_id,
+                created_at=f"2026-08-30T00:{minute:02d}:00+08:00")
+            recovered = plan_automated_cycle(self.database_path, run_id=run_id,
+                created_at=f"2026-08-30T00:{minute:02d}:30+08:00")
+            self.assertTrue(recovered.recovered)
+            self.assertEqual([b.task.task_id for b in plan.backtests], [b.task.task_id for b in recovered.backtests])
+            children = [b for b in plan.backtests if self._mutation(b.task.task_id) is not None]
+            self.assertEqual(len(children), 2)
+            self.assertEqual(plan.exploration_backtest_count, 2)
+            for child in children:
+                mutation = self._mutation(child.task.task_id)
+                self.assertIn(mutation.action, SELF_CORRELATION_RESEARCH_FAMILIES)
+                self.assertEqual(mutation.parent_task_id, parent_id)
+                self.assertEqual(mutation.conflict_reference_alpha_id, "submitted-alpha")
+                counts[mutation.action] += 1
+                self.assertNotIn(child.task.formula_fingerprint, identities)
+                identities.add(child.task.formula_fingerprint)
+            self._complete_plan(plan, observed_at=f"2026-08-30T00:{minute+1:02d}:00+08:00")
+            with open_database(self.database_path) as connection:
+                record_automated_cycle_settlement(connection, run_id, cycle_number=cycle,
+                    outcome="not_qualified", frontier_advanced=False,
+                    observed_at=f"2026-08-30T00:{minute+2:02d}:00+08:00")
+        self.assertEqual(counts, dict.fromkeys(SELF_CORRELATION_RESEARCH_FAMILIES, 2))
+        with open_database(self.database_path) as connection:
+            frontier = next(f for f in load_signal_frontiers(connection).records if f.root_task_id == parent_id)
+            self.assertEqual(frontier.qualified_parent_remaining_attempts, 14)
+            self.assertEqual([seed.root_task_id for seed in list_signal_seeds(connection)], [parent_id])
+
+    def test_new_sc_only_formula_gets_high_correlation_target_and_keeps_budget_on_resume(self):
+        from persistence.seeds import list_signal_seeds
+        from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
+        self._replace_catalog(fields=("close", "open", "returns", "volume"),
+            cross_sectional=("rank", "zscore"), time_series=("ts_mean", "ts_rank", "ts_zscore"),
+            windows=(5, 22, 66, 120, 250), pairwise=("vector_neut",))
+        parent_id = self._completed_backtest("rank(ts_mean(close,5))", sharpe=1.8, fitness=1.2,
+            sharpe_status="PASS", fitness_status="PASS", time_offset=2)
+        self._record_submitted_alpha("rank(open)", alpha_id="A", sharpe=1.5,
+            settings=self.settings, observed_at="2026-08-30T00:02:30+08:00")
+        self._record_submitted_alpha("ts_mean(close,22)", alpha_id="B", sharpe=2.0,
+            settings=self.settings, observed_at="2026-08-30T00:02:30+08:00")
+        payload = {"is": {"checks": [
+            {"name": name, "result": "FAIL" if name == "SELF_CORRELATION" else "PASS", "value": .95, "limit": .7}
+            for name in STANDARD_REGULAR_CHECK_NAMES],
+            "selfCorrelated": {"max": .95, "schema": {"properties": [{"name": "id"}, {"name": "correlation"}]},
+                               "records": [["A", .95], ["B", .90]]}}}
+        with open_database(self.database_path) as connection:
+            connection.execute("INSERT INTO backtest_yearly_stats(task_id,stage,year,sharpe) VALUES (?, 'IS', 2023, 1.8)", (parent_id,))
+            self.assertEqual(synchronize_signal_seeds(connection), ())
+            self.assertEqual(list_signal_seeds(connection), ())
+            incomplete = {"is": {"checks": payload["is"]["checks"]}}
+            save_submission_check(connection, SubmissionCheckRecord(parent_id,
+                "2026-08-30T00:03:00+08:00", json.dumps(incomplete), None))
+            self.assertEqual(synchronize_signal_seeds(connection, observed_at="2026-08-30T00:03:00+08:00"), ())
+            # Missing details and actual non-SC failures cannot use the repair exception.
+            unsafe = json.loads(json.dumps(payload))
+            next(check for check in unsafe["is"]["checks"] if check["name"] == "LOW_FITNESS")["result"] = "FAIL"
+            save_submission_check(connection, SubmissionCheckRecord(parent_id,
+                "2026-08-30T00:03:01+08:00", json.dumps(unsafe), None, 2))
+            self.assertEqual(synchronize_signal_seeds(connection, observed_at="2026-08-30T00:03:01+08:00"), ())
+            save_submission_check(connection, SubmissionCheckRecord(parent_id,
+                "2026-08-30T00:03:02+08:00", json.dumps(payload), None, 3))
+            admitted = synchronize_signal_seeds(connection, observed_at="2026-08-30T00:03:02+08:00")
+            self.assertEqual([seed.root_task_id for seed in admitted], [parent_id])
+        run_id = self._start_run(generation_count=6, backtest_count=4, max_backtests=8)
+        plan = plan_automated_cycle(self.database_path, run_id=run_id, created_at="2026-08-30T00:04:00+08:00")
+        allocations = [item for item in plan.planned_source_allocation.signal_improvements if item.parent_task_id == parent_id]
+        self.assertTrue(allocations)
+        self.assertTrue(all(item.target.check_name == "SELF_CORRELATION" for item in allocations))
+        self.assertTrue(all(item.target.threshold == 2.2 for item in allocations))
+        children = [snapshot for snapshot in plan.backtests if self._mutation(snapshot.task.task_id) is not None]
+        self.assertTrue(children)
+        for child in children:
+            mutation = self._mutation(child.task.task_id)
+            self.assertEqual(mutation.parent_task_id, parent_id)
+            self.assertEqual(mutation.conflict_reference_alpha_id, "B")
+        with open_database(self.database_path) as connection:
+            record_submission_accepted(connection, children[0].task.task_id,
+                remote_id="isolated-request", observed_at="2026-08-30T00:04:10+08:00")
+        resumed = plan_automated_cycle(self.database_path, run_id=run_id, created_at="2026-08-30T00:05:00+08:00")
+        self.assertTrue(resumed.recovered)
+        self.assertEqual([item.task.task_id for item in resumed.backtests], [item.task.task_id for item in plan.backtests])
+        with open_database(self.database_path) as connection:
+            self.assertEqual(synchronize_signal_seeds(connection), ())
+            frontier = next(item for item in load_signal_frontiers(connection).records if item.root_task_id == parent_id)
+            self.assertEqual(frontier.qualified_parent_remaining_attempts, 19)
+            self.assertEqual([item.root_task_id for item in list_signal_seeds(connection)], [parent_id])
+
     def test_sc_repairs_share_frozen_plans_original_lineage_and_attempt_budget(self):
         self._replace_catalog(fields=("close", "open", "returns", "volume"),
             cross_sectional=("rank", "zscore"), time_series=("ts_rank", "ts_zscore"),
@@ -1484,7 +1610,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             record_automated_cycle_settlement(connection, run_id, cycle_number=1,
                 outcome="qualified", frontier_advanced=True, observed_at="2026-08-30T00:06:00+08:00")
         reference_formula = render_formula(parse_formula(parent.task.formula).expression.arguments[0].value)
-        self._record_submitted_alpha(reference_formula, observed_at="2026-08-30T00:06:00+08:00", settings=self.settings)
+        self._record_submitted_alpha(reference_formula, observed_at="2026-08-30T00:06:00+08:00", settings=self.settings, sharpe=2.0)
         # Submitted and unsubmitted research share the same frozen batch and parent budget.
         with open_database(self.database_path) as connection:
             snapshot = get_backtest_task(connection, parent_id)
@@ -1913,6 +2039,8 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         fields: tuple[str, ...],
         pairwise: tuple[str, ...] = (),
         field_categories: dict[str, str] | None = None,
+        field_datasets: dict[str, str] | None = None,
+        extra_operators: tuple[OperatorCatalogRecord, ...] = (),
         vector_fields: tuple[str, ...] = (),
         group_fields: tuple[str, ...] = (),
         cross_sectional: tuple[str, ...],
@@ -1927,7 +2055,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             FieldCatalogRecord(
                 context=context,
                 field_id=field_id,
-                dataset_id="dataset",
+                dataset_id=(field_datasets or {}).get(field_id, "dataset"),
                 category=categories.get(field_id, "sample"),
                 subcategory=None,
                 field_type=field_type,
@@ -1945,7 +2073,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
                 *((field_id, "GROUP") for field_id in group_fields),
             )
         )
-        operators = (
+        operators = extra_operators + (
             tuple(
                 self._operator(name, "Cross Sectional", (("x", "expr"),))
                 for name in cross_sectional

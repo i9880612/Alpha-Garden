@@ -98,15 +98,18 @@ def advance_automated_cycle_backtests(
         raise ValueError("automated_run_status_invalid")
     counts = _counts(snapshots)
     if counts.terminal:
+        sc_research = run.self_correlation_plan_json is not None
         for snapshot in snapshots:
-            if check_completed_backtest(database_path, client, snapshot.task.task_id, observed_at=observed_at):
+            if check_completed_backtest(database_path, client, snapshot.task.task_id,
+                                        observed_at=observed_at, research_only=sc_research):
                 return _advance_result(
                     run=run, cycle_number=cycle_number, action="submission_check_observed",
                     snapshot=snapshot, counts=counts, platform_request_performed=True,
                 )
         with open_database(database_path) as connection:
             delays = [delay for snapshot in snapshots
-                      if (delay := remaining_submission_check_seconds(connection, snapshot, observed_at)) is not None]
+                      if (delay := remaining_submission_check_seconds(connection, snapshot, observed_at,
+                                                                      research_only=sc_research)) is not None]
         if delays:
             return _advance_result(
                 run=run, cycle_number=cycle_number, action="submission_check_wait", snapshot=None,
@@ -116,6 +119,7 @@ def advance_automated_cycle_backtests(
             database_path, client, account_scope=run.account_scope, observed_at=observed_at,
             candidate_task_ids=tuple(s.task.task_id for s in snapshots if s.task.status == "completed"),
             admit_seeds=not run.optimization_only,
+            research_task_ids=tuple(s.task.task_id for s in snapshots) if sc_research else None,
         )
         if seed_delay is not None:
             return _advance_result(
@@ -266,7 +270,7 @@ def settle_automated_cycle(
             candidate_task_ids=completed_task_ids,
             enqueued_at=observed_at,
         )
-        synchronize_signal_seeds(connection, candidate_task_ids=completed_task_ids)
+        synchronize_signal_seeds(connection, observed_at=observed_at, candidate_task_ids=completed_task_ids)
         synchronize_qualified_alpha_archive(connection, observed_at=observed_at)
         if saved_settlement is not None:
             settled_run, decision, _ = record_automated_cycle_settlement(

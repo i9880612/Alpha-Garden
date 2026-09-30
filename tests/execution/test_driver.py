@@ -1110,6 +1110,26 @@ class AutomatedRunDriverTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(task_count, 0)
 
+    def test_seed_permission_error_stops_run_and_account_limit_schedules_retry(self):
+        self._prepare_run()
+        client = DriverClient(self._accepted())
+        self._advance(client, minute=1)
+        limited = WorldQuantRequestError("pnl_account_limit", status_code=429,
+            retryable=True, outcome_unknown=False, retry_after_seconds=120)
+        with patch("execution.driver.capture_next_seed_series", side_effect=limited):
+            result = self._advance(client, minute=2)
+        self.assertEqual(result.action, "request_retry_scheduled")
+        self.assertEqual(result.run.request_failure_count, 1)
+        self.assertEqual(result.retry_after_seconds, 120)
+        forbidden = WorldQuantRequestError("pnl_forbidden", status_code=403,
+            retryable=False, outcome_unknown=False)
+        with patch("execution.driver.capture_next_seed_series", side_effect=forbidden):
+            stopped = self._advance(client, minute=4)
+        self.assertEqual(stopped.action, "run_stopped")
+        self.assertEqual(stopped.run.status, "failed")
+        self.assertIn("pnl_forbidden", stopped.run.stop_reason)
+        self.assertNotIn("submit", client.calls)
+
     def test_missing_recovery_pnl_does_not_stop_ordinary_backtests(self) -> None:
         self._prepare_run()
         client = DriverClient(self._accepted())

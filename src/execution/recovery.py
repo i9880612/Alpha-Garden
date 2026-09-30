@@ -38,7 +38,7 @@ def load_recovery_comparisons(
     parent_ids = {
         item.parent_task_id
         for item in mutations
-        if item.action in SELF_CORRELATION_REPAIR_FAMILIES
+        if item.action in SELF_CORRELATION_REPAIR_FAMILIES or item.conflict_reference_alpha_id is not None
     }
     if not parent_ids:
         return ()
@@ -60,7 +60,7 @@ def load_recovery_comparisons(
         references = {}
         submitted = list_platform_submitted_alphas(connection, account_scope=account)
         for mutation in mutations:
-            if mutation.action not in SELF_CORRELATION_REPAIR_FAMILIES:
+            if mutation.action not in SELF_CORRELATION_REPAIR_FAMILIES and mutation.conflict_reference_alpha_id is None:
                 continue
             parent = by_task.get(mutation.parent_task_id)
             child = by_task.get(mutation.child_task_id)
@@ -83,7 +83,8 @@ def load_recovery_comparisons(
                     references[mutation.child_task_id] = historical[0]
         catalog = None
         account_parents = {p.task.task_id for p in parents}
-        if any(m.action in (*SELF_CORRELATION_HALF_FAMILIES, *SELF_CORRELATION_LIGHT_FAMILIES)
+        if any((m.action in (*SELF_CORRELATION_HALF_FAMILIES, *SELF_CORRELATION_LIGHT_FAMILIES)
+                or m.conflict_reference_alpha_id is not None)
                and m.parent_task_id in account_parents
                for m in mutations):
             sync = get_platform_catalog_sync(connection)

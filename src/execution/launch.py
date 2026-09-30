@@ -31,6 +31,7 @@ from persistence.runs import (
     AutomatedRunRecord,
     automated_run_has_submission_unknown,
     get_automated_run,
+    list_active_automated_runs,
 )
 from selection.settings import BacktestSettingsPolicy, load_backtest_settings_policy
 from worldquant.client import WorldQuantClient
@@ -72,14 +73,29 @@ def launch_automated_run(
                                     policy.universe, policy.delay),
                 account_scope=connection_settings.account_scope,
             )
-        retire_previous_automated_runs(
-            database_path, account_scope=connection_settings.account_scope,
-            observed_at=created_at,
-        )
-        settle_stopped_run_results(
-            database_path, account_scope=connection_settings.account_scope,
-            observed_at=created_at,
-        )
+            if limits.self_correlation_parent_task_id is not None:
+                if "self_correlation_plan_json" not in {
+                    row[1] for row in connection.execute("PRAGMA table_info(automated_runs)")
+                }:
+                    raise ValueError("sc_research_plan_storage_update_required")
+                if any(r.account_scope == connection_settings.account_scope for r in list_active_automated_runs(connection)):
+                    raise ValueError("sc_research_existing_run_active_resume_required")
+                from execution.sc_research import build_self_correlation_research_plan
+                plan = build_self_correlation_research_plan(
+                    connection, policy, parent_task_id=limits.self_correlation_parent_task_id,
+                    observed_at=_aware_time(current_time()), account_scope=connection_settings.account_scope,
+                )
+                if limits.self_correlation_plan_key is not None and plan.fingerprint != limits.self_correlation_plan_key:
+                    raise ValueError("sc_research_reviewed_plan_changed")
+        if limits.self_correlation_parent_task_id is None:
+            retire_previous_automated_runs(
+                database_path, account_scope=connection_settings.account_scope,
+                observed_at=created_at,
+            )
+            settle_stopped_run_results(
+                database_path, account_scope=connection_settings.account_scope,
+                observed_at=created_at,
+            )
         run = prepare_automated_run(
             database_path,
             policy_path,

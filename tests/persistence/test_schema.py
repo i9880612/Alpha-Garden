@@ -21,10 +21,82 @@ from persistence.schema import (
     add_optimization_run_storage,
     add_submission_source_storage,
     add_optimization_submission_source,
+    add_sc_research_plan_storage,
 )
 
 
 class DatabaseSchemaTests(unittest.TestCase):
+    def test_existing_local_schema_upgrades_before_sc_storage_without_losing_history(self):
+        with open_database(":memory:") as connection:
+            initialize_database_schema(connection)
+            connection.execute("DROP TABLE backtest_mutation_references")
+            connection.execute("ALTER TABLE automated_runs DROP COLUMN self_correlation_plan_json")
+            sql = connection.execute("SELECT sql FROM sqlite_master WHERE name='formal_submission_attempts'").fetchone()[0]
+            indexes = [row[0] for row in connection.execute("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='formal_submission_attempts' AND sql IS NOT NULL")]
+            connection.execute("DROP TABLE formal_submission_attempts")
+            connection.execute(sql.replace("source IN ('qualified_archive', 'optimization')", "source = 'qualified_archive'"))
+            for index in indexes:
+                connection.execute(index)
+            connection.execute("INSERT INTO generation_windows (value,horizon) VALUES (22,'month')")
+            connection.commit()
+            before = connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall()
+            connection.execute("BEGIN IMMEDIATE")
+            add_optimization_submission_source(connection)
+            add_mutation_reference_storage(connection)
+            add_sc_research_plan_storage(connection)
+            initialize_database_schema(connection)
+            connection.rollback()
+            self.assertEqual(connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall(), before)
+            connection.execute("BEGIN IMMEDIATE")
+            add_optimization_submission_source(connection)
+            add_mutation_reference_storage(connection)
+            add_sc_research_plan_storage(connection)
+            initialize_database_schema(connection)
+            self.assertEqual(tuple(connection.execute("SELECT value,horizon FROM generation_windows").fetchone()), (22,"month"))
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_mutation_binding_upgrade_can_precede_sc_plan_upgrade(self):
+        with open_database(":memory:") as connection:
+            initialize_database_schema(connection)
+            connection.execute("DROP TABLE backtest_mutation_references")
+            connection.execute("ALTER TABLE automated_runs DROP COLUMN self_correlation_plan_json")
+            connection.commit()
+            before = connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall()
+            connection.execute("BEGIN IMMEDIATE")
+            add_mutation_reference_storage(connection)
+            add_sc_research_plan_storage(connection)
+            initialize_database_schema(connection)
+            connection.rollback()
+            self.assertEqual(connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall(), before)
+            connection.execute("BEGIN IMMEDIATE")
+            add_mutation_reference_storage(connection)
+            add_sc_research_plan_storage(connection)
+            initialize_database_schema(connection)
+
+    def test_sc_plan_migration_preserves_run_history_is_explicit_and_atomic(self):
+        from tests.persistence.test_runs import AutomatedRunPersistenceTests
+        from persistence.runs import create_automated_run, get_automated_run
+        with open_database(":memory:") as connection:
+            initialize_database_schema(connection)
+            record = AutomatedRunPersistenceTests._record("run-original")
+            create_automated_run(connection, record)
+            connection.execute("ALTER TABLE automated_runs DROP COLUMN self_correlation_plan_json")
+            connection.commit()
+            before = tuple(connection.execute("SELECT * FROM automated_runs").fetchone())
+            with self.assertRaisesRegex(ValueError, "requires_transaction"):
+                add_sc_research_plan_storage(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            add_sc_research_plan_storage(connection)
+            self.assertEqual(get_automated_run(connection, record.run_id), record)
+            connection.rollback()
+            self.assertEqual(tuple(connection.execute("SELECT * FROM automated_runs").fetchone()), before)
+            connection.execute("BEGIN IMMEDIATE")
+            add_sc_research_plan_storage(connection)
+            add_sc_research_plan_storage(connection)
+            initialize_database_schema(connection)
+            self.assertEqual(tuple(connection.execute("SELECT * FROM automated_runs").fetchone()), before + (None,))
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
     def test_existing_submission_upgrade_can_precede_mutation_reference_upgrade(self):
         with tempfile.TemporaryDirectory() as directory:
             with open_database(Path(directory) / "previous.sqlite3") as connection:

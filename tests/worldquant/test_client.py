@@ -7,6 +7,7 @@ from unittest.mock import patch
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
+from http.client import IncompleteRead
 
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 if str(SRC_ROOT) not in sys.path:
@@ -36,6 +37,23 @@ class FakeExecutor:
 
 
 class WorldQuantClientTests(unittest.TestCase):
+    def test_truncated_response_is_an_external_error_and_post_is_never_replayed(self):
+        for creating in (False, True):
+            with self.subTest(creating=creating):
+                executor = FakeExecutor(self._response(201, {}), IncompleteRead(b"private payload", 100))
+                client = self._client(executor)
+                client.authenticate()
+                with self.assertRaises(WorldQuantRequestError) as error:
+                    if creating:
+                        client.submit_backtest(formula="rank(close)", settings=self.settings)
+                    else:
+                        client.fetch_user_alpha_page(limit=20, offset=0, hidden=False, status="ACTIVE")
+                self.assertTrue(error.exception.retryable)
+                self.assertEqual(error.exception.outcome_unknown, creating)
+                self.assertEqual(error.exception.transport_error_type, "IncompleteRead")
+                self.assertNotIn("private payload", str(error.exception))
+                self.assertEqual(len(executor.requests), 2)
+
     def test_expired_session_reauthenticates_and_retries_the_read_once(self):
         executor = FakeExecutor(
             self._response(201, {}), self._response(401, {}),

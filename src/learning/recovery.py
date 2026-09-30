@@ -10,7 +10,7 @@ from generation.self_correlation import (
     SELF_CORRELATION_REPAIR_FAMILIES, matches_self_correlation_repair,
 )
 from learning.seeds import assess_signal_seed
-from learning.pnl import daily_pnl_correlation
+from learning.pnl import common_pnl_correlations
 from learning.self_correlation import SelfCorrelationReference
 from persistence.backtests import BacktestMutationRecord, BacktestSnapshot
 from persistence.pnl import PnlSeriesRecord
@@ -64,7 +64,7 @@ def recovery_comparisons(
                 or not assess_signal_seed(parent).eligible
             ):
                 break
-            if mutation.action in SELF_CORRELATION_REPAIR_FAMILIES:
+            if mutation.action in SELF_CORRELATION_REPAIR_FAMILIES or mutation.conflict_reference_alpha_id is not None:
                 reference = references.get(task.task_id)
                 if (
                     reference is None
@@ -81,14 +81,15 @@ def recovery_comparisons(
                        catalog.context.universe, catalog.context.delay):
                     matching_catalog = None
                 if (
-                    mutation.before != parent.task.formula
-                    or mutation.after != task.formula
+                    (mutation.action in SELF_CORRELATION_REPAIR_FAMILIES
+                     and (mutation.before != parent.task.formula or mutation.after != task.formula))
                     or not matches_self_correlation_repair(
                         parse_formula(parent.task.formula).expression,
                         parse_formula(reference.formula).expression,
                         parse_formula(task.formula).expression,
                         action=mutation.action, location=mutation.location,
                         catalog=matching_catalog,
+                        before=mutation.before, after=mutation.after,
                     )
                 ):
                     break
@@ -130,15 +131,7 @@ def recovery_correlations(
     if any(alpha not in by_id for alpha in ids):
         return None
     points = [by_id[alpha] for alpha in ids]
-    dates = [tuple(day for day, _ in item) for item in points]
-    if (
-        len(dates[0]) - 1 < MIN_RECOVERY_INTERVALS
-        or not dates[0] == dates[1] == dates[2]
-    ):
-        return None
-    parent = daily_pnl_correlation(points[0], points[2], minimum_intervals=MIN_RECOVERY_INTERVALS)
-    child = daily_pnl_correlation(points[1], points[2], minimum_intervals=MIN_RECOVERY_INTERVALS)
-    return (parent, child) if parent is not None and child is not None else None
+    return common_pnl_correlations(*points, minimum_intervals=MIN_RECOVERY_INTERVALS)
 
 
 def recovery_task_ids(

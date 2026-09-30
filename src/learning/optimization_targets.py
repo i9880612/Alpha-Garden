@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 from learning.evidence import (
@@ -10,6 +10,7 @@ from learning.evidence import (
     MutationLearningEvidenceSet,
 )
 from learning.seeds import SIGNAL_TARGET_CHECKS, signal_branch_is_safe
+from learning.self_correlation import SelfCorrelationReference
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,29 @@ class ParentOptimizationTargets:
 @dataclass(frozen=True, slots=True)
 class ParentOptimizationTargetSet:
     records: tuple[ParentOptimizationTargets, ...]
+
+
+def include_self_correlation_targets(
+    targets: ParentOptimizationTargetSet, evidence: LearningEvidenceSet,
+    references: tuple[SelfCorrelationReference, ...],
+) -> ParentOptimizationTargetSet:
+    """SC is a separate research target; quality stage and submission gates stay intact."""
+    parents = {record.task_id: record for record in evidence.records}
+    conflicts = {ref.parent_task_id: ref for ref in references if ref.correlation is not None}
+    records = []
+    for record in targets.records:
+        ref = conflicts.get(record.parent_task_id)
+        if ref is not None:
+            actual = parents[record.parent_task_id].sharpe
+            required = ref.required_sharpe
+            target = OptimizationTarget(
+                "SELF_CORRELATION", True, required, actual, None,
+                max(0.0, required - actual) / required if required else None,
+                "available" if required else "platform_values_missing", (),
+            )
+            record = replace(record, targets=(*record.targets, target))
+        records.append(record)
+    return ParentOptimizationTargetSet(tuple(records))
 
 
 @dataclass(slots=True)
