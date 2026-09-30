@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 
 from persistence.submissions import list_platform_submitted_alphas
+from persistence.pnl import pnl_capture_states
 
 
 def initialize_submitted_sync_schema(connection) -> None:
@@ -51,14 +52,7 @@ def require_submitted_baseline(connection, *, account_scope: str) -> None:
 
 
 def _require_captured_pnl(connection, account_scope, alpha_ids) -> None:
-    captured = {alpha for alpha, (ready, _) in submitted_pnl_capture_states(
-        connection, account_scope=account_scope).items() if ready}
+    captured = {alpha for alpha, (ready, _) in pnl_capture_states(
+        connection, account_scope=account_scope, platform_alpha_ids=frozenset(alpha_ids)).items() if ready}
     if not alpha_ids <= captured:
         raise ValueError("submitted_baseline_pnl_incomplete:run sync-submitted first")
-
-
-def submitted_pnl_capture_states(connection, *, account_scope: str) -> dict[str, tuple[bool, str | None]]:
-    """Inspect completeness without decoding every historical PnL curve."""
-    return {row[0]: (bool(row[1]), row[2]) for row in connection.execute(
-        "SELECT platform_alpha_id, points_json IS NOT NULL, retry_not_before "
-        "FROM platform_pnl_series WHERE account_scope=?", (account_scope,))}

@@ -20,6 +20,7 @@ from execution.submission_runner import (
 )
 from execution.submitted_formulas import export_submitted_formulas
 from execution.submitted_sync import sync_submitted_alphas
+from execution.storage import inspect_storage, preview_pnl_prune
 from persistence.runs import AutomatedRunRecord
 from submission.formal import BELOW_TARGET_GRADES
 from worldquant.client import WorldQuantRequestError
@@ -31,6 +32,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="初始化 Alpha Garden，或执行有界的真实回测自动运行。",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    storage = commands.add_parser("storage", help="只读查看本地容量或预览 PnL 保留策略，不访问平台。")
+    storage_commands = storage.add_subparsers(dest="storage_command", required=True)
+    inspect = storage_commands.add_parser("inspect", help="查看数据库、空闲页、PnL 容量和增长估算。")
+    inspect.add_argument("--database", type=Path, default=Path("data/alpha_garden.sqlite3"))
+    inspect.add_argument("--daily-curves", type=int, default=1000, help="每日新增并采集的 PnL 曲线数，仅用于估算（默认 1000）。")
+    prune = storage_commands.add_parser("prune", help="预览旧失败公式的 PnL 清理候选；当前仅支持 --dry-run。")
+    prune.add_argument("--database", type=Path, default=Path("data/alpha_garden.sqlite3"))
+    prune.add_argument("--dry-run", action="store_true", required=True, help="必须显式指定；不会删除或迁移数据。")
+    prune.add_argument("--retention-days", type=int, default=90, help="至少保留天数（默认 90，最少 30）。")
     sync = commands.add_parser("sync-submitted", help="全量读取已提交公式和 PnL，建立同账号 SC 基线；不导入种子。")
     sync.add_argument("--database", type=Path, default=Path("data/alpha_garden.sqlite3"))
     sync.add_argument("--env", type=Path, default=Path(".env"))
@@ -190,6 +200,8 @@ def build_parser() -> argparse.ArgumentParser:
 def run(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
+    if arguments.command == "storage":
+        return _storage(arguments)
     if arguments.command == "sync-submitted":
         try:
             with run_progress_console():
@@ -274,6 +286,54 @@ def run(argv: Sequence[str] | None = None) -> int:
         print(f"初始化失败：{exc}", file=sys.stderr)
         return 1
     _print_initialization_result(result)
+    return 0
+
+
+def _storage(arguments: argparse.Namespace) -> int:
+    try:
+        if arguments.storage_command == "inspect":
+            if arguments.daily_curves < 0:
+                raise ValueError("daily_curves_must_be_non_negative")
+            report = inspect_storage(arguments.database)
+            measured = report.measurements
+            mib = 1024 ** 2
+            print(f"数据库文件 {report.database_file_bytes / mib:.2f} MiB；WAL {report.wal_file_bytes / mib:.2f} MiB。")
+            print(f"逻辑页容量 {measured.page_count * measured.page_size / mib:.2f} MiB；"
+                  f"内部可复用空闲页 {measured.free_pages * measured.page_size / mib:.2f} MiB。")
+            print(f"PnL 共 {measured.pnl_count} 条，已采集 {measured.captured_count} 条，"
+                  f"待定 {measured.pnl_count - measured.captured_count} 条；JSON 数据 {measured.payload_bytes / mib:.2f} MiB。")
+            if measured.captured_count:
+                mean = measured.payload_bytes / measured.captured_count
+                print(f"平均每条 {mean / 1024:.2f} KiB；按每天新增并采集 {arguments.daily_curves} 条估算，"
+                      f"30 天 {mean * arguments.daily_curves * 30 / 1024 ** 3:.2f} GiB，"
+                      f"365 天 {mean * arguments.daily_curves * 365 / 1024 ** 3:.2f} GiB（仅 PnL JSON，不含其他表、索引或页开销）。")
+            else:
+                print("没有已采集曲线，暂不能估算增长。")
+            if measured.object_bytes is None:
+                print("当前 SQLite 未提供 dbstat，表和索引占用不可用。")
+            else:
+                for name, size in measured.object_bytes[:10]:
+                    print(f"  {name}: {size / mib:.2f} MiB")
+        else:
+            report = preview_pnl_prune(arguments.database, retention_days=arguments.retention_days)
+            labels = {
+                "submitted_reference": "已提交参照（含隐藏和历史状态）",
+                "recovery_reference": "SC 恢复参照",
+                "research_or_submission_dependency": "谱系、运行或提交依赖",
+                "pending_evidence": "PnL 待定",
+                "unlinked_evidence": "无法关联任务",
+                "no_definite_rejection": "未确认无研究依赖的失败结果",
+                "unknown_timestamp": "时间证据不完整",
+                "retention_window": "仍在保留期内",
+            }
+            print(f"仅预览：保留至少 {report.retention_days} 天；清理候选 {report.candidate_count} 条，"
+                  f"对应 PnL JSON {report.candidate_payload_bytes / 1024 ** 2:.2f} MiB。")
+            for reason, count in report.retained_counts:
+                print(f"  保留 {count} 条：{labels[reason]}")
+            print("未删除、迁移或补采数据；候选 JSON 大小不等于磁盘可回收空间。正式清理与 VACUUM 尚未启用。")
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        print(f"本地存储读取未完成：{exc}", file=sys.stderr)
+        return 1
     return 0
 
 

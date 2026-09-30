@@ -160,6 +160,17 @@ def load_signal_frontiers(
         if snapshot.task.task_id not in excluded_task_ids
     )
     evidence = build_learning_evidence(completed)
+    # Ordinary research needs only the three curves of each actual recovery
+    # comparison. Unrelated historical curves cannot affect these branches.
+    comparisons = () if optimization_only else load_recovery_comparisons(connection, snapshots=completed)
+    recovery_alphas: dict[str, set[str]] = {}
+    for comparison in comparisons:
+        recovery_alphas.setdefault(comparison.account_scope, set()).update((
+            comparison.parent_alpha_id, comparison.child_alpha_id, comparison.reference_alpha_id,
+        ))
+    recovery_series = tuple(record for account, alphas in recovery_alphas.items()
+                            for record in list_pnl_series(connection, account_scope=account,
+                                                          platform_alpha_ids=frozenset(alphas)))
     frontiers = build_signal_frontiers(
         evidence,
         mutations,
@@ -171,10 +182,7 @@ def load_signal_frontiers(
         ),
         # Optimization uses checked lineage membership, which is independent of
         # recovery branches. Avoid rebuilding historical PnL correlations here.
-        recovery_task_ids=frozenset() if optimization_only else recovery_task_ids(
-            load_recovery_comparisons(connection, snapshots=completed),
-            list_pnl_series(connection),
-        ),
+        recovery_task_ids=recovery_task_ids(comparisons, recovery_series),
     )
     if not optimization_only:
         return frontiers

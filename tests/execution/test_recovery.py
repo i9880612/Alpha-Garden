@@ -55,6 +55,52 @@ def pending_recovery_series(tmp_path, monkeypatch):
     return database_path, comparisons
 
 
+def test_capture_does_not_decode_curves_to_choose_missing_evidence(pending_recovery_series, monkeypatch):
+    database_path, _ = pending_recovery_series
+    def forbid_decode(*args, **kwargs):
+        pytest.fail("capture planning should inspect readiness, not decode curves")
+    monkeypatch.setattr("persistence.pnl.json.loads", forbid_decode)
+    client = Mock()
+    client.fetch_pnl.return_value = PnlObservation(None, 0)
+    assert capture_next_recovery_series(database_path, client, account_scope="account",
+                                        observed_at="2026-09-07T00:00:00+00:00") == 0
+    client.fetch_pnl.assert_called_once_with(platform_alpha_id="missing-child")
+
+
+def test_frontier_curve_decoding_is_bounded_by_comparisons_not_database_history(monkeypatch):
+    from tests.execution.test_seeds import SignalSeedExecutionTests
+    case = SignalSeedExecutionTests()
+    case.setUp()
+    try:
+        with open_database(case.database_path) as connection:
+            snapshot = case._completed(connection, "rank(close)", "1", 1.2, 0.8)
+            synchronize_signal_seeds(connection)
+            comparison = RecoveryComparison(snapshot.task.task_id, snapshot.task.task_id,
+                snapshot.task.task_id, "group-account", snapshot.task.platform_alpha_id, "parent", "reference")
+            monkeypatch.setattr("execution.seeds.load_recovery_comparisons", lambda *a, **kw: (comparison,))
+            for alpha in ("parent", "reference", snapshot.task.platform_alpha_id):
+                points = [math.cos(i) if alpha == snapshot.task.platform_alpha_id else math.sin(i) for i in range(300)]
+                save_pnl_series(connection, series(alpha, points, account="group-account"))
+            expected = load_signal_frontiers(connection)
+            payload = json.dumps([["2020-01-01", 0.0]])
+            connection.executemany("INSERT INTO platform_pnl_series VALUES (?, ?, ?, ?, NULL)",
+                (("group-account", f"unrelated-{i}", "2026-09-07T00:00:00+00:00", payload) for i in range(10000)))
+            connection.execute("INSERT INTO platform_pnl_series VALUES (?, ?, ?, ?, NULL)",
+                               ("other-account", snapshot.task.platform_alpha_id, "2026-09-07T00:00:00+00:00", payload))
+            loads = json.loads
+            decoded_curves = []
+            def tracked_loads(value, *args, **kwargs):
+                if value.startswith('[["2020-'):
+                    decoded_curves.append(value)
+                return loads(value, *args, **kwargs)
+            monkeypatch.setattr("persistence.pnl.json.loads", tracked_loads)
+            assert load_signal_frontiers(connection) == expected
+            assert len(decoded_curves) == 3
+            assert payload not in decoded_curves
+    finally:
+        case.doCleanups()
+
+
 @pytest.mark.parametrize("retry_after, retry_at", (
     (None, "2026-09-07T00:10:00+00:00"),
     (45.0, "2026-09-07T00:10:00+00:00"),

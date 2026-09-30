@@ -10,6 +10,20 @@ DATABASE_LOCK_TIMEOUT_SECONDS = 30.0
 
 
 @contextmanager
+def read_database(path: str | Path) -> Iterator[sqlite3.Connection]:
+    """Read a consistent transaction without creating or initializing a database."""
+    connection = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro",
+                                 uri=True, timeout=DATABASE_LOCK_TIMEOUT_SECONDS)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("BEGIN")
+        yield connection
+    finally:
+        connection.close()
+
+
+@contextmanager
 def open_database(path: str | Path) -> Iterator[sqlite3.Connection]:
     """Open one transaction; wait for brief lock contention without replaying work."""
     # Native busy handling waits on the blocked SQL/commit, never re-enters the

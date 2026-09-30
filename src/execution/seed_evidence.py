@@ -11,7 +11,7 @@ from learning.seed_correlation import assess_seed_correlation
 from learning.seeds import assess_signal_seed
 from persistence.backtests import list_backtest_mutations, list_completed_backtests
 from persistence.database import open_database
-from persistence.pnl import PnlSeriesRecord, list_pnl_series, save_pnl_series
+from persistence.pnl import PnlSeriesRecord, list_pnl_series, pnl_capture_states, save_pnl_series
 from persistence.submissions import list_platform_submitted_alphas
 from submission.formal import local_formal_submission_eligible
 from worldquant.client import WorldQuantRequestError
@@ -35,10 +35,12 @@ def capture_next_seed_series(
                           if s.task.account_scope == account_scope
                           and (research_task_ids is None or s.task.task_id in research_task_ids))
         references = list_platform_submitted_alphas(connection, account_scope=account_scope)
-        series = list_pnl_series(connection, account_scope=account_scope)
-        existing = {s.platform_alpha_id for s in series
-                    if s.points is not None or (s.retry_not_before is not None
-                         and datetime.fromisoformat(s.retry_not_before) > now)}
+        states = pnl_capture_states(connection, account_scope=account_scope,
+                                    platform_alpha_ids=frozenset(
+                                        [r.platform_alpha_id for r in references]
+                                        + [s.task.platform_alpha_id for s in completed if s.task.platform_alpha_id]))
+        existing = {alpha for alpha, (captured, retry_at) in states.items()
+                    if captured or (retry_at is not None and datetime.fromisoformat(retry_at) > now)}
         # Qualified history needs PnL regardless of seed admission. Drain that
         # backlog without rebuilding frontiers and rechecking every seed per read.
         submitted_ids = {r.platform_alpha_id for r in references}
@@ -72,6 +74,11 @@ def capture_next_seed_series(
                                and assess_signal_seed(s).eligible)
             if admit_seeds:
                 synchronize_signal_seeds(connection, observed_at=observed_at, candidate_task_ids=tuple(s.task.task_id for s in candidates))
+            series = list_pnl_series(connection, account_scope=account_scope,
+                                     platform_alpha_ids=frozenset(
+                                         [r.platform_alpha_id for r in references]
+                                         + [s.task.platform_alpha_id for s in candidates if s.task.platform_alpha_id]
+                                     )) if candidates else ()
             correlations = PnlCorrelations(series)
             required_candidates = tuple(s for s in candidates
                                         if assess_seed_correlation(s, references, series,
@@ -88,8 +95,7 @@ def capture_next_seed_series(
                 candidates = tuple(s for s in candidates if s.task.platform_alpha_id == alpha)
     if alpha is None:
         return None
-    ready_count = sum(s.account_scope == account_scope and s.platform_alpha_id in required
-                      and s.points is not None for s in series)
+    ready_count = sum(captured for key, (captured, _) in states.items() if key in required)
     logger = logging.getLogger(LOGGER_NAME)
     logger.info("种子相关性：正在获取时序数据 %s（已获取 %s/%s）", alpha, ready_count, len(required))
     error_code = None

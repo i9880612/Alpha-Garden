@@ -182,6 +182,19 @@ Each batch gathers evidence for its own candidates and all submitted references,
 
 Existing databases require explicitly authorized additive upgrades: call `persistence.schema.add_mutation_reference_storage`, then `add_sc_research_plan_storage` in the same `BEGIN IMMEDIATE` transaction. They add the conflict-binding table and frozen-plan column while preserving historical tasks, budgets and results. Run commands do not migrate automatically. If the database still uses the earlier formal-submission source constraint, apply the existing `add_optimization_submission_source` upgrade first in that transaction; focused SC submission remains disabled. If the submitted-baseline sync table is still absent, apply `add_submitted_sync_storage` after the SC upgrades, or leave the transaction and run the explicit `sync-submitted` command to add that table and establish the baseline. Focused SC launch and resume also require a completed full baseline sync.
 
+### Local capacity and retention preview
+
+```bash
+alpha-garden storage inspect --daily-curves 1000
+alpha-garden storage prune --dry-run --retention-days 90
+```
+
+Both commands read an existing database, optionally selected with `--database`, without loading account credentials, accessing the platform, initializing or migrating storage. `inspect` distinguishes the database file, WAL, reusable free pages and PnL JSON payload. Growth projections use the measured average captured curve size and the number of new curves captured per day, not generated formulas. Table/index sizes are shown when SQLite provides `dbstat`.
+
+Pruning is currently preview-only. Retention defaults to 90 days (minimum 30). Candidates must have completed tasks with an explicit non-SC check failure, old task observations and curve capture, and no protected dependencies. All submitted references (including hidden and historical states), seeds, mutation lineages, SC recovery references, unfinished runs, qualified archives, submission queues, checks and attempts are protected. Every task sharing an account/Alpha identity must qualify; unlinked or uncertain evidence stays retained. This deliberately conservative preview does not claim to determine exhausted research value.
+
+Candidate bytes measure JSON payload, not immediately reclaimable disk space. Deletion, pruning markers that prevent automatic refetch, and a separate `VACUUM` command are not yet enabled. Preview creates no backup or state snapshot. Routine recovery reads load only curves involved in actual comparisons, and capture-state queries do not decode curves; SC decisions, lineage and budgets remain unchanged.
+
 ## Research rules
 
 **Normal research** combines exploration, mutation and self-correlation repair. **Focused optimization** works on fully checked active parents below the target grade with attempts remaining. The target is the platform's **Spectacular** grade; optimization explores the possibility of improvement, without guaranteeing it.

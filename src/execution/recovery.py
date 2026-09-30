@@ -20,7 +20,7 @@ from persistence.backtests import (
     list_backtest_mutations,
 )
 from persistence.database import open_database
-from persistence.pnl import PnlSeriesRecord, list_pnl_series, save_pnl_series
+from persistence.pnl import PnlSeriesRecord, pnl_capture_states, save_pnl_series
 from persistence.submissions import list_platform_submitted_alphas
 from persistence.catalog import get_platform_catalog_sync
 from worldquant.client import WorldQuantClient, WorldQuantRequestError
@@ -117,34 +117,27 @@ def capture_next_recovery_series(
         comparisons = load_recovery_comparisons(
             connection, observed_at=datetime.fromisoformat(observed_at)
         )
-        series = list_pnl_series(connection)
+        required = dict.fromkeys(
+            alpha for item in comparisons if item.account_scope == account_scope
+            for alpha in (item.parent_alpha_id, item.child_alpha_id, item.reference_alpha_id)
+        )
+        states = pnl_capture_states(connection, account_scope=account_scope,
+                                    platform_alpha_ids=frozenset(required))
         existing = {
-            (item.account_scope, item.platform_alpha_id)
-            for item in series
-            if item.points is not None
+            alpha for alpha, (captured, retry_at) in states.items()
+            if captured
             or (
-                item.retry_not_before is not None
-                and datetime.fromisoformat(item.retry_not_before)
+                retry_at is not None
+                and datetime.fromisoformat(retry_at)
                 > datetime.fromisoformat(observed_at)
             )
         }
-    required = dict.fromkeys(
-        alpha
-        for item in comparisons
-        if item.account_scope == account_scope
-        for alpha in (
-            item.parent_alpha_id,
-            item.child_alpha_id,
-            item.reference_alpha_id,
-        )
-    )
     alpha = next(
-        (alpha for alpha in required if (account_scope, alpha) not in existing), None
+        (alpha for alpha in required if alpha not in existing), None
     )
     if alpha is None:
         return None
-    ready_count = sum(item.account_scope == account_scope and item.platform_alpha_id in required
-                      and item.points is not None for item in series)
+    ready_count = sum(captured for captured, _ in states.values())
     logger = logging.getLogger(LOGGER_NAME)
     logger.info("恢复相关性：正在获取时序数据 %s（已获取 %s/%s）", alpha, ready_count, len(required))
     error_code = None

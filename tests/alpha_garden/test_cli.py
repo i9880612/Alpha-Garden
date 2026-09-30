@@ -25,6 +25,24 @@ from worldquant.client import WorldQuantRequestError
 
 
 class CommandLineTests(unittest.TestCase):
+    def test_storage_reads_without_credentials_and_refuses_real_pruning(self):
+        from persistence.database import open_database
+        from persistence.schema import initialize_database_schema
+        with tempfile.TemporaryDirectory() as root:
+            database = Path(root) / "storage.sqlite3"
+            with open_database(database) as connection:
+                initialize_database_schema(connection)
+            before = database.read_bytes()
+            for command in (["inspect"], ["prune", "--dry-run"]):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(run(["storage", *command, "--database", str(database)]), 0)
+                self.assertIn("PnL", output.getvalue())
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                run(["storage", "prune", "--database", str(database)])
+            self.assertEqual(error.exception.code, 2)
+            self.assertEqual(database.read_bytes(), before)
+
     def test_sc_mode_has_six_trial_limit_and_rejects_expanded_or_submission_modes(self):
         with patch("alpha_garden.cli.launch_automated_run", return_value=self._completion(status="completed")) as launch, redirect_stdout(io.StringIO()):
             self.assertEqual(run(["run", "3", "--sc-parent", "parent-1"]), 0)

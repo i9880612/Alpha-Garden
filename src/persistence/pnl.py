@@ -59,6 +59,23 @@ def list_pnl_series(
     )
 
 
+def pnl_capture_states(
+    connection: sqlite3.Connection, *, account_scope: str,
+    platform_alpha_ids: frozenset[str] | None = None,
+) -> dict[str, tuple[bool, str | None]]:
+    """Return captured/retry facts without reading or decoding curve payloads."""
+    if platform_alpha_ids is not None and not platform_alpha_ids:
+        return {}
+    parameters = [account_scope]
+    selection = ""
+    if platform_alpha_ids is not None:
+        selection = " AND platform_alpha_id IN (SELECT value FROM json_each(?))"
+        parameters.append(json.dumps(sorted(platform_alpha_ids)))
+    return {row[0]: (bool(row[1]), row[2]) for row in connection.execute(
+        "SELECT platform_alpha_id, points_json IS NOT NULL, retry_not_before "
+        "FROM platform_pnl_series WHERE account_scope=?" + selection, parameters)}
+
+
 def save_pnl_series(connection: sqlite3.Connection, record: PnlSeriesRecord) -> None:
     if (
         not record.account_scope.strip()

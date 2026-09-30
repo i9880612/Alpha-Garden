@@ -11,10 +11,10 @@ from pathlib import Path
 
 from execution.process_lock import exclusive_run_process
 from persistence.database import open_database
-from persistence.pnl import PnlSeriesRecord, save_pnl_series
+from persistence.pnl import PnlSeriesRecord, pnl_capture_states, save_pnl_series
 from persistence.schema import add_submitted_sync_storage
 from persistence.submissions import PlatformSubmittedAlphaRecord, record_platform_submitted_alphas
-from persistence.submitted_sync import complete_submitted_sync, invalidate_submitted_sync, submitted_pnl_capture_states
+from persistence.submitted_sync import complete_submitted_sync, invalidate_submitted_sync
 from worldquant.backtests import WorldQuantProtocolError
 from worldquant.client import WorldQuantClient, WorldQuantRequestError
 from worldquant.config import load_worldquant_connection_settings
@@ -99,7 +99,8 @@ def sync_submitted_alphas(database_path, environment_path, *, policy=None,
         with open_database(path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             record_platform_submitted_alphas(connection, tuple(records))
-            existing = submitted_pnl_capture_states(connection, account_scope=settings.account_scope)
+            existing = pnl_capture_states(connection, account_scope=settings.account_scope,
+                                          platform_alpha_ids=frozenset(item.platform_alpha_id for item in listed))
         captured = 0
         for item in listed:
             cached = existing.get(item.platform_alpha_id)

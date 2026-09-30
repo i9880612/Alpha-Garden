@@ -149,6 +149,21 @@ def test_unchecked_result_passing_non_sc_checks_collects_local_sc_evidence(pendi
     client.submit_formal_alpha.assert_not_called()
 
 
+def test_backfill_selection_does_not_decode_unrelated_curves(pending_seed, monkeypatch):
+    case, _ = pending_seed
+    with open_database(case.database_path) as connection:
+        candidate = checked_result(connection, "7")
+        save_pnl_series(connection, series("unrelated", [math.sin(i) for i in range(300)]))
+    def forbid_curve_load(*args, **kwargs):
+        pytest.fail("choosing the next missing curve only requires capture states")
+    monkeypatch.setattr("execution.seed_evidence.list_pnl_series", forbid_curve_load)
+    client = Mock()
+    client.fetch_pnl.return_value = PnlObservation(None, 0)
+    assert capture_next_seed_series(case.database_path, client, account_scope="group-account",
+        observed_at="2026-09-09T00:00:00+00:00", candidate_task_ids=(candidate.task.task_id,)) == 0
+    client.fetch_pnl.assert_called_once_with(platform_alpha_id="reference")
+
+
 def test_sc_research_collects_failed_candidate_evidence_without_historical_backfill(pending_seed):
     case, _ = pending_seed
     with open_database(case.database_path) as connection:

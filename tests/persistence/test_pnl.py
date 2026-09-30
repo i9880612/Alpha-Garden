@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from persistence.pnl import PnlSeriesRecord, list_pnl_series, save_pnl_series
+from persistence.pnl import PnlSeriesRecord, list_pnl_series, pnl_capture_states, save_pnl_series
 from persistence.schema import add_pnl_storage, initialize_database_schema
 
 
@@ -59,3 +59,21 @@ def test_read_only_series_selection_filters_account_and_requested_alphas():
         assert set(list_pnl_series(connection, platform_alpha_ids=frozenset({"shared"}))) == set(records[:2])
         assert list_pnl_series(connection, platform_alpha_ids=frozenset()) == ()
         assert list_pnl_series(connection, account_scope="missing") == ()
+
+
+def test_capture_states_filter_account_and_ids_without_decoding_payloads(monkeypatch):
+    with sqlite3.connect(":memory:") as connection:
+        initialize_database_schema(connection)
+        save_pnl_series(connection, PnlSeriesRecord("one", "shared", "2026-09-07T00:00:00+00:00",
+                                                   (("2020-01-01", 1.0),)))
+        save_pnl_series(connection, PnlSeriesRecord("two", "shared", "2026-09-07T00:00:00+00:00",
+                                                   None, "2026-09-07T00:10:00+00:00"))
+        connection.commit()
+        connection.execute("PRAGMA query_only=ON")
+        def forbid_decode(*args, **kwargs):
+            pytest.fail("capture states must not decode curve JSON")
+        monkeypatch.setattr("persistence.pnl.json.loads", forbid_decode)
+        assert pnl_capture_states(connection, account_scope="one",
+                                  platform_alpha_ids=frozenset({"shared", "missing"})) == {"shared": (True, None)}
+        assert pnl_capture_states(connection, account_scope="two") == {"shared": (False, "2026-09-07T00:10:00+00:00")}
+        assert pnl_capture_states(connection, account_scope="one", platform_alpha_ids=frozenset()) == {}
