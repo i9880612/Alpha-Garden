@@ -28,9 +28,9 @@ from learning.action_effects import (
     ACTION_STATE_PREFERRED,
     ACTION_STRATEGY_EXPLOITATION,
     ACTION_STRATEGY_EXPLORATION,
-    DefectActionEvidence,
-    DefectActionStrategy,
-    DefectActionStrategySet,
+    ActionEvidence,
+    ActionStrategy,
+    ActionStrategySet,
 )
 from learning.optimization_targets import (
     OptimizationActionEvidence,
@@ -56,6 +56,38 @@ from selection.allocations import (
 
 
 class BacktestSourceAllocationTests(unittest.TestCase):
+    def test_quality_siblings_share_last_lineage_slot_and_keep_other_roots_available(self):
+        from dataclasses import replace
+        from learning.quality import QUALITY_IMPROVEMENT
+        parents = (("root-a", "a1"), ("root-a", "a2"), ("root-b", "b1"))
+        sources = tuple(replace(self._source(root, parent, 5, stage=QUALIFIED_EVOLUTION_STAGE,
+            families=QUALIFIED_EVOLUTION_FAMILIES, is_submitted=root == "root-b"),
+            quality_budget_key=(root, "settings-own"), quality_remaining=1 if root == "root-a" else 80)
+            for root, parent in parents)
+        target = replace(self._target(None), objective=QUALITY_IMPROVEMENT, gap_state="quality_objective")
+        result = self._allocate(requested_count=4, minimum_exploration_count=1, sources=sources,
+            settings=tuple(self._settings(parent, risk=None) for _, parent in parents),
+            targets=tuple(self._branch_targets(parent, (target,)) for _, parent in parents))
+        self.assertEqual(result.exploration_count, 1)
+        self.assertEqual(sum(item.root_task_id == "root-a" for item in result.signal_improvements), 1)
+        self.assertEqual(sum(item.root_task_id == "root-b" for item in result.signal_improvements), 2)
+
+    def test_quality_preferred_action_is_used_without_removing_exploration(self):
+        from dataclasses import replace
+        from learning.quality import QUALITY_IMPROVEMENT
+        families = QUALIFIED_EVOLUTION_FAMILIES[:2]
+        source = replace(self._source("root", "parent", 6, stage=QUALIFIED_EVOLUTION_STAGE,
+            families=QUALIFIED_EVOLUTION_FAMILIES, family_counts={families[0]: 3, families[1]: 3}),
+            quality_budget_key=("root", "settings-own"), quality_remaining=80)
+        strategy = replace(self._action_strategy("parent", QUALITY_IMPROVEMENT, preferred=(families[1],),
+            action_states={families[1]: ACTION_STATE_PREFERRED}), defect_checks=())
+        target = replace(self._target(None), objective=QUALITY_IMPROVEMENT)
+        result = self._allocate(requested_count=3, minimum_exploration_count=1, sources=(source,),
+            settings=(self._settings("parent", risk=None),), targets=(self._branch_targets("parent", (target,)),),
+            action_strategies=(strategy,))
+        self.assertEqual(result.exploration_count, 1)
+        self.assertEqual({item.candidate_family for item in result.signal_improvements}, set(families))
+
     def test_submitted_self_reference_without_sc_uses_only_ordinary_slots(self):
         source = self._source("root", "parent", 3, is_submitted=True, self_correlation=None,
             stage=QUALIFIED_EVOLUTION_STAGE, families=QUALIFIED_EVOLUTION_FAMILIES,
@@ -1466,7 +1498,7 @@ class BacktestSourceAllocationTests(unittest.TestCase):
         sources: tuple[SignalImprovementSource, ...],
         settings: tuple[ParentSettingsEvidence, ...],
         targets: tuple[ParentOptimizationTargets, ...],
-        action_strategies: tuple[DefectActionStrategy, ...] = (),
+        action_strategies: tuple[ActionStrategy, ...] = (),
         direction_validation_count: int = 0,
         self_correlation_percent: int = 30,
         direction_validation_percent: int = 3,
@@ -1477,7 +1509,7 @@ class BacktestSourceAllocationTests(unittest.TestCase):
             improvement_sources=sources,
             settings_evidence=ParentSettingsEvidenceSet(records=settings),
             optimization_targets=ParentOptimizationTargetSet(records=targets),
-            action_strategies=DefectActionStrategySet(
+            action_strategies=ActionStrategySet(
                 records=action_strategies,
                 observations=(),
             ),
@@ -1569,18 +1601,18 @@ class BacktestSourceAllocationTests(unittest.TestCase):
     @staticmethod
     def _action_strategy(
         parent_task_id: str,
-        target_check_name: str,
+        target_name: str,
         *,
         preferred: tuple[str, ...] = (),
         deprioritized: tuple[str, ...] = (),
         action_states: dict[str, str],
-    ) -> DefectActionStrategy:
-        return DefectActionStrategy(
+    ) -> ActionStrategy:
+        return ActionStrategy(
             parent_task_id=parent_task_id,
             account_scope="group-account",
             settings_key="settings-own",
-            defect_checks=(target_check_name,),
-            target_check_name=target_check_name,
+            defect_checks=(target_name,),
+            target_name=target_name,
             mode=(
                 ACTION_STRATEGY_EXPLOITATION
                 if preferred
@@ -1594,7 +1626,7 @@ class BacktestSourceAllocationTests(unittest.TestCase):
             preferred_actions=preferred,
             deprioritized_actions=deprioritized,
             actions=tuple(
-                DefectActionEvidence(
+                ActionEvidence(
                     action=action,
                     state=state,
                     resolved_count=10,

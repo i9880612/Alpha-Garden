@@ -43,6 +43,7 @@ class LearningEvidenceRecord:
     margin: float
     book_size: float | None
     pnl: float | None
+    grade: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +183,7 @@ def build_learning_evidence(
                 margin=result.margin,
                 book_size=result.book_size,
                 pnl=result.pnl,
+                grade=result.grade,
             )
         )
 

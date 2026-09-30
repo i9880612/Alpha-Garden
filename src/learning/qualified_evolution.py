@@ -19,6 +19,7 @@ class QualifiedEvolutionRecord:
     task_id: str
     remaining_attempts: int
     replacement_task_id: str | None
+    parent_attempt_count: int = 0
 
     @property
     def retired(self) -> bool:
@@ -31,6 +32,7 @@ def assess_qualified_evolution(
     attempted_child_task_ids: frozenset[str],
     series: tuple[PnlSeriesRecord, ...] = (),
     *, correlations: PnlCorrelations | None = None,
+    quality_remaining: dict[str, int] | None = None,
 ) -> tuple[QualifiedEvolutionRecord, ...]:
     """Keep individual budgets while retiring improvements and measured duplicates."""
     by_task = {snapshot.task.task_id: snapshot for snapshot in checked}
@@ -93,8 +95,10 @@ def assess_qualified_evolution(
     return tuple(
         QualifiedEvolutionRecord(
             task_id=task_id,
-            remaining_attempts=max(0, PARENT_ATTEMPT_BUDGET - attempts.get(task_id, 0)),
+            remaining_attempts=min(max(0, PARENT_ATTEMPT_BUDGET - attempts.get(task_id, 0)),
+                                   quality_remaining[task_id] if quality_remaining is not None else PARENT_ATTEMPT_BUDGET),
             replacement_task_id=replacements.get(task_id),
+            parent_attempt_count=attempts.get(task_id, 0),
         )
         for task_id in sorted(by_task)
     )

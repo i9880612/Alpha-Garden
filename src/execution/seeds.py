@@ -205,7 +205,7 @@ def load_signal_frontiers(
         )
         selected.append(SignalFrontier(
             root_task_id=branch.root_task_id, branches=(branch,), qualified_task_ids=(task_id,),
-            qualified_parent_attempt_count=PARENT_ATTEMPT_BUDGET - decision.remaining_attempts,
+            qualified_parent_attempt_count=decision.parent_attempt_count,
             qualified_parent_task_id=task_id,
         ))
     return SignalFrontierSet(records=tuple(selected))

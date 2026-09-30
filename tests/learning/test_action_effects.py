@@ -17,10 +17,10 @@ from learning.action_effects import (
     ACTION_STATE_MIXED,
     ACTION_STATE_PREFERRED,
     ACTION_STRATEGY_EXPLOITATION,
-    DefectActionRequest,
+    ActionRequest,
     ExplicitSelfCorrelationEvidence,
     TaskRunEvidence,
-    build_defect_action_strategies,
+    build_action_strategies,
 )
 from learning.evidence import (
     LearningEvidenceRecord,
@@ -68,8 +68,8 @@ class DefectActionEffectTests(unittest.TestCase):
                     sharpe_gap=0 if state == "passed" else .2 if status == "FAIL" else None))
         evidence = LearningEvidenceSet(tuple(records), ())
         def build(start):
-            return build_defect_action_strategies(evidence, build_mutation_learning_evidence(evidence, tuple(mutations)),
-                (DefectActionRequest(roots[0], "SELF_CORRELATION", ("repaired", "still_blocked", "read_error", "quality_regression", "quality_regression_pending_sc", "missing_checks")),),
+            return build_action_strategies(evidence, build_mutation_learning_evidence(evidence, tuple(mutations)),
+                (ActionRequest(roots[0], "SELF_CORRELATION", ("repaired", "still_blocked", "read_error", "quality_regression", "quality_regression_pending_sc", "missing_checks")),),
                 seed_root_task_ids=roots, task_runs=runs, explicit_self_correlations=checks,
                 sc_observation_start=datetime.fromisoformat(start))
         result = build("2026-08-01T00:00:00+00:00")
@@ -119,13 +119,13 @@ class DefectActionEffectTests(unittest.TestCase):
                 after="repair",
             ),
         )
-        strategies = build_defect_action_strategies(
+        strategies = build_action_strategies(
             evidence,
             build_mutation_learning_evidence(evidence, mutations),
             (
-                DefectActionRequest(
+                ActionRequest(
                     parent_task_id="positive",
-                    target_check_name="LOW_FITNESS",
+                    target_name="LOW_FITNESS",
                     candidate_actions=("distribution_stabilization",),
                 ),
             ),
@@ -414,13 +414,13 @@ class DefectActionEffectTests(unittest.TestCase):
             )
             parent_id = child_id
         evidence = LearningEvidenceSet(records=tuple(records), settings=())
-        built = build_defect_action_strategies(
+        built = build_action_strategies(
             evidence,
             build_mutation_learning_evidence(evidence, mutations),
             (
-                DefectActionRequest(
+                ActionRequest(
                     parent_task_id=root.task_id,
-                    target_check_name="LOW_FITNESS",
+                    target_name="LOW_FITNESS",
                     candidate_actions=("field_swap",),
                 ),
             ),
@@ -532,13 +532,13 @@ class DefectActionEffectTests(unittest.TestCase):
             settings=(),
         )
         mutation_evidence = build_mutation_learning_evidence(evidence, mutations)
-        return build_defect_action_strategies(
+        return build_action_strategies(
             evidence,
             mutation_evidence,
             (
-                DefectActionRequest(
+                ActionRequest(
                     parent_task_id=request_parent_id,
-                    target_check_name=requested_defects[0],
+                    target_name=requested_defects[0],
                     candidate_actions=("field_swap", "window_mutation"),
                 ),
             ),

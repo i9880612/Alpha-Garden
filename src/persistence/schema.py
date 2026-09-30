@@ -14,6 +14,7 @@ from persistence.submission_queue import initialize_submission_queue_schema
 from persistence.submissions import initialize_submission_schema
 from persistence.submission_checks import initialize_submission_check_schema
 from persistence.submitted_sync import initialize_submitted_sync_schema
+from persistence.quality_research import initialize_quality_research_schema
 
 
 PROJECT_TABLE_NAMES = frozenset(
@@ -43,6 +44,7 @@ PROJECT_TABLE_NAMES = frozenset(
         "qualified_alpha_archive",
         "submission_queue",
         "submission_checks",
+        "quality_research_tasks",
     }
 )
 
@@ -60,6 +62,9 @@ def add_submitted_sync_storage(connection: sqlite3.Connection) -> None:
     """Explicit additive migration for sync-submitted; no historical facts change."""
     expected = _reference_schema_objects()
     actual = _schema_objects(connection)
+    quality_key = ("table", "quality_research_tasks", "quality_research_tasks")
+    if quality_key not in actual:
+        expected.pop(quality_key)
     if actual == expected:
         return
     previous = {key: value for key, value in expected.items()
@@ -251,6 +256,21 @@ def add_mutation_reference_storage(connection: sqlite3.Connection) -> None:
     _require_current_schema(connection, expected)
 
 
+def add_quality_research_storage(connection: sqlite3.Connection) -> None:
+    """Explicit additive upgrade; leave historical tasks and counters untouched."""
+    expected = _reference_schema_objects()
+    actual = _schema_objects(connection)
+    if actual == expected:
+        return
+    previous = {key: value for key, value in expected.items() if key[2] != "quality_research_tasks"}
+    if actual != previous:
+        raise ValueError("quality_research_migration_schema_mismatch")
+    if not connection.in_transaction:
+        raise ValueError("quality_research_migration_requires_transaction")
+    initialize_quality_research_schema(connection)
+    _require_current_schema(connection, expected)
+
+
 def add_sc_research_plan_storage(connection: sqlite3.Connection) -> None:
     """Explicit additive migration; freeze focused plans without changing history."""
     expected = _migration_schema_objects(connection)
@@ -341,6 +361,9 @@ def _migration_schema_objects(connection) -> dict[tuple[str, str, str], str]:
     key = ("table", "platform_submitted_alpha_syncs", "platform_submitted_alpha_syncs")
     if key not in _schema_objects(connection):
         expected.pop(key)
+    quality_key = ("table", "quality_research_tasks", "quality_research_tasks")
+    if quality_key not in _schema_objects(connection):
+        expected.pop(quality_key)
     return expected
 
 

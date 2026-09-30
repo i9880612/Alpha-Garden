@@ -47,7 +47,7 @@ class SelfCorrelationReferenceTests(unittest.TestCase):
                     self.assertEqual(get_backtest_task(connection, tasks[0]).task.settings_json, original_settings)
             self.assertEqual(list_formal_submission_attempts(connection), ())
             # A newer transport error must invalidate current repair permission in both readers.
-            from execution.cycles import _explicit_self_correlation_evidence
+            from execution.self_correlation import load_action_check_evidence
             attempt = SimpleNamespace(task_id=tasks[0], check_observed_at=observed,
                                       check_payload_json=json.dumps(payload), status="ineligible")
             latest = "2026-09-04T00:09:00+00:00"
@@ -56,7 +56,7 @@ class SelfCorrelationReferenceTests(unittest.TestCase):
                 self.assertEqual(load_self_correlation_references(connection, parents=(parent,),
                     submitted_alphas=(reference,), account_scope="group-account",
                     observed_at=datetime.fromisoformat(latest)), ())
-                facts = _explicit_self_correlation_evidence(connection, account_scope="group-account",
+                facts = load_action_check_evidence(connection, account_scope="group-account",
                     evidence_cutoff=datetime.fromisoformat(latest))
                 self.assertEqual(facts[0].status, "PENDING")
             self.assertEqual(load_self_correlation_references(connection, parents=(parent,),

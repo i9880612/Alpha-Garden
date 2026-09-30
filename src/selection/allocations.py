@@ -21,14 +21,15 @@ from generation.transformations import (
 )
 from learning.action_effects import (
     ACTION_STRATEGY_EXPLOITATION,
-    DefectActionStrategy,
-    DefectActionStrategySet,
+    ActionStrategy,
+    ActionStrategySet,
 )
 from learning.optimization_targets import (
     OptimizationTarget,
     ParentOptimizationTargetSet,
     ParentOptimizationTargets,
 )
+from learning.quality import QUALITY_IMPROVEMENT
 from learning.frontiers import PARENT_ATTEMPT_BUDGET
 from learning.parent_settings import (
     ParentSettingsEvidence,
@@ -80,6 +81,8 @@ class SignalImprovementSource:
     parent_remaining_attempts: int
     is_submitted: bool
     self_correlation: float | None = None
+    quality_budget_key: tuple[str, str] | None = None
+    quality_remaining: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +125,7 @@ def allocate_backtest_sources(
     improvement_sources: tuple[SignalImprovementSource, ...],
     settings_evidence: ParentSettingsEvidenceSet,
     optimization_targets: ParentOptimizationTargetSet,
-    action_strategies: DefectActionStrategySet,
+    action_strategies: ActionStrategySet,
     account_scope: str,
     rotation_key: str,
     self_correlation_percent: int,
@@ -152,7 +155,7 @@ def allocate_backtest_sources(
         raise ValueError("source_allocation_evidence_invalid")
     if not isinstance(optimization_targets, ParentOptimizationTargetSet):
         raise ValueError("source_allocation_optimization_targets_invalid")
-    if not isinstance(action_strategies, DefectActionStrategySet):
+    if not isinstance(action_strategies, ActionStrategySet):
         raise ValueError("source_allocation_action_strategies_invalid")
     if (
         isinstance(direction_validation_count, bool)
@@ -237,17 +240,20 @@ def allocate_backtest_sources(
             raise ValueError("source_allocation_parent_evidence_mismatch")
         source = source_by_branch[branch_task_id]
         if source.stage == QUALIFIED_EVOLUTION_STAGE:
-            if any(target.check_name != "SELF_CORRELATION" for target in target_record.targets):
+            if any(target.name not in {"SELF_CORRELATION", QUALITY_IMPROVEMENT} for target in target_record.targets):
                 raise ValueError("source_allocation_qualified_parent_target_invalid")
             allocation_targets: list[OptimizationTarget | None] = list(target_record.targets) or [None]
         else:
             allocation_targets = list(target_record.targets)
+        allocation_targets = [target for target in allocation_targets if not (
+            _quality_allocation(source, target) and source.quality_remaining == 0
+        )]
         expected_defects = tuple(
-            sorted(target.check_name for target in target_record.targets)
+            sorted(target.name for target in target_record.targets if target.name != QUALITY_IMPROVEMENT)
         )
         for target in target_record.targets:
             strategy = strategies_by_target.get(
-                (branch_task_id, target.check_name)
+                (branch_task_id, target.name)
             )
             if strategy is not None and (
                 strategy.settings_key != target_record.settings_key
@@ -370,7 +376,7 @@ def _round_robin_roots(
     ],
     *,
     source_by_branch: dict[str, SignalImprovementSource],
-    strategies_by_target: dict[tuple[str, str], DefectActionStrategy],
+    strategies_by_target: dict[tuple[str, str], ActionStrategy],
     capacity: int,
     sc_capacity: int,
     rotation_key: str,
@@ -414,6 +420,8 @@ def _round_robin_roots(
         source.branch_task_id: source.parent_remaining_attempts
         for source in source_by_branch.values()
     }
+    quality_remaining = {source.quality_budget_key: source.quality_remaining
+                         for source in source_by_branch.values() if source.quality_budget_key is not None}
     attempted_by_family = {
         (source.branch_task_id, family.family): family.attempted_leaf_count
         for source in source_by_branch.values()
@@ -497,9 +505,13 @@ def _round_robin_roots(
                 for target_offset in range(len(targets)):
                     current_position = target_position + target_offset
                     target = targets[current_position % len(targets)]
+                    if (_quality_allocation(source, target)
+                            and source.quality_budget_key is not None
+                            and quality_remaining[source.quality_budget_key] <= 0):
+                        continue
                     strategy = (
                         strategies_by_target.get(
-                            (branch_task_id, target.check_name)
+                            (branch_task_id, target.name)
                         )
                         if target is not None
                         else None
@@ -586,6 +598,16 @@ def _round_robin_roots(
                     sc_selected += 1
                 remaining_by_family[(branch_task_id, selected_family)] -= 1
                 remaining_by_parent[branch_task_id] -= 1
+                if (_quality_allocation(source, selected_target)
+                        and source.quality_budget_key is not None):
+                    quality_remaining[source.quality_budget_key] -= 1
+                    if quality_remaining[source.quality_budget_key] == 0:
+                        for siblings in ranked_by_root.values():
+                            for sibling, sibling_targets in siblings:
+                                if (source_by_branch[sibling].quality_budget_key == source.quality_budget_key
+                                        and all(_quality_allocation(source_by_branch[sibling], item)
+                                                for item in sibling_targets)):
+                                    remaining_by_parent[sibling] = 0
                 attempted_by_family[(branch_task_id, selected_family)] += 1
                 if selected_family in SELF_CORRELATION_RESEARCH_FAMILIES:
                     scheduled_research_by_family[(branch_task_id, selected_family)] = (
@@ -648,9 +670,9 @@ def _candidate_families_for_target(
     source_families = tuple(item.family for item in source.family_capacities
                             if item.family not in SELF_CORRELATION_REPAIR_FAMILIES
                             or item.family in allowed_self_correlation_families(source.self_correlation))
-    if target is not None and target.check_name == "SELF_CORRELATION":
+    if target is not None and target.name == "SELF_CORRELATION":
         return tuple(family for family in source_families if family != COMPLEMENTARY_SIGNAL_REFRAME)
-    if target is None or target.check_name != "LOW_SUB_UNIVERSE_SHARPE":
+    if target is None or target.name != "LOW_SUB_UNIVERSE_SHARPE":
         return source_families
     allowed = set(
         (*LOW_SUB_UNIVERSE_SHARPE_STRUCTURAL_FAMILIES, *INTERNAL_EDIT_FAMILIES)
@@ -689,9 +711,17 @@ def _exploration_only(
     )
 
 
+def _quality_allocation(source: SignalImprovementSource, target: OptimizationTarget | None) -> bool:
+    # Keep bounded exploration for historically qualified parents with incomplete
+    # grade/SC evidence. It consumes quality budget but does not teach success.
+    return (target is not None and target.name == QUALITY_IMPROVEMENT
+            or target is None and source.stage == QUALIFIED_EVOLUTION_STAGE)
+
+
 def _validate_sources(sources: tuple[SignalImprovementSource, ...]) -> None:
     if not isinstance(sources, tuple):
         raise ValueError("source_allocation_improvement_sources_invalid")
+    quality_allowances = {}
     for source in sources:
         if (
             not isinstance(source, SignalImprovementSource)
@@ -725,6 +755,17 @@ def _validate_sources(sources: tuple[SignalImprovementSource, ...]) -> None:
         ):
             raise ValueError("source_allocation_improvement_sources_invalid")
         remaining_attempts = source.parent_remaining_attempts
+        if (source.quality_budget_key is None) != (source.quality_remaining is None):
+            raise ValueError("source_allocation_quality_budget_invalid")
+        if source.quality_budget_key is not None:
+            if (not isinstance(source.quality_budget_key, tuple) or len(source.quality_budget_key) != 2
+                    or any(not isinstance(value, str) or not value.strip() for value in source.quality_budget_key)
+                    or isinstance(source.quality_remaining, bool)
+                    or not isinstance(source.quality_remaining, int) or source.quality_remaining < 0):
+                raise ValueError("source_allocation_quality_budget_invalid")
+            previous = quality_allowances.setdefault(source.quality_budget_key, source.quality_remaining)
+            if previous != source.quality_remaining:
+                raise ValueError("source_allocation_quality_budget_conflict")
         if source.self_correlation is not None and (
             isinstance(source.self_correlation, bool)
             or not isinstance(source.self_correlation, (int, float))
@@ -787,7 +828,7 @@ def _target_priority(target: OptimizationTarget | None) -> tuple[int, float]:
 
 
 def _target_identity(target: OptimizationTarget | None) -> str:
-    return target.check_name if target is not None else QUALIFIED_EVOLUTION_STAGE
+    return target.name if target is not None else QUALIFIED_EVOLUTION_STAGE
 
 
 def _candidate_family_order(
@@ -798,7 +839,7 @@ def _candidate_family_order(
     rotation_key: str,
     parent_task_id: str,
     slot: int,
-    action_strategy: DefectActionStrategy | None,
+    action_strategy: ActionStrategy | None,
     use_preference: bool,
 ) -> tuple[str, ...]:
     comparison_counts = (
@@ -818,7 +859,7 @@ def _candidate_family_order(
         item.action: item.safe_progress_count / item.resolved_count
         for item in action_strategy.actions
         if item.action in preferred and item.resolved_count > 0
-    } if target is not None and target.check_name == "SELF_CORRELATION" and action_strategy is not None else {}
+    } if target is not None and target.name == "SELF_CORRELATION" and action_strategy is not None else {}
     return tuple(
         sorted(
             transformations,
@@ -844,25 +885,25 @@ def _candidate_family_order(
 
 
 def _action_strategies_by_target(
-    action_strategies: DefectActionStrategySet,
+    action_strategies: ActionStrategySet,
     *,
     account_scope: str,
-) -> dict[tuple[str, str], DefectActionStrategy]:
-    built: dict[tuple[str, str], DefectActionStrategy] = {}
+) -> dict[tuple[str, str], ActionStrategy]:
+    built: dict[tuple[str, str], ActionStrategy] = {}
     for strategy in action_strategies.records:
-        if not isinstance(strategy, DefectActionStrategy):
+        if not isinstance(strategy, ActionStrategy):
             raise ValueError("source_allocation_action_strategies_invalid")
         if strategy.account_scope != account_scope:
             continue
-        identity = (strategy.parent_task_id, strategy.target_check_name)
+        identity = (strategy.parent_task_id, strategy.target_name)
         if identity in built:
             raise ValueError("source_allocation_action_strategy_duplicated")
         action_names = tuple(item.action for item in strategy.actions)
         if (
             not strategy.parent_task_id.strip()
             or not strategy.settings_key.strip()
-            or not strategy.defect_checks
-            or strategy.target_check_name not in strategy.defect_checks
+            or (strategy.target_name != QUALITY_IMPROVEMENT and strategy.target_name not in strategy.defect_checks)
+            or (strategy.target_name == QUALITY_IMPROVEMENT and bool(strategy.defect_checks))
             or len(set(action_names)) != len(action_names)
             or not set(strategy.preferred_actions) <= set(action_names)
             or not set(strategy.deprioritized_actions) <= set(action_names)
@@ -875,14 +916,14 @@ def _action_strategies_by_target(
 
 def _action_strategy_context(
     root_task_id: str,
-    strategy: DefectActionStrategy,
+    strategy: ActionStrategy,
 ) -> tuple[str, str, str, tuple[str, ...], str]:
     return (
         root_task_id,
         strategy.account_scope,
         strategy.settings_key,
         strategy.defect_checks,
-        strategy.target_check_name,
+        strategy.target_name,
     )
 
 

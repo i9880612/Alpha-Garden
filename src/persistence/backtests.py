@@ -12,6 +12,7 @@ from persistence.seeds import initialize_signal_seed_schema
 from persistence.qualified_archive import initialize_qualified_archive_schema
 from persistence.pnl import initialize_pnl_schema
 from persistence.submission_checks import initialize_submission_check_schema
+from persistence.quality_research import initialize_quality_research_schema
 
 
 BACKTEST_ACTIVE_STATUSES = frozenset({"created", "submission_unknown", "pending"})
@@ -214,6 +215,7 @@ def initialize_backtest_schema(connection: sqlite3.Connection) -> None:
     initialize_signal_seed_schema(connection)
     initialize_qualified_archive_schema(connection)
     initialize_mutation_reference_schema(connection)
+    initialize_quality_research_schema(connection)
 
 
 def initialize_mutation_reference_schema(connection: sqlite3.Connection) -> None:

@@ -49,6 +49,7 @@ from persistence.run_diagnostics import (
     CandidatePlanningExclusionCount,
 )
 from selection.allocations import BacktestSourceAllocation, allowed_self_correlation_families
+from learning.quality import QUALITY_IMPROVEMENT
 from selection.candidates import select_candidates, explore_internal_fields
 from selection.formulas import (
     formula_polishing_candidate,
@@ -107,6 +108,7 @@ class CandidateSelectionShortfall(CycleCandidatePlanningStopped):
 class CycleCandidate:
     candidate: FormulaCandidate
     settings: BacktestSettings
+    quality_root_task_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -522,6 +524,9 @@ def build_cycle_candidates(
             CycleCandidate(
                 candidate=selected.candidate,
                 settings=pool.settings,
+                quality_root_task_id=(allocation.root_task_id if
+                    (allocation.target is not None and allocation.target.name == QUALITY_IMPROVEMENT)
+                    or (allocation.target is None and pool.stage == QUALIFIED_EVOLUTION_STAGE) else None),
             )
         )
 

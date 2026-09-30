@@ -11,6 +11,7 @@ from learning.evidence import (
 )
 from learning.seeds import SIGNAL_TARGET_CHECKS, signal_branch_is_safe
 from learning.self_correlation import SelfCorrelationReference
+from learning.quality import QUALITY_IMPROVEMENT
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +26,7 @@ class OptimizationActionEvidence:
 
 @dataclass(frozen=True, slots=True)
 class OptimizationTarget:
-    check_name: str
+    check_name: str | None
     details_captured: bool
     threshold: float | None
     actual: float | None
@@ -33,6 +34,11 @@ class OptimizationTarget:
     normalized_gap: float | None
     gap_state: str
     actions: tuple[OptimizationActionEvidence, ...]
+    objective: str | None = None
+
+    @property
+    def name(self) -> str:
+        return self.objective if self.objective is not None else self.check_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +52,19 @@ class ParentOptimizationTargets:
 @dataclass(frozen=True, slots=True)
 class ParentOptimizationTargetSet:
     records: tuple[ParentOptimizationTargets, ...]
+
+
+def include_quality_targets(
+    targets: ParentOptimizationTargetSet, eligible_parent_ids: frozenset[str],
+) -> ParentOptimizationTargetSet:
+    """Add a research objective without inventing a failed platform check."""
+    return ParentOptimizationTargetSet(tuple(
+        replace(record, targets=(OptimizationTarget(
+            check_name=None, details_captured=True, threshold=None, actual=None, platform_date=None,
+            normalized_gap=None, gap_state="quality_objective", actions=(), objective=QUALITY_IMPROVEMENT,
+        ),)) if record.parent_task_id in eligible_parent_ids and not record.targets else record
+        for record in targets.records
+    ))
 
 
 def include_self_correlation_targets(

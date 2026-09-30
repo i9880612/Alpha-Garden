@@ -14,6 +14,7 @@ from learning.evidence import (
 )
 from learning.optimization_targets import normalized_failure_gap
 from learning.seeds import SIGNAL_TARGET_CHECKS, signal_branch_is_safe
+from learning.quality import QUALITY_IMPROVEMENT, quality_metrics_ready, quality_progress
 from worldquant.backtests import STANDARD_NON_SC_CHECK_NAMES
 
 
@@ -58,9 +59,9 @@ class ExplicitSelfCorrelationEvidence:
 
 
 @dataclass(frozen=True, slots=True)
-class DefectActionRequest:
+class ActionRequest:
     parent_task_id: str
-    target_check_name: str
+    target_name: str
     candidate_actions: tuple[str, ...]
 
 
@@ -73,7 +74,7 @@ class ActionEffectObservation:
     account_scope: str
     settings_key: str
     defect_checks: tuple[str, ...]
-    target_check_name: str
+    target_name: str
     action: str
     outcome: str
     sc_passed: bool | None = None
@@ -82,10 +83,13 @@ class ActionEffectObservation:
     sharpe_gap_delta: float | None = None
     fitness_delta: float | None = None
     turnover_delta: float | None = None
+    sharpe_delta: float | None = None
+    parent_grade: str | None = None
+    child_grade: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class DefectActionEvidence:
+class ActionEvidence:
     action: str
     state: str
     resolved_count: int
@@ -98,35 +102,36 @@ class DefectActionEvidence:
 
 
 @dataclass(frozen=True, slots=True)
-class DefectActionStrategy:
+class ActionStrategy:
     parent_task_id: str
     account_scope: str
     settings_key: str
     defect_checks: tuple[str, ...]
-    target_check_name: str
+    target_name: str
     mode: str
     reason: str
     preferred_actions: tuple[str, ...]
     deprioritized_actions: tuple[str, ...]
-    actions: tuple[DefectActionEvidence, ...]
+    actions: tuple[ActionEvidence, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class DefectActionStrategySet:
-    records: tuple[DefectActionStrategy, ...]
+class ActionStrategySet:
+    records: tuple[ActionStrategy, ...]
     observations: tuple[ActionEffectObservation, ...]
 
 
-def build_defect_action_strategies(
+def build_action_strategies(
     evidence: LearningEvidenceSet,
     mutation_evidence: MutationLearningEvidenceSet,
-    requests: Iterable[DefectActionRequest],
+    requests: Iterable[ActionRequest],
     *,
     seed_root_task_ids: Iterable[str],
     task_runs: Iterable[TaskRunEvidence],
     explicit_self_correlations: Iterable[ExplicitSelfCorrelationEvidence],
     sc_observation_start: datetime | None = None,
-) -> DefectActionStrategySet:
+    quality_observation_start: datetime | None = None,
+) -> ActionStrategySet:
     if not isinstance(evidence, LearningEvidenceSet):
         raise ValueError("action_effect_learning_evidence_invalid")
     if not isinstance(mutation_evidence, MutationLearningEvidenceSet):
@@ -156,6 +161,7 @@ def build_defect_action_strategies(
         runs_by_task=runs_by_task,
         explicit_sc_by_task=explicit_sc_by_task,
         sc_observation_start=sc_observation_start,
+        quality_observation_start=quality_observation_start,
     )
     observations_by_group: defaultdict[
         tuple[str, str, tuple[str, ...], str, str],
@@ -167,21 +173,23 @@ def build_defect_action_strategies(
                 observation.account_scope,
                 observation.settings_key,
                 observation.defect_checks,
-                observation.target_check_name,
+                observation.target_name,
                 observation.action,
             )
         ].append(observation)
 
-    strategies: list[DefectActionStrategy] = []
+    strategies: list[ActionStrategy] = []
     for request in sorted(
         requested,
-        key=lambda item: (item.parent_task_id, item.target_check_name),
+        key=lambda item: (item.parent_task_id, item.target_name),
     ):
         parent = records_by_task.get(request.parent_task_id)
         if parent is None:
             raise ValueError("action_effect_parent_result_missing")
         defect_checks = _eligible_defect_checks(parent, explicit_sc_by_task.get(parent.task_id))
-        if defect_checks is None or request.target_check_name not in defect_checks:
+        if request.target_name == QUALITY_IMPROVEMENT and quality_parent_eligible(parent, explicit_sc_by_task.get(parent.task_id)):
+            defect_checks = ()
+        elif defect_checks is None or request.target_name not in defect_checks:
             raise ValueError("action_effect_parent_target_invalid")
 
         actions = tuple(
@@ -192,7 +200,7 @@ def build_defect_action_strategies(
                         parent.account_scope,
                         parent.settings_key,
                         defect_checks,
-                        request.target_check_name,
+                        request.target_name,
                         action,
                     ),
                     (),
@@ -216,12 +224,12 @@ def build_defect_action_strategies(
             else ACTION_STRATEGY_EXPLORATION
         )
         strategies.append(
-            DefectActionStrategy(
+            ActionStrategy(
                 parent_task_id=parent.task_id,
                 account_scope=parent.account_scope,
                 settings_key=parent.settings_key,
                 defect_checks=defect_checks,
-                target_check_name=request.target_check_name,
+                target_name=request.target_name,
                 mode=mode,
                 reason=_strategy_reason(actions, preferred),
                 preferred_actions=preferred,
@@ -230,7 +238,7 @@ def build_defect_action_strategies(
             )
         )
 
-    return DefectActionStrategySet(
+    return ActionStrategySet(
         records=tuple(strategies),
         observations=observations,
     )
@@ -245,6 +253,7 @@ def _build_observations(
     runs_by_task: dict[str, str],
     explicit_sc_by_task: dict[str, ExplicitSelfCorrelationEvidence],
     sc_observation_start: datetime | None,
+    quality_observation_start: datetime | None,
 ) -> tuple[ActionEffectObservation, ...]:
     built: list[ActionEffectObservation] = []
     for mutation in mutation_records:
@@ -263,11 +272,17 @@ def _build_observations(
         parent_sc = explicit_sc_by_task.get(parent.task_id)
         child_sc = explicit_sc_by_task.get(child.task_id)
         defect_checks = _eligible_defect_checks(parent, parent_sc)
+        target_names = defect_checks
+        if defect_checks is None and quality_parent_eligible(parent, parent_sc):
+            defect_checks, target_names = (), (QUALITY_IMPROVEMENT,)
         if root_task_id is None or run_id is None or defect_checks is None:
             continue
-        for target_check_name in defect_checks:
-            if (target_check_name == _SELF_CORRELATION and sc_observation_start is not None
+        for target_name in target_names:
+            if (target_name == _SELF_CORRELATION and sc_observation_start is not None
                     and datetime.fromisoformat(child.finished_at) < sc_observation_start):
+                continue
+            if (target_name == QUALITY_IMPROVEMENT and quality_observation_start is not None
+                    and datetime.fromisoformat(child.finished_at) < quality_observation_start):
                 continue
             built.append(
                 ActionEffectObservation(
@@ -278,13 +293,13 @@ def _build_observations(
                     account_scope=parent.account_scope,
                     settings_key=parent.settings_key,
                     defect_checks=defect_checks,
-                    target_check_name=target_check_name,
+                    target_name=target_name,
                     action=mutation.action,
                     outcome=_classify_observation(
                         parent,
                         child,
                         mutation,
-                        target_check_name=target_check_name,
+                        target_name=target_name,
                         explicit_sc=explicit_sc_by_task.get(child.task_id),
                     ),
                     sc_passed=(child_sc.status == "PASS" if child_sc is not None
@@ -297,6 +312,7 @@ def _build_observations(
                         if parent_sc is not None and child_sc is not None
                         and parent_sc.sharpe_gap is not None and child_sc.sharpe_gap is not None else None),
                     fitness_delta=mutation.fitness_delta, turnover_delta=mutation.turnover_delta,
+                    sharpe_delta=mutation.sharpe_delta, parent_grade=parent.grade, child_grade=child.grade,
                 )
             )
     return tuple(
@@ -306,7 +322,7 @@ def _build_observations(
                 item.account_scope,
                 item.settings_key,
                 item.defect_checks,
-                item.target_check_name,
+                item.target_name,
                 item.action,
                 item.run_id,
                 item.root_task_id,
@@ -343,10 +359,13 @@ def _classify_observation(
     child: LearningEvidenceRecord,
     mutation: MutationLearningEvidenceRecord,
     *,
-    target_check_name: str,
+    target_name: str,
     explicit_sc: ExplicitSelfCorrelationEvidence | None,
 ) -> str:
-    if target_check_name == _SELF_CORRELATION:
+    if target_name == QUALITY_IMPROVEMENT:
+        status = _quality_check_state(child, explicit_sc)
+        return quality_progress(parent, child) if status == "passed" else status
+    if target_name == _SELF_CORRELATION:
         if (explicit_sc is None
                 or datetime.fromisoformat(explicit_sc.observed_at) < datetime.fromisoformat(child.finished_at)):
             return ACTION_EFFECT_UNRESOLVED
@@ -361,7 +380,7 @@ def _classify_observation(
         parent,
         child,
         mutation,
-        target_check_name,
+        target_name,
     )
     if progress == ACTION_EFFECT_UNRESOLVED:
         return ACTION_EFFECT_UNRESOLVED
@@ -380,31 +399,55 @@ def _classify_observation(
     return ACTION_EFFECT_SAFE_PROGRESS
 
 
+def quality_parent_eligible(
+    record: LearningEvidenceRecord, explicit_sc: ExplicitSelfCorrelationEvidence | None,
+) -> bool:
+    return (quality_metrics_ready(record) and record.grade != "SPECTACULAR"
+            and _quality_check_state(record, explicit_sc) == "passed")
+
+
+def _quality_check_state(record, explicit_sc) -> str:
+    if set(record.failed_checks) - {_SELF_CORRELATION}:
+        return ACTION_EFFECT_CONFLICT
+    if not quality_metrics_ready(record):
+        return ACTION_EFFECT_UNRESOLVED
+    if explicit_sc is not None:
+        if datetime.fromisoformat(explicit_sc.observed_at) < datetime.fromisoformat(record.finished_at):
+            return ACTION_EFFECT_UNRESOLVED
+        if explicit_sc.other_checks_passed is False or explicit_sc.status == "FAIL":
+            return ACTION_EFFECT_CONFLICT
+        return ("passed" if explicit_sc.status == "PASS" and explicit_sc.formal_check_state == "passed"
+                and explicit_sc.other_checks_passed is True else ACTION_EFFECT_UNRESOLVED)
+    if _SELF_CORRELATION in record.failed_checks:
+        return ACTION_EFFECT_CONFLICT
+    return "passed" if _SELF_CORRELATION in record.passed_checks else ACTION_EFFECT_UNRESOLVED
+
+
 def _target_progress(
     parent: LearningEvidenceRecord,
     child: LearningEvidenceRecord,
     mutation: MutationLearningEvidenceRecord,
-    target_check_name: str,
+    target_name: str,
 ) -> str:
     if (
-        target_check_name in child.pending_checks
-        or target_check_name in mutation.child_missing_checks
-        or target_check_name
+        target_name in child.pending_checks
+        or target_name in mutation.child_missing_checks
+        or target_name
         not in (set(child.passed_checks) | set(child.failed_checks))
     ):
         return ACTION_EFFECT_UNRESOLVED
 
-    if target_check_name in child.passed_checks:
-        metric_delta_name = _METRIC_DELTA_BY_TARGET.get(target_check_name)
+    if target_name in child.passed_checks:
+        metric_delta_name = _METRIC_DELTA_BY_TARGET.get(target_name)
         if metric_delta_name is not None and not _positive_finite(
             getattr(mutation, metric_delta_name)
         ):
             return ACTION_EFFECT_CONFLICT
         return ACTION_EFFECT_SAFE_PROGRESS
 
-    if target_check_name not in child.failed_checks:
+    if target_name not in child.failed_checks:
         return ACTION_EFFECT_UNRESOLVED
-    metric_delta_name = _METRIC_DELTA_BY_TARGET.get(target_check_name)
+    metric_delta_name = _METRIC_DELTA_BY_TARGET.get(target_name)
     if metric_delta_name is not None:
         delta = getattr(mutation, metric_delta_name)
         if not _finite_number(delta):
@@ -492,7 +535,7 @@ def _failure_gap(
 def _summarize_action(
     action: str,
     observations: Iterable[ActionEffectObservation],
-) -> DefectActionEvidence:
+) -> ActionEvidence:
     items = tuple(observations)
     safe_count = sum(item.outcome == ACTION_EFFECT_SAFE_PROGRESS for item in items)
     no_progress_count = sum(
@@ -508,7 +551,7 @@ def _summarize_action(
     lineages: defaultdict[str, list[ActionEffectObservation]] = defaultdict(list)
     for item in resolved:
         lineages[item.root_task_id].append(item)
-    return DefectActionEvidence(
+    return ActionEvidence(
         action=action,
         state=_action_state(resolved, lineages=lineages),
         resolved_count=len(resolved),
@@ -556,7 +599,7 @@ def _action_state(
 
 
 def _strategy_reason(
-    actions: tuple[DefectActionEvidence, ...],
+    actions: tuple[ActionEvidence, ...],
     preferred_actions: tuple[str, ...],
 ) -> str:
     if preferred_actions:
@@ -636,14 +679,14 @@ def _self_correlations_by_task(
     return built
 
 
-def _validate_requests(requests: tuple[DefectActionRequest, ...]) -> None:
+def _validate_requests(requests: tuple[ActionRequest, ...]) -> None:
     identities: set[tuple[str, str]] = set()
     for request in requests:
         if (
-            not isinstance(request, DefectActionRequest)
+            not isinstance(request, ActionRequest)
             or not isinstance(request.parent_task_id, str)
             or not request.parent_task_id.strip()
-            or request.target_check_name not in (SIGNAL_TARGET_CHECKS | {_SELF_CORRELATION})
+            or request.target_name not in (SIGNAL_TARGET_CHECKS | {_SELF_CORRELATION, QUALITY_IMPROVEMENT})
             or not isinstance(request.candidate_actions, tuple)
             or not request.candidate_actions
             or any(
@@ -653,7 +696,7 @@ def _validate_requests(requests: tuple[DefectActionRequest, ...]) -> None:
             or len(set(request.candidate_actions)) != len(request.candidate_actions)
         ):
             raise ValueError("action_effect_request_invalid")
-        identity = (request.parent_task_id, request.target_check_name)
+        identity = (request.parent_task_id, request.target_name)
         if identity in identities:
             raise ValueError("action_effect_request_duplicated")
         identities.add(identity)

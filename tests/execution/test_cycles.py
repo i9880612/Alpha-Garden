@@ -40,7 +40,7 @@ from generation.polishing import SINGLE_WINDOW_MUTATION
 from generation.internal_edits import INTERNAL_EDIT_FAMILIES
 from generation.self_correlation import SELF_CORRELATION_REPAIR, SELF_CORRELATION_REPAIR_FAMILIES
 from generation.transformations import COMPLEMENTARY_SIGNAL_REFRAME
-from learning.action_effects import build_defect_action_strategies
+from learning.action_effects import build_action_strategies
 from persistence.backtests import (
     BacktestMutationRecord,
     create_backtest_mutation,
@@ -94,7 +94,7 @@ def _checks(statuses: dict[str, str]) -> tuple[BacktestCheck, ...]:
 class AutomatedCyclePlanningTests(unittest.TestCase):
     def test_action_learning_uses_independent_checks_with_account_and_time_boundaries(self):
         from datetime import datetime
-        from execution.cycles import _explicit_self_correlation_evidence
+        from execution.self_correlation import load_action_check_evidence
         from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
 
         run_id = self._start_run()
@@ -113,7 +113,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             for target in (task_id, outsider.task.task_id):
                 save_submission_check(connection, SubmissionCheckRecord(target, "2026-08-30T00:08:00+08:00", payload, None))
             def evidence(minute):
-                return _explicit_self_correlation_evidence(connection, account_scope="group-account",
+                return load_action_check_evidence(connection, account_scope="group-account",
                     evidence_cutoff=datetime.fromisoformat(f"2026-08-30T00:{minute:02d}:00+08:00"))
             self.assertEqual(evidence(6), ())
             self.assertEqual([(e.task_id, e.status) for e in evidence(7)], [(task_id, "FAIL")])
@@ -125,7 +125,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
 
     def test_equal_time_conflicting_checks_do_not_produce_a_learning_success(self):
         from datetime import datetime
-        from execution.cycles import _explicit_self_correlation_evidence
+        from execution.self_correlation import load_action_check_evidence
         from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
 
         run_id = self._start_run()
@@ -139,7 +139,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             payload = canonical_submission_json({"is": {"checks": [
                 {"name": name, "result": "PASS"} for name in STANDARD_REGULAR_CHECK_NAMES]}})
             save_submission_check(connection, SubmissionCheckRecord(task_id, stamp, payload, None))
-            evidence = _explicit_self_correlation_evidence(connection, account_scope="group-account",
+            evidence = load_action_check_evidence(connection, account_scope="group-account",
                                                            evidence_cutoff=datetime.fromisoformat(stamp))
             self.assertEqual([(e.status, e.formal_check_state) for e in evidence], [("PENDING", "pending")])
 
@@ -697,8 +697,8 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         )
 
         with patch(
-            "execution.cycles.build_defect_action_strategies",
-            wraps=build_defect_action_strategies,
+            "execution.cycles.build_action_strategies",
+            wraps=build_action_strategies,
         ) as strategy_builder:
             recovered = plan_automated_cycle(
                 self.database_path,

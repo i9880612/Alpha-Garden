@@ -22,16 +22,17 @@ from execution.cycle_candidates import (
     supported_formula_identities,
 )
 from execution.seeds import load_signal_frontiers
-from execution.self_correlation import load_self_correlation_references, load_latest_submission_checks
+from execution.quality_research import load_quality_budgets
+from execution.self_correlation import load_self_correlation_references, load_action_check_evidence
 from execution.cycle_schedule import scheduled_cycle_number
 from execution.runs import remaining_automated_run_backtests
 from execution.progress import phase
 from generation.parser import parse_formula
 from learning.action_effects import (
-    DefectActionRequest,
-    ExplicitSelfCorrelationEvidence,
+    ActionRequest,
     TaskRunEvidence,
-    build_defect_action_strategies,
+    build_action_strategies,
+    quality_parent_eligible,
 )
 from learning.evidence import (
     build_learning_evidence,
@@ -39,6 +40,7 @@ from learning.evidence import (
 )
 from learning.optimization_targets import (
     include_self_correlation_targets,
+    include_quality_targets,
     ParentOptimizationTargetSet,
     build_parent_optimization_targets,
 )
@@ -51,7 +53,6 @@ from learning.quality_proximity import (
     STRUCTURAL_EVOLUTION_STAGE,
     build_parent_improvement_stages,
 )
-from learning.self_correlation import assess_self_correlation_peers
 from learning.seed_correlation import submitted_seed
 from persistence.backtests import (
     backtest_was_cancelled_before_submission,
@@ -84,7 +85,7 @@ from selection.allocations import (
     direction_validation_limit,
 )
 from selection.settings import BacktestSettingsPolicy
-from worldquant.backtests import BacktestSettings, STANDARD_NON_SC_CHECK_NAMES
+from worldquant.backtests import BacktestSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +305,16 @@ def plan_automated_cycle(
         )
         sc_by_parent = {item.parent_task_id: item.correlation for item in sc_references}
         optimization_targets = include_self_correlation_targets(optimization_targets, evidence, sc_references)
+        explicit_checks = load_action_check_evidence(
+            connection, account_scope=run.account_scope, evidence_cutoff=evidence_cutoff,
+        )
+        explicit_by_task = {item.task_id: item for item in explicit_checks}
+        optimization_targets = include_quality_targets(optimization_targets, frozenset(
+            record.task_id for record in evidence.records if record.task_id in qualified_parent_task_ids
+            and quality_parent_eligible(record, explicit_by_task.get(record.task_id))
+        ))
+        quality_allowances = load_quality_budgets(connection,
+            tuple(completed_by_task_id[task] for task in eligible_parent_task_ids), mutations=planning_mutations)
         improvement_pools = build_improvement_candidate_pools(
             catalog,
             settings_policy,
@@ -349,6 +360,9 @@ def plan_automated_cycle(
                             completed_by_task_id[branch.task_id], submitted_alphas,
                         ),
                         self_correlation=sc_by_parent.get(branch.task_id),
+                        quality_budget_key=(quality_allowances[branch.task_id].root_task_id, branch.settings_key)
+                            if branch.task_id in quality_allowances else None,
+                        quality_remaining=quality_allowances[branch.task_id].available if branch.task_id in quality_allowances else None,
                         family_capacities=tuple(
                             SignalImprovementFamilyCapacity(
                                 family=family,
@@ -390,13 +404,13 @@ def plan_automated_cycle(
         targets_by_parent = {
             record.parent_task_id: record for record in optimization_targets.records
         }
-        action_strategies = build_defect_action_strategies(
+        action_strategies = build_action_strategies(
             action_evidence,
             action_mutation_evidence,
             tuple(
-                DefectActionRequest(
+                ActionRequest(
                     parent_task_id=source.branch_task_id,
-                    target_check_name=target.check_name,
+                    target_name=target.name,
                     candidate_actions=tuple(
                         capacity.family for capacity in source.family_capacities
                     ),
@@ -418,11 +432,8 @@ def plan_automated_cycle(
                 for link in list_all_automated_run_backtests(connection)
             ),
             sc_observation_start=evidence_cutoff - timedelta(days=30),
-            explicit_self_correlations=_explicit_self_correlation_evidence(
-                connection,
-                account_scope=run.account_scope,
-                evidence_cutoff=evidence_cutoff,
-            ),
+            quality_observation_start=evidence_cutoff - timedelta(days=30),
+            explicit_self_correlations=explicit_checks,
         )
         rotation_key = f"{run.run_id}:{cycle_number}"
         source_allocation = allocate_backtest_sources(
@@ -470,6 +481,7 @@ def plan_automated_cycle(
             AutomatedCandidateBacktest(
                 candidate=item.candidate,
                 settings=item.settings,
+                quality_root_task_id=item.quality_root_task_id,
             )
             for item in selected_candidates
         ),
@@ -555,38 +567,6 @@ def _action_evidence_cutoff(
         existing_values.pop(),
         "automated_cycle_recovery_created_at_invalid",
     )
-
-
-def _explicit_self_correlation_evidence(
-    connection: sqlite3.Connection,
-    *,
-    account_scope: str,
-    evidence_cutoff: datetime,
-) -> tuple[ExplicitSelfCorrelationEvidence, ...]:
-    checks = load_latest_submission_checks(connection, account_scope=account_scope, observed_at=evidence_cutoff)
-    snapshots = {item.task.task_id: item for item in list_completed_backtests(connection)
-                 if item.task.account_scope == account_scope}
-    references = tuple(ref for ref in list_platform_submitted_alphas(connection, account_scope=account_scope)
-                       if datetime.fromisoformat(ref.observed_at) <= evidence_cutoff)
-    evidence = []
-    for task_id, check in sorted(checks.items()):
-        statuses = dict(check.assessment.statuses)
-        status = statuses.get("SELF_CORRELATION", "PENDING")
-        status = status if status in {"PASS", "FAIL"} else "PENDING"
-        snapshot = snapshots.get(task_id)
-        sharpe = snapshot.result.sharpe if snapshot is not None and snapshot.result is not None else None
-        peers = assess_self_correlation_peers(sharpe, check.peers, references)
-        complete = peers.unresolved_count == 0 and status in {"PASS", "FAIL"}
-        evidence.append(ExplicitSelfCorrelationEvidence(
-            task_id, status, check.assessment.state, check.observed_at,
-            other_checks_passed=(False if any(statuses.get(name) == "FAIL" for name in STANDARD_NON_SC_CHECK_NAMES)
-                else True if all(statuses.get(name) == "PASS" for name in STANDARD_NON_SC_CHECK_NAMES) else None),
-            blocker_count=0 if check.assessment.state == "passed" else len(peers.blockers) if complete else None,
-            sharpe_gap=0.0 if check.assessment.state == "passed" else (max(0.0, peers.required_sharpe - sharpe)
-                        if complete and peers.required_sharpe is not None and sharpe is not None else None),
-        ))
-    return tuple(evidence)
-
 
 
 def _eligible_improvement_parent_task_ids(

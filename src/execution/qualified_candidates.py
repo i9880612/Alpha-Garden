@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from execution.quality_research import load_quality_budgets
 
 from learning.qualified_evolution import QualifiedEvolutionRecord, assess_qualified_evolution
 from learning.pnl import PnlCorrelations
@@ -104,7 +105,9 @@ def load_submission_opportunity_ids(
     correlations = PnlCorrelations(series)
     mutations = list_backtest_mutations(connection)
     decisions = {r.task_id: r for r in assess_qualified_evolution(
-        checked, mutations, list_started_backtest_task_ids(connection), series, correlations=correlations)}
+        checked, mutations, list_started_backtest_task_ids(connection), series, correlations=correlations,
+        quality_remaining={task: budget.unspent for task, budget in load_quality_budgets(
+            connection, checked, mutations=mutations).items()})}
     available = tuple(s for s in checked if s.task.task_id == reserved_task_id or (
         s.task.platform_alpha_id not in submitted_ids
         and normalize_submitted_formula(s.task.formula) not in consumed))
@@ -144,5 +147,7 @@ def load_qualified_evolution(
         checked, list_backtest_mutations(connection) if mutations is None else mutations,
         list_started_backtest_task_ids(connection) - excluded_task_ids,
         list_pnl_series(connection, platform_alpha_ids=frozenset(s.task.platform_alpha_id for s in checked)),
+        quality_remaining={task: budget.unspent for task, budget in load_quality_budgets(
+            connection, checked, mutations=mutations).items()},
     )
     return tuple(record for record in decisions if record.task_id in eligible)

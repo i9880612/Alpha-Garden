@@ -11,6 +11,7 @@ from execution.runs import (
     remaining_automated_run_backtests,
 )
 from execution.seeds import load_signal_frontiers
+from execution.quality_research import load_quality_budgets, reserve_quality_task
 from execution.cycle_schedule import scheduled_cycle_number
 from generation.candidate import FormulaCandidate
 from generation.direction import DIRECTION_REVERSAL, reverse_direction_candidate
@@ -54,6 +55,7 @@ class AutomatedRunBacktestUsage:
 class AutomatedCandidateBacktest:
     candidate: FormulaCandidate
     settings: BacktestSettings
+    quality_root_task_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +63,7 @@ class _AutomatedBatchItem:
     formula: str
     settings: BacktestSettings
     mutation: FormulaCandidate | None = None
+    quality_root_task_id: str | None = None
 
 
 def prepare_automated_candidate_backtest_batch(
@@ -84,6 +87,7 @@ def prepare_automated_candidate_backtest_batch(
                     if item.candidate.generation_action == "mutation"
                     else None
                 ),
+                item.quality_root_task_id,
             )
             for item in candidates
         ),
@@ -215,6 +219,14 @@ def _prepare_automated_items(
                         conflict_reference_formula=item.mutation.change.conflict_reference_formula,
                     ),
                 )
+            quality_root = item.quality_root_task_id
+            if run.optimization_only and parent is not None and quality_root is None:
+                quality_root = load_quality_budgets(connection, (parent,))[parent.task.task_id].root_task_id
+            if quality_root is not None:
+                if parent is None or item.mutation.change.conflict_reference_alpha_id is not None:
+                    raise ValueError("quality_research_source_invalid")
+                reserve_quality_task(connection, parent=parent, child_task_id=snapshot.task.task_id,
+                                     root_task_id=quality_root)
             attach_backtest_to_automated_run(
                 connection,
                 AutomatedRunBacktestRecord(

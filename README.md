@@ -182,6 +182,18 @@ Each batch gathers evidence for its own candidates and all submitted references,
 
 Existing databases require explicitly authorized additive upgrades: call `persistence.schema.add_mutation_reference_storage`, then `add_sc_research_plan_storage` in the same `BEGIN IMMEDIATE` transaction. They add the conflict-binding table and frozen-plan column while preserving historical tasks, budgets and results. Run commands do not migrate automatically. If the database still uses the earlier formal-submission source constraint, apply the existing `add_optimization_submission_source` upgrade first in that transaction; focused SC submission remains disabled. If the submitted-baseline sync table is still absent, apply `add_submitted_sync_storage` after the SC upgrades, or leave the transaction and run the explicit `sync-submitted` command to add that table and establish the baseline. Focused SC launch and resume also require a completed full baseline sync.
 
+### Research feedback and quality improvement
+
+`alpha-garden research-status RUN_ID --database data/alpha_garden.sqlite3` reads saved facts without platform access or writes. It reports frozen, attempted, qualified, rejected, pending and request-error counts for exploration, mutation, SC repair and quality research, plus quality outcomes from the last 30 days. Counts start at frozen tasks; they do not include discarded generated expressions or infer missing outcomes.
+
+Fully checked parents with a known below-target grade receive an independent `QUALITY_IMPROVEMENT` objective. Children must retain all required checks. A higher grade, or unchanged grade with at least one of Sharpe/platform Fitness improving and neither declining, counts as progress. Turnover and sub-universe checks remain mandatory; Fitness is never calculated locally. Unknown grades, pending evidence and request errors do not count as success. Existing conservative action preferences require at least 10 resolved observations across 5 root lineages within the same account and settings. One exploitation slot uses a supported preference; remaining slots keep exploring.
+
+Quality research has an **80-attempt lifetime allowance per account, settings and root lineage**, alongside the existing 20 attempts per parent. Normal qualified evolution and focused optimization share it. Tiny improvements, descendants and resumed/new runs cannot renew it. Frozen unsent tasks reserve capacity; confirmed unsent cancellations release it, while uncertain submissions remain spent. Reservations alone do not cause retirement. SC repair retains its own existing rules. Historical optimization tasks count; untagged ordinary historical mutations are not retrospectively guessed to be quality research. Previously permitted qualified-stage exploration with incomplete grade/SC evidence remains bounded by this allowance and cannot teach quality success.
+
+Plateau observations are run-scoped and apply only to non-focused continuous runs or runs budgeted for at least 200 backtests. Two consecutive 100-resolved-result windows without a new seed, repaired defect or higher grade indicate stagnation. Cold starts remain separate until the first seed; small metric improvements do not reset these windows. Short runs, focused runs, pending results and request errors do not trigger the plateau rule. This release only reports observations; it does not add recovery budget or stop runs early.
+
+Existing databases additionally need explicitly authorized `persistence.schema.add_quality_research_storage` after earlier upgrades, inside the same `BEGIN IMMEDIATE` transaction. It adds only immutable task purpose/root records, deriving allowance usage from existing task facts without resetting counters or changing history. Failures roll back; runtime and read commands never migrate automatically.
+
 ### Local capacity and retention preview
 
 ```bash
@@ -200,6 +212,7 @@ Candidate bytes measure JSON payload, not immediately reclaimable disk space. De
 **Normal research** combines exploration, mutation and self-correlation repair. **Focused optimization** works on fully checked active parents below the target grade with attempts remaining. The target is the platform's **Spectacular** grade; optimization explores the possibility of improvement, without guaranteeing it.
 
 - Each formula has up to **20 mutation attempts**, shared across both modes. Switching modes does not reset the budget.
+- Qualified-stage quality research also shares an **80-attempt** lifetime limit per account, settings and root lineage.
 - Better qualifying descendants can take over using their own remaining attempts. Replaced formulas and their research history remain recorded.
 - The **qualified archive** lists currently submittable retained formulas. A replaced formula does not have to exhaust all 20 attempts first.
 - Local evidence helps select candidates and preserve improvement opportunities. **Platform checks remain required before formal submission.**

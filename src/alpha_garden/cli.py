@@ -32,6 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="初始化 Alpha Garden，或执行有界的真实回测自动运行。",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    feedback = commands.add_parser("research-status", help="只读查看本次运行的研究反馈、质量动作效果和冷启动/停滞观察。")
+    feedback.add_argument("run_id")
+    feedback.add_argument("--database", type=Path, default=Path("data/alpha_garden.sqlite3"))
     storage = commands.add_parser("storage", help="只读查看本地容量或预览 PnL 保留策略，不访问平台。")
     storage_commands = storage.add_subparsers(dest="storage_command", required=True)
     inspect = storage_commands.add_parser("inspect", help="查看数据库、空闲页、PnL 容量和增长估算。")
@@ -200,6 +203,27 @@ def build_parser() -> argparse.ArgumentParser:
 def run(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
+    if arguments.command == "research-status":
+        from datetime import timezone
+        from persistence.database import read_database
+        from execution.research_feedback import load_research_feedback
+        try:
+            with read_database(arguments.database) as connection:
+                result = load_research_feedback(connection, arguments.run_id, observed_at=datetime.now(timezone.utc))
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            print(f"研究反馈读取未完成：{exc}", file=sys.stderr)
+            return 1
+        phases = {"cold_start": "冷启动探索", "short_or_focused_run": "短运行或专项，不评估停滞",
+                  "stagnating": "连续窗口未见明确进展", "observing": "观察中", "progressing": "近期有明确进展"}
+        print(f"研究阶段：{phases[result.progress.phase]}；明确结果 {result.progress.resolved_count} 条，"
+              f"完成窗口 {result.progress.complete_windows} 个，连续无进展窗口 {result.progress.stagnant_windows} 个。")
+        for item in result.sources:
+            print(f"{item.source}：冻结 {item.planned}，已送出 {item.attempted}，合格 {item.qualified}，"
+                  f"明确不合格 {item.rejected}，待定 {item.pending}，请求/任务错误 {item.request_failed}。")
+        for outcome, count in result.quality_outcomes:
+            print(f"最近 30 天质量反馈 {outcome}: {count}")
+        print("此统计只读；停滞观察不自动缩短冷启动预算或改写原运行计划。")
+        return 0
     if arguments.command == "storage":
         return _storage(arguments)
     if arguments.command == "sync-submitted":

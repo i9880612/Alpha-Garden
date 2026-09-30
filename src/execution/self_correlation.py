@@ -5,13 +5,15 @@ import sqlite3
 from dataclasses import dataclass, replace
 from datetime import datetime
 
+from learning.action_effects import ExplicitSelfCorrelationEvidence
+from worldquant.backtests import STANDARD_NON_SC_CHECK_NAMES
 from learning.self_correlation import (
     SelfCorrelationCheckEvidence, SelfCorrelationReference,
     assess_self_correlation_peers, select_self_correlation_reference,
 )
-from persistence.backtests import BacktestSnapshot
+from persistence.backtests import BacktestSnapshot, list_completed_backtests
 from persistence.submission_checks import list_submission_checks
-from persistence.submissions import list_formal_submission_attempts, PlatformSubmittedAlphaRecord
+from persistence.submissions import list_formal_submission_attempts, PlatformSubmittedAlphaRecord, list_platform_submitted_alphas
 from submission.formal import FormalCheckAssessment, assess_formal_check_payload
 from worldquant.self_correlation import self_correlation_peers
 
@@ -95,3 +97,34 @@ def load_self_correlation_references(
         if reference is not None:
             selected.append(reference)
     return tuple(selected)
+
+
+def load_action_check_evidence(
+    connection: sqlite3.Connection,
+    *,
+    account_scope: str,
+    evidence_cutoff: datetime,
+) -> tuple[ExplicitSelfCorrelationEvidence, ...]:
+    checks = load_latest_submission_checks(connection, account_scope=account_scope, observed_at=evidence_cutoff)
+    snapshots = {item.task.task_id: item for item in list_completed_backtests(connection)
+                 if item.task.account_scope == account_scope}
+    references = tuple(ref for ref in list_platform_submitted_alphas(connection, account_scope=account_scope)
+                       if datetime.fromisoformat(ref.observed_at) <= evidence_cutoff)
+    evidence = []
+    for task_id, check in sorted(checks.items()):
+        statuses = dict(check.assessment.statuses)
+        status = statuses.get("SELF_CORRELATION", "PENDING")
+        status = status if status in {"PASS", "FAIL"} else "PENDING"
+        snapshot = snapshots.get(task_id)
+        sharpe = snapshot.result.sharpe if snapshot is not None and snapshot.result is not None else None
+        peers = assess_self_correlation_peers(sharpe, check.peers, references)
+        complete = peers.unresolved_count == 0 and status in {"PASS", "FAIL"}
+        evidence.append(ExplicitSelfCorrelationEvidence(
+            task_id, status, check.assessment.state, check.observed_at,
+            other_checks_passed=(False if any(statuses.get(name) == "FAIL" for name in STANDARD_NON_SC_CHECK_NAMES)
+                else True if all(statuses.get(name) == "PASS" for name in STANDARD_NON_SC_CHECK_NAMES) else None),
+            blocker_count=0 if check.assessment.state == "passed" else len(peers.blockers) if complete else None,
+            sharpe_gap=0.0 if check.assessment.state == "passed" else (max(0.0, peers.required_sharpe - sharpe)
+                        if complete and peers.required_sharpe is not None and sharpe is not None else None),
+        ))
+    return tuple(evidence)

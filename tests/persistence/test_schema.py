@@ -23,6 +23,7 @@ from persistence.schema import (
     add_optimization_submission_source,
     add_sc_research_plan_storage,
     add_submitted_sync_storage,
+    add_quality_research_storage,
 )
 
 
@@ -30,6 +31,7 @@ class DatabaseSchemaTests(unittest.TestCase):
     def test_existing_local_schema_upgrades_before_sc_storage_without_losing_history(self):
         with open_database(":memory:") as connection:
             initialize_database_schema(connection)
+            connection.execute("DROP TABLE quality_research_tasks")
             connection.execute("DROP TABLE platform_submitted_alpha_syncs")
             connection.execute("DROP TABLE backtest_mutation_references")
             connection.execute("ALTER TABLE automated_runs DROP COLUMN self_correlation_plan_json")
@@ -47,6 +49,7 @@ class DatabaseSchemaTests(unittest.TestCase):
             add_mutation_reference_storage(connection)
             add_sc_research_plan_storage(connection)
             add_submitted_sync_storage(connection)
+            add_quality_research_storage(connection)
             initialize_database_schema(connection)
             connection.rollback()
             self.assertEqual(connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall(), before)
@@ -55,6 +58,7 @@ class DatabaseSchemaTests(unittest.TestCase):
             add_mutation_reference_storage(connection)
             add_sc_research_plan_storage(connection)
             add_submitted_sync_storage(connection)
+            add_quality_research_storage(connection)
             initialize_database_schema(connection)
             self.assertEqual(tuple(connection.execute("SELECT value,horizon FROM generation_windows").fetchone()), (22,"month"))
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -570,3 +574,29 @@ class DatabaseSchemaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_quality_migration_is_explicit_atomic_and_preserves_history(tmp_path):
+    from tests.execution.test_qualified_archive import prepare_candidate, complete_candidate
+    from execution.quality_research import load_quality_budgets
+    from persistence.backtests import get_backtest_task
+    import pytest
+    with open_database(tmp_path / "upgrade.sqlite3") as connection:
+        initialize_database_schema(connection)
+        parent = complete_candidate(connection, prepare_candidate(connection))
+        connection.execute("DROP TABLE quality_research_tasks")
+        connection.commit()
+        before = tuple(connection.iterdump())
+        with pytest.raises(ValueError, match="requires_transaction"):
+            add_quality_research_storage(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        add_quality_research_storage(connection)
+        connection.rollback()
+        assert tuple(connection.iterdump()) == before
+        connection.execute("BEGIN IMMEDIATE")
+        add_quality_research_storage(connection)
+        add_quality_research_storage(connection)
+        connection.commit()
+        assert get_backtest_task(connection, parent.task.task_id) == parent
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert load_quality_budgets(connection, (parent,))[parent.task.task_id].available == 80
