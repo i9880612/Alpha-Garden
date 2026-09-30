@@ -1,4 +1,4 @@
-import { QuestionCircleOutlined } from "@ant-design/icons";
+import { ExclamationCircleOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import { Button, Drawer, Input, Modal, Select, Space, Tag, Tooltip, Typography, theme } from "antd";
 import { useState } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
@@ -58,6 +58,10 @@ export default function FormulasPage({ category = "all" }: { category?: string }
       <span>{zh ? "展示已发起回测的公式及其结果；尚未发起回测的候选可在运行详情的“未开始”中查看。点击整行可打开详情。" : "Browse formulas whose backtests have started and their results. Unsent candidates are listed under Not started in run details. Click a row to view details."}</span>
     </Typography.Paragraph>}
     {category !== "all" && <Typography.Paragraph type="secondary" className="ag-formula-note"><QuestionCircleOutlined aria-hidden style={{ color: token.colorPrimary, fontSize: 16 }} /><span>{category === "optimization" ? (zh ? "均已通过平台检查，每条公式最多有 20 次变异机会，用于继续探索提高等级的可能性。提交时会保护其他保留公式的 10% 改善机会，资格不足或证据待定时暂缓提交。" : "Checked formulas have up to 20 mutation attempts to explore grade improvements. Submission preserves other retained formulas’ 10% improvement opportunities and waits when eligibility or evidence is unresolved.") : category === "archive" ? (zh ? "展示已结束优化、通过检查且当前可提交的公式。根据本地相关性与 Sharpe 提升 10% 的条件安排提交顺序，保护继续研究的公式；每次提交后重新评估。" : "Checked formulas whose optimization has ended and which can currently be submitted. Local correlation and 10% Sharpe improvements determine the submission order while protecting ongoing research. Eligibility is recalculated after each submission.") : (zh ? "已同步的平台提交结果。" : "Synced platform submission results.")}</span></Typography.Paragraph>}
+    {category === "optimization" && <Typography.Paragraph type="danger" className="ag-formula-note">
+      <ExclamationCircleOutlined aria-hidden style={{ fontSize: 16 }} />
+      <span>{zh ? "批次回测过程中不支持提交公式，会导致平台接口报429。" : "Submitting formulas during batch backtests is not supported because it causes the platform API to return HTTP 429."}</span>
+    </Typography.Paragraph>}
     <div className="ag-list-table"><FormulaTable {...data} zh={zh} page={page} pageSize={pageSize} actions={category === "optimization" || category === "archive" ? row => <Tooltip title={row.can_submit ? undefined : (zh ? "需保留其他公式的改善机会，或相关性证据尚不完整。" : "Other improvement opportunities are protected, or correlation evidence is incomplete.")}><span><Button type="link" className="ag-table-action" disabled={!canOperate || pending || !row.can_submit || row.full_check !== "passed" || !row.alpha_id} onClick={() => submit(row)}>{zh ? "提交" : "Submit"}</Button></span></Tooltip> : undefined} onOpen={task => { const next = new URLSearchParams(params); next.set("task", task); setParams(next); }} onPage={(nextPage, nextSize) => { setPage(nextSize === pageSize ? nextPage : 1); setPageSize(nextSize); }} /></div>
     </div>
     {taskId && <FormulaDetails key={taskId} taskId={taskId} zh={zh} onClose={() => { const next = new URLSearchParams(params); next.delete("task"); setParams(next); }} />}
