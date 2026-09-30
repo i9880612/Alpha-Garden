@@ -40,10 +40,14 @@ def get_submission_check(connection: sqlite3.Connection, task_id: str) -> Submis
     return SubmissionCheckRecord(*row) if row is not None else None
 
 
-def list_submission_checks(connection: sqlite3.Connection) -> tuple[SubmissionCheckRecord, ...]:
+def list_submission_checks(
+    connection: sqlite3.Connection, *, account_scope: str | None = None,
+) -> tuple[SubmissionCheckRecord, ...]:
+    scope = "" if account_scope is None else "WHERE task_id IN (SELECT task_id FROM backtest_tasks WHERE account_scope = ?)"
     rows = connection.execute(
         "SELECT task_id, observed_at, payload_json, error_code, attempt_count, retry_not_before "
-        "FROM submission_checks ORDER BY task_id"
+        f"FROM submission_checks {scope} ORDER BY task_id",
+        () if account_scope is None else (account_scope,),
     ).fetchall()
     return tuple(SubmissionCheckRecord(*row) for row in rows)
 

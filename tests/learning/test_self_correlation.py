@@ -155,6 +155,53 @@ class SelfCorrelationEligibilityTests(unittest.TestCase):
             self.assertIsNone(select_self_correlation_reference(self.parent, None, (invalid,), observed_at=self.now))
         self.assertIsNone(select_self_correlation_reference(self.parent, None, (), observed_at=self.now))
 
+    def test_verified_conflict_keeps_peer_across_neutralization_and_truncation(self):
+        expected = self.select()
+        original_settings = self.parent.task.settings_json
+        for differences in ({"neutralization": "INDUSTRY"}, {"truncation": 0.05},
+                            {"neutralization": "SUBINDUSTRY", "truncation": 0.05}):
+            with self.subTest(differences=differences):
+                reference = replace(self.reference, raw_payload={"settings": {**self.settings, **differences}})
+                self.assertEqual(self.select(reference=reference), expected)
+        self.assertEqual(self.parent.task.settings_json, original_settings)
+
+    def test_different_settings_need_explicit_conflict_not_formula_identity(self):
+        reference = replace(self.reference, formula=self.parent.task.formula,
+            raw_payload={"settings": {**self.settings, "neutralization": "INDUSTRY", "truncation": 0.05}})
+        self.assertIsNotNone(self.select(reference=reference))
+        for check in (None, replace(self.check, reference_id="unrelated-peer"),
+                      replace(self.check, attempt_status="check_pending"),
+                      replace(self.check, statuses=tuple((name, "PASS") for name, _ in self.check.statuses)),
+                      replace(self.check, observed_at="2026-09-08T09:00:00+00:00")):
+            with self.subTest(check=check):
+                self.assertIsNone(select_self_correlation_reference(self.parent, check, (reference,), observed_at=self.now))
+
+    def test_cross_setting_conflict_preserves_all_other_context_boundaries(self):
+        for key, value in (("region", "EUR"), ("universe", "TOP1000"), ("delay", 0),
+                           ("decay", 5), ("nanHandling", "ON"), ("language", "OTHER")):
+            reference = replace(self.reference, raw_payload={"settings": {
+                **self.settings, "neutralization": "INDUSTRY", "truncation": 0.05, key: value}})
+            with self.subTest(key=key):
+                self.assertIsNone(self.select(reference=reference))
+        reference = replace(self.reference, raw_payload={"settings": {
+            **self.settings, "neutralization": "INDUSTRY", "truncation": 0.05}})
+        for invalid in (replace(reference, account_scope="other"),
+                        replace(reference, status="INACTIVE"),
+                        replace(reference, observed_at="2026-09-08T00:00:00+00:00")):
+            self.assertIsNone(self.select(reference=invalid))
+
+    def test_missing_or_invalid_peer_settings_do_not_gain_repair_permission(self):
+        for key, value in (("neutralization", None), ("neutralization", ""),
+                           ("truncation", None), ("truncation", True),
+                           ("truncation", float("nan")), ("truncation", 2)):
+            reference = replace(self.reference, raw_payload={"settings": {**self.settings, key: value}})
+            with self.subTest(key=key, value=value):
+                self.assertIsNone(self.select(reference=reference))
+        for missing in ("neutralization", "truncation", "region"):
+            reference = replace(self.reference, raw_payload={"settings": {k: v for k, v in self.settings.items() if k != missing}})
+            with self.subTest(missing=missing):
+                self.assertIsNone(self.select(reference=reference))
+
     def test_submitted_parent_keeps_quality_and_existing_conflict_requirements(self):
         own = replace(self.reference, platform_alpha_id="alpha-parent", formula="rank(close)")
         selected = select_self_correlation_reference(self.parent, self.check,

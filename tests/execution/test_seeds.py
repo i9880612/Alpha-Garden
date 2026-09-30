@@ -275,7 +275,7 @@ class SignalSeedExecutionTests(unittest.TestCase):
                     after=change.after,
                 ),
             )
-            created = synchronize_signal_seeds(connection)
+            created = synchronize_signal_seeds(connection, candidate_task_ids=(child.task.task_id,))
             self.assertEqual(
                 tuple(s.root_task_id for s in created), (child.task.task_id,)
             )

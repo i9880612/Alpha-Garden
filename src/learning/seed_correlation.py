@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from evaluation.correlation import (
-    CORRELATION_CUTOFF, MIN_CORRELATION_INTERVALS, correlation_check, submitted_sharpe,
+    CORRELATION_CALENDAR_YEARS, CORRELATION_CUTOFF, MIN_CORRELATION_INTERVALS, correlation_check,
+    submitted_sharpe,
 )
 
 from learning.pnl import PnlCorrelations
@@ -61,7 +62,8 @@ def assess_seed_correlation(
     for ref in refs:
         value = correlations.correlation(
             (snapshot.task.account_scope, snapshot.task.platform_alpha_id),
-            (ref.account_scope, ref.platform_alpha_id), minimum_intervals=MIN_SEED_CORRELATION_INTERVALS)
+            (ref.account_scope, ref.platform_alpha_id), minimum_intervals=MIN_SEED_CORRELATION_INTERVALS,
+            calendar_years=CORRELATION_CALENDAR_YEARS)
         if value is not None:
             measured.append((value, ref.platform_alpha_id))
         states.append(correlation_check(value,

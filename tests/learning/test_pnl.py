@@ -5,7 +5,22 @@ from dataclasses import replace
 import pytest
 
 from learning.pnl import PnlCorrelations, daily_pnl_correlation
-from tests.learning.test_seed_correlation import series
+from tests.learning.test_seed_correlation import multi_year_series, series
+
+
+@pytest.mark.parametrize("shifted", [False, True])
+def test_calendar_window_keeps_increments_ending_in_recent_years(shifted):
+    first, second = multi_year_series("first"), multi_year_series("second", flip_before_year=2020)
+    if shifted:
+        second = replace(second, points=second.points[30:])
+    batch = PnlCorrelations((first, second))
+    a, b = ("account", "first"), ("account", "second")
+    assert batch.correlation(a, b, minimum_intervals=252, calendar_years=4) == pytest.approx(1.0)
+    assert batch.correlation(a, b, minimum_intervals=252) < 0.9
+    assert batch.correlation(a, b, minimum_intervals=252, calendar_years=5) < 0.9
+    # The interval floor applies after the window: four years hold fewer than 1500 days.
+    assert batch.correlation(a, b, minimum_intervals=1500) is not None
+    assert batch.correlation(a, b, minimum_intervals=1500, calendar_years=4) is None
 
 
 def test_appended_dates_and_changed_start_do_not_make_cached_history_unusable():

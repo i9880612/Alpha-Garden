@@ -15,6 +15,7 @@ from persistence.schema import (
     PROJECT_TABLE_NAMES,
     initialize_database_schema,
     add_submission_check_storage,
+    add_mutation_reference_storage,
     migrate_cancelled_backtest_reservations,
     add_submission_research_storage,
     add_optimization_run_storage,
@@ -24,6 +25,59 @@ from persistence.schema import (
 
 
 class DatabaseSchemaTests(unittest.TestCase):
+    def test_existing_submission_upgrade_can_precede_mutation_reference_upgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open_database(Path(directory) / "previous.sqlite3") as connection:
+                initialize_database_schema(connection)
+                connection.execute("DROP TABLE backtest_mutation_references")
+                sql = connection.execute("SELECT sql FROM sqlite_master WHERE name='formal_submission_attempts'").fetchone()[0]
+                indexes = [row[0] for row in connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='formal_submission_attempts' AND sql IS NOT NULL")]
+                connection.execute("DROP TABLE formal_submission_attempts")
+                connection.execute(sql.replace("source IN ('qualified_archive', 'optimization')", "source = 'qualified_archive'"))
+                for index in indexes:
+                    connection.execute(index)
+                before = connection.execute("SELECT name,sql FROM sqlite_master ORDER BY name").fetchall()
+                connection.execute("BEGIN IMMEDIATE")
+                add_optimization_submission_source(connection)
+                add_mutation_reference_storage(connection)
+                initialize_database_schema(connection)
+                connection.rollback()
+                self.assertEqual(connection.execute("SELECT name,sql FROM sqlite_master ORDER BY name").fetchall(), before)
+                connection.execute("BEGIN IMMEDIATE")
+                add_optimization_submission_source(connection)
+                add_mutation_reference_storage(connection)
+                initialize_database_schema(connection)
+                self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_mutation_reference_migration_is_explicit_additive_and_transactional(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "migration.sqlite3"
+            with open_database(path) as connection:
+                initialize_database_schema(connection)
+                connection.execute("DROP TABLE backtest_mutation_references")
+                connection.execute("INSERT INTO generation_windows (value, horizon) VALUES (22, 'month')")
+            with open_database(path) as connection:
+                before = connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall()
+                with self.assertRaisesRegex(ValueError, "requires_transaction"):
+                    add_mutation_reference_storage(connection)
+                connection.execute("BEGIN IMMEDIATE")
+                add_mutation_reference_storage(connection)
+                connection.rollback()
+                self.assertEqual(before, connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall())
+                connection.execute("CREATE TABLE unrelated(value TEXT)")
+                connection.execute("BEGIN IMMEDIATE")
+                with self.assertRaisesRegex(ValueError, "schema_mismatch"):
+                    add_mutation_reference_storage(connection)
+                connection.rollback()
+                connection.execute("DROP TABLE unrelated")
+                connection.execute("BEGIN IMMEDIATE")
+                add_mutation_reference_storage(connection)
+                add_mutation_reference_storage(connection)
+                self.assertEqual(tuple(connection.execute("SELECT value,horizon FROM generation_windows").fetchone()), (22, "month"))
+                self.assertEqual(connection.execute("SELECT count(*) FROM backtest_mutation_references").fetchone()[0], 0)
+                self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
     def test_optimization_submission_migration_preserves_attempts_and_rolls_back(self):
         from tests.execution.test_submission_runner import SubmissionQueueRunnerTests
         from execution.submission_queue import claim_next_submission_queue_item

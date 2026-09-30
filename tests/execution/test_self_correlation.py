@@ -1,5 +1,6 @@
 import json
 import unittest
+from dataclasses import replace
 from datetime import datetime
 
 from execution.self_correlation import load_self_correlation_references
@@ -31,11 +32,17 @@ class SelfCorrelationReferenceTests(unittest.TestCase):
             reference = PlatformSubmittedAlphaRecord("group-account", "conflict-alpha", "rank(open)",
                 "ACTIVE", "2026-09-01T00:00:00+00:00", False,
                 {"settings": json.loads(parent.task.settings_json)}, observed)
-            selected = load_self_correlation_references(connection, parents=(parent,),
-                submitted_alphas=(reference,), account_scope="group-account", observed_at=datetime.fromisoformat(observed))
-            self.assertEqual(len(selected), 1)
-            self.assertEqual((selected[0].parent_task_id, selected[0].formula, selected[0].correlation),
-                             (tasks[0], "rank(open)", .9))
+            original_settings = parent.task.settings_json
+            for settings in (json.loads(original_settings),
+                             {**json.loads(original_settings), "neutralization": "SUBINDUSTRY", "truncation": .05}):
+                with self.subTest(settings=settings):
+                    selected = load_self_correlation_references(connection, parents=(parent,),
+                        submitted_alphas=(replace(reference, raw_payload={"settings": settings}),),
+                        account_scope="group-account", observed_at=datetime.fromisoformat(observed))
+                    self.assertEqual(len(selected), 1)
+                    self.assertEqual((selected[0].parent_task_id, selected[0].formula, selected[0].correlation),
+                                     (tasks[0], "rank(open)", .9))
+                    self.assertEqual(get_backtest_task(connection, tasks[0]).task.settings_json, original_settings)
             self.assertEqual(list_formal_submission_attempts(connection), ())
             self.assertEqual(load_self_correlation_references(connection, parents=(parent,),
                 submitted_alphas=(reference,), account_scope="other-account", observed_at=datetime.fromisoformat(observed)), ())

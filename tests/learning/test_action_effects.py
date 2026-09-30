@@ -265,8 +265,9 @@ class DefectActionEffectTests(unittest.TestCase):
         self,
     ) -> None:
         built = self._build(
-            outcomes=("safe", "conflict", "formal-other-failure", "unresolved"),
+            outcomes=("safe", "conflict", "formal-other-failure", "unresolved", "pending-check"),
             assignments=(
+                ("root-0", "run-1"),
                 ("root-0", "run-1"),
                 ("root-0", "run-1"),
                 ("root-0", "run-1"),
@@ -277,7 +278,7 @@ class DefectActionEffectTests(unittest.TestCase):
         outcomes = [item.outcome for item in built.observations]
         self.assertEqual(outcomes.count(ACTION_EFFECT_SAFE_PROGRESS), 1)
         self.assertEqual(outcomes.count(ACTION_EFFECT_CONFLICT), 1)
-        self.assertEqual(outcomes.count(ACTION_EFFECT_UNRESOLVED), 2)
+        self.assertEqual(outcomes.count(ACTION_EFFECT_UNRESOLVED), 3)
 
     def test_missing_low_sub_universe_gap_stays_unresolved(self) -> None:
         built = self._build(
@@ -449,7 +450,10 @@ class DefectActionEffectTests(unittest.TestCase):
                 )
             )
             task_runs.append(TaskRunEvidence(task_id=child_id, run_id=run_id))
-            if outcome in {"safe", "conflict", "formal-other-failure"}:
+            if outcome == "pending-check":
+                explicit_sc.append(ExplicitSelfCorrelationEvidence(
+                    child_id, "PENDING", "pending", "2026-09-01T00:00:00+00:00"))
+            elif outcome in {"safe", "conflict", "formal-other-failure"}:
                 explicit_sc.append(
                     ExplicitSelfCorrelationEvidence(
                         task_id=child_id,

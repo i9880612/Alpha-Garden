@@ -14,6 +14,7 @@ from learning.frontiers import (
     build_signal_frontiers,
 )
 from learning.seeds import assess_signal_seed
+from learning.pnl import PnlCorrelations
 from learning.seed_correlation import assess_seed_correlation
 from learning.recovery import recovery_task_ids
 from execution.recovery import load_recovery_comparisons
@@ -41,16 +42,26 @@ def synchronize_signal_seeds(
     *,
     candidate_task_ids: tuple[str, ...] | None = None,
 ) -> tuple[SignalSeedRecord, ...]:
-    snapshots = list_completed_backtests(connection)
-    candidates = _candidate_snapshots(snapshots, candidate_task_ids)
+    requested = None if candidate_task_ids is None else _candidate_ids(candidate_task_ids)
+    if requested is not None and not requested:
+        return ()
     mutation_children = {
         mutation.child_task_id: mutation
         for mutation in list_backtest_mutations(connection)
     }
+    required = None if requested is None else requested | {
+        mutation.parent_task_id for child, mutation in mutation_children.items() if child in requested
+    }
+    snapshots = list_completed_backtests(connection, task_ids=frozenset(required) if required is not None else None)
+    candidates = _candidate_snapshots(snapshots, candidate_task_ids)
     snapshots_by_id = {snapshot.task.task_id: snapshot for snapshot in snapshots}
     created: list[SignalSeedRecord] = []
     references = _seed_references(connection, snapshots)
-    series = list_pnl_series(connection)
+    series = list_pnl_series(connection, platform_alpha_ids=frozenset(
+        [ref.platform_alpha_id for ref in references]
+        + [s.task.platform_alpha_id for s in candidates if s.task.platform_alpha_id is not None]
+    ))
+    correlations = PnlCorrelations(series)
     for snapshot in candidates:
         mutation = mutation_children.get(snapshot.task.task_id)
         if mutation is not None:
@@ -80,7 +91,7 @@ def synchronize_signal_seeds(
             continue
         if get_signal_seed(connection, snapshot.task.task_id) is not None:
             continue
-        if assess_seed_correlation(snapshot, references, series).state not in {"passed", "submitted"}:
+        if assess_seed_correlation(snapshot, references, series, correlations=correlations).state not in {"passed", "submitted"}:
             continue
         assert snapshot.task.finished_at is not None
         created.append(

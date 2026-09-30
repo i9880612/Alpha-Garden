@@ -10,6 +10,7 @@ from evaluation.backtests import evaluate_backtest
 from persistence.backtests import BacktestSnapshot
 from persistence.submissions import PlatformSubmittedAlphaRecord, normalize_submitted_formula
 from worldquant.backtests import (
+    BacktestSettings,
     STANDARD_NON_SC_CHECK_NAMES,
     STANDARD_REGULAR_CHECK_NAMES,
 )
@@ -75,6 +76,7 @@ def select_self_correlation_reference(
         and statuses.get("SELF_CORRELATION") == "FAIL"
         and all(statuses.get(name) == "PASS" for name in STANDARD_NON_SC_CHECK_NAMES)
     )
+    parent_settings = json.loads(task.settings_json)
     parent_reference = None
     for reference in references:
         if (
@@ -91,15 +93,23 @@ def select_self_correlation_reference(
             for key, value in settings.items()
             if key not in {"startDate", "endDate"}
         }
-        if comparable_settings != json.loads(task.settings_json):
+        try:
+            BacktestSettings.from_platform_dict(comparable_settings)
+        except ValueError:
             continue
-        # Preserve an existing verified conflict, including for historical recovery.
+        # A reported conflict remains real across neutralization/truncation.
+        # Keep every other setting equal; this only selects the research peer.
         if (checked_conflict and reference.platform_alpha_id == check.reference_id
-                and reference.platform_alpha_id != task.platform_alpha_id):
+                and reference.platform_alpha_id != task.platform_alpha_id
+                and comparable_settings.keys() == parent_settings.keys()
+                and all(value == parent_settings[key]
+                        for key, value in comparable_settings.items()
+                        if key not in {"neutralization", "truncation"})):
             return SelfCorrelationReference(
                 task.task_id, reference.formula, reference.platform_alpha_id, check.correlation,
             )
-        if reference.normalized_formula == normalize_submitted_formula(task.formula):
+        if (comparable_settings == parent_settings
+                and reference.normalized_formula == normalize_submitted_formula(task.formula)):
             # This is structural self-reference, not an observed official SC value.
             parent_reference = SelfCorrelationReference(
                 task.task_id, task.formula, task.platform_alpha_id,

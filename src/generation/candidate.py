@@ -17,12 +17,19 @@ class CandidateChange:
     before: str
     after: str
     parameters: tuple[tuple[str, str], ...] = ()
+    conflict_reference_alpha_id: str | None = None
+    conflict_reference_formula: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.action, "candidate_change_action_missing")
         _require_text(self.location, "candidate_change_location_missing")
         _require_text(self.before, "candidate_change_before_missing")
         _require_text(self.after, "candidate_change_after_missing")
+        if (self.conflict_reference_alpha_id is None) != (self.conflict_reference_formula is None):
+            raise ValueError("candidate_change_reference_incomplete")
+        if self.conflict_reference_alpha_id is not None:
+            _require_text(self.conflict_reference_alpha_id, "candidate_change_reference_invalid")
+            _require_text(self.conflict_reference_formula, "candidate_change_reference_invalid")
         names: list[str] = []
         for name, value in self.parameters:
             _require_text(name, "candidate_change_parameter_name_missing")

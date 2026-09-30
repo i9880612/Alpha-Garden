@@ -17,6 +17,25 @@ from persistence.backtests import BacktestCheckRecord, BacktestMutationRecord
 
 
 class SignalFrontierTests(unittest.TestCase):
+    def test_exhausted_recovery_representatives_do_not_hide_live_tradeoffs(self):
+        root = self._record(
+            "root", sharpe=2, fitness=1.5,
+            passed_checks=("LOW_SHARPE", "LOW_FITNESS", "LOW_SUB_UNIVERSE_SHARPE", "CONCENTRATED_WEIGHT"),
+            failed_checks=(),
+        )
+        recoveries = tuple(self._record(f"r{i}", sharpe=1 + i * .04, fitness=1 - i * .04)
+                           for i in range(5))
+        attempts = tuple((parent, f"{parent}-attempt-{i}") for parent in ("r0", "r2", "r4") for i in range(20))
+        frontier = build_signal_frontiers(
+            LearningEvidenceSet((root, *recoveries), ()),
+            (*(self._mutation("root", record.task_id) for record in recoveries),
+             *(self._mutation(parent, child) for parent, child in attempts)),
+            ("root",), tuple(child for _, child in attempts),
+            recovery_task_ids=frozenset(record.task_id for record in recoveries),
+        )
+        self.assertEqual(set(frontier.active_branch_task_ids), {"root", "r1", "r3"})
+        self.assertTrue(all(branch.root_task_id == "root" for branch in frontier.records[0].branches))
+
     def test_decorrelated_quality_branch_shares_root_and_expires_without_revival(self):
         root = self._record(
             "root",

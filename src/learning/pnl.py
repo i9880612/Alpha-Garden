@@ -23,17 +23,20 @@ class PnlCorrelations:
             self._prepared[key] = (intervals, tuple(increments[k] for k in intervals), increments)
         return self._prepared[key]
 
-    def correlation(self, first, second, *, minimum_intervals):
+    def correlation(self, first, second, *, minimum_intervals, calendar_years=None):
         if first not in self._points or second not in self._points:
             return None
-        pair = (*sorted((first, second)), minimum_intervals)
+        pair = (*sorted((first, second)), minimum_intervals, calendar_years)
         if pair not in self._results:
             a, b = self._prepare(first), self._prepare(second)
             if a[0] is b[0]:
-                x, y = a[1], b[1]
+                intervals, x, y = a[0], a[1], b[1]
             else:
-                intervals = sorted(a[2].keys() & b[2].keys())
+                intervals = tuple(sorted(a[2].keys() & b[2].keys()))
                 x, y = tuple(a[2][k] for k in intervals), tuple(b[2][k] for k in intervals)
+            if calendar_years is not None:
+                start = _recent_calendar_start(intervals, calendar_years)
+                x, y = x[start:], y[start:]
             self._results[pair] = _correlation(x, y, minimum_intervals)
         return self._results[pair]
 
@@ -51,6 +54,13 @@ def daily_pnl_correlation(first, second, *, minimum_intervals: int) -> float | N
 
 def _increments(points):
     return {(a[0], b[0]): b[1] - a[1] for a, b in zip(points, points[1:])}
+
+
+def _recent_calendar_start(intervals, years):
+    if not intervals:
+        return 0
+    first_year = int(intervals[-1][1][:4]) - years + 1
+    return next((i for i, (_, end) in enumerate(intervals) if int(end[:4]) >= first_year), len(intervals))
 
 
 def _correlation(first, second, minimum_intervals):

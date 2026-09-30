@@ -1,5 +1,7 @@
 """Choose locally safe next submissions without discarding improvement steps."""
-from evaluation.correlation import CORRELATION_CUTOFF, MIN_CORRELATION_INTERVALS, correlation_check
+from evaluation.correlation import (
+    CORRELATION_CALENDAR_YEARS, CORRELATION_CUTOFF, MIN_CORRELATION_INTERVALS, correlation_check,
+)
 from learning.pnl import PnlCorrelations
 from learning.seed_correlation import assess_seed_correlation
 from persistence.backtests import BacktestSnapshot
@@ -27,7 +29,8 @@ def select_submission_opportunities(
     def correlation(first, second):
         a, b = by_id[first].task, by_id[second].task
         return correlations.correlation((a.account_scope, a.platform_alpha_id),
-            (b.account_scope, b.platform_alpha_id), minimum_intervals=MIN_CORRELATION_INTERVALS)
+            (b.account_scope, b.platform_alpha_id), minimum_intervals=MIN_CORRELATION_INTERVALS,
+            calendar_years=CORRELATION_CALENDAR_YEARS)
 
     def after(candidate, submitted):
         return correlation_check(correlation(candidate.task.task_id, submitted.task.task_id),

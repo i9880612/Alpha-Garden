@@ -448,6 +448,28 @@ class BacktestPersistenceTests(unittest.TestCase):
         with open_database(self.database_path) as connection:
             self.assertIsNone(get_backtest_yearly_stats(connection, task.task_id))
 
+    def test_mutation_reference_is_immutable_and_rolls_back_with_lineage(self):
+        parent, child = self._task("rank(close)"), self._task("rank(open)")
+        mutation = BacktestMutationRecord(child.task_id, parent.task_id,
+            "self_correlation_shared_field_replacement", "formula.arguments[0]",
+            "rank(close)", "rank(open)", "original-peer", "rank(close)")
+        with open_database(self.database_path) as connection:
+            create_backtest_task(connection, parent)
+            create_backtest_task(connection, child)
+        with self.assertRaisesRegex(RuntimeError, "rollback"):
+            with open_database(self.database_path) as connection:
+                create_backtest_mutation(connection, mutation)
+                raise RuntimeError("rollback")
+        with open_database(self.database_path) as connection:
+            self.assertIsNone(get_backtest_mutation(connection, child.task_id))
+            self.assertEqual(connection.execute("SELECT count(*) FROM backtest_mutation_references").fetchone()[0], 0)
+            create_backtest_mutation(connection, mutation)
+            self.assertEqual(create_backtest_mutation(connection, mutation), mutation)
+            self.assertEqual(list_backtest_mutations(connection), (mutation,))
+            with self.assertRaisesRegex(ValueError, "backtest_mutation_conflict"):
+                create_backtest_mutation(connection, replace(mutation, conflict_reference_alpha_id="new-peer"))
+            self.assertEqual(get_backtest_mutation(connection, child.task_id), mutation)
+
     def test_direct_mutation_lineage_is_one_to_one_and_replayable(self) -> None:
         parent = self._task("rank(close)")
         child = self._task("rank(open)")

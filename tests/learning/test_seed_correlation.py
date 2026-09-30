@@ -19,6 +19,18 @@ def series(alpha, increments, account="account"):
     return PnlSeriesRecord(account, alpha, "2026-09-09T00:00:00+00:00", tuple(points))
 
 
+def multi_year_series(alpha, flip_before_year=None, account="account"):
+    """Daily 2019-2023 PnL; increments ending before `flip_before_year` are negated."""
+    start, points, value = date(2019, 1, 1), [], 0.0
+    for day in range((date(2023, 12, 31) - start).days + 1):
+        current = start + timedelta(days=day)
+        if day:
+            increment = math.sin(day)
+            value += -increment if flip_before_year and current.year < flip_before_year else increment
+        points.append((current.isoformat(), value))
+    return PnlSeriesRecord(account, alpha, "2026-09-09T00:00:00+00:00", tuple(points))
+
+
 def reference(alpha, account="account", sharpe=1.5):
     return PlatformSubmittedAlphaRecord(account, alpha, f"rank({alpha})", "ACTIVE",
         "2026-09-01T00:00:00+00:00", False, {"is": {"sharpe": sharpe}}, "2026-09-09T00:00:00+00:00")
@@ -79,6 +91,12 @@ def test_unusable_pnl_is_not_a_pass(kind):
     else:
         child = replace(child, points=tuple(("2021" + day[4:], v) for day, v in child.points))
     assert assess_seed_correlation(candidate(), (reference("one"),), (child, ref)).state == "pending"
+
+
+def test_older_divergence_does_not_hide_a_conflict_in_the_platform_window():
+    records = (multi_year_series("child", flip_before_year=2020), multi_year_series("one"))
+    result = assess_seed_correlation(candidate(), (reference("one"),), records)
+    assert result.state == "failed" and result.maximum == pytest.approx(1.0)
 
 
 def test_correlation_threshold_equality_requires_ten_percent_improvement():

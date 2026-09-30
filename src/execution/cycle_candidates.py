@@ -21,6 +21,7 @@ from generation.internal_edits import (
     INTERNAL_EDIT_FAMILIES,
 )
 from generation.self_correlation import (
+    SELF_CORRELATION_REPAIR_FAMILIES,
     SELF_CORRELATION_INTERNAL_FAMILIES,
     iter_self_correlation_leaves,
     shared_field_replacements,
@@ -277,6 +278,15 @@ def build_improvement_candidate_pools(
                         location=leaf.change.location,
                         before=leaf.change.before,
                         after=leaf.change.after,
+                        conflict_reference_alpha_id=(
+                            sc_reference.platform_alpha_id
+                            if leaf.family in SELF_CORRELATION_REPAIR_FAMILIES and sc_reference is not None else None
+                        ),
+                        conflict_reference_formula=(
+                            sc_reference.formula
+                            if leaf.family in SELF_CORRELATION_REPAIR_FAMILIES and sc_reference is not None
+                            and sc_reference.platform_alpha_id is not None else None
+                        ),
                     ),
                 )
             )

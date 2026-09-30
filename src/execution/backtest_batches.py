@@ -201,6 +201,8 @@ def _prepare_automated_items(
                         location=item.mutation.change.location,
                         before=item.mutation.change.before,
                         after=item.mutation.change.after,
+                        conflict_reference_alpha_id=item.mutation.change.conflict_reference_alpha_id,
+                        conflict_reference_formula=item.mutation.change.conflict_reference_formula,
                     ),
                 )
             attach_backtest_to_automated_run(
@@ -321,5 +323,8 @@ def _validate_automated_candidates(
                 raise ValueError("backtest_automated_candidate_invalid")
         elif candidate.generation_action == "mutation":
             _validate_mutation_candidates((candidate,))
+            if (candidate.change.action in SELF_CORRELATION_REPAIR_FAMILIES
+                    and candidate.change.conflict_reference_alpha_id is None):
+                raise ValueError("backtest_mutation_reference_missing")
         else:
             raise ValueError("backtest_automated_candidate_invalid")

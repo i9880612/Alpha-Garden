@@ -176,12 +176,11 @@ def build_signal_frontiers(
                 if record.task_id in recovery_task_ids
                 and record.task_id != qualified_parent.task_id
             )
-            recovery_frontier = _bounded_frontier(_nondominated(recovery_candidates))
-            active_recovery = tuple(
+            active_recovery = _bounded_frontier(tuple(
                 record
-                for record in recovery_frontier
+                for record in _nondominated(recovery_candidates)
                 if attempt_count_by_parent[record.task_id] < PARENT_ATTEMPT_BUDGET
-            )
+            ))
             active_records = (
                 *active_records,
                 *active_recovery[: MAX_SIGNAL_FRONTIER_BRANCHES - 1],

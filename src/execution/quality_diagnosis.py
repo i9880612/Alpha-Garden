@@ -6,7 +6,9 @@ import hashlib
 import json
 import math
 
-from evaluation.correlation import CORRELATION_CUTOFF, MIN_CORRELATION_INTERVALS, correlation_check, submitted_sharpe
+from evaluation.correlation import (
+    CORRELATION_CALENDAR_YEARS, CORRELATION_CUTOFF, MIN_CORRELATION_INTERVALS, correlation_check, submitted_sharpe,
+)
 from execution.console import _assess_check, _full_check_details, _source
 from learning.pnl import PnlCorrelations
 from learning.seed_correlation import assess_seed_correlation
@@ -125,7 +127,8 @@ class QualityDiagnosis:
             if assessment.state != "submitted":
                 for ref in references:
                     value = correlations.correlation((snapshot.task.account_scope, snapshot.task.platform_alpha_id),
-                        (ref.account_scope, ref.platform_alpha_id), minimum_intervals=MIN_CORRELATION_INTERVALS)
+                        (ref.account_scope, ref.platform_alpha_id), minimum_intervals=MIN_CORRELATION_INTERVALS,
+                        calendar_years=CORRELATION_CALENDAR_YEARS)
                     if value is not None and value >= CORRELATION_CUTOFF:
                         high_pairs += 1
                         improved_pairs += correlation_check(value, snapshot.result.sharpe, submitted_sharpe(ref.raw_payload)) == "passed"

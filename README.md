@@ -173,7 +173,7 @@ Backtesting does not submit by default. CLI runs can explicitly enable automatic
 <details>
 <summary>Correlation screening, the 10% improvement rule, and near duplicates</summary>
 
-Local submission screening compares daily PnL increments against every recorded submitted Alpha for the same account, using at least **252 matching intervals**. Correlation **≥ 0.7** requires Sharpe at least **10% higher** than that reference. Missing curves, insufficient overlap or a required missing Sharpe keep eligibility pending.
+Local submission screening follows the platform's window: it compares daily PnL increments ending in the **four most recent calendar years** against every recorded submitted Alpha for the same account, using at least **252 matching intervals**. Correlation **≥ 0.7** requires Sharpe at least **10% higher** than that reference. Missing curves, insufficient overlap or a required missing Sharpe keep eligibility pending. Research collects daily PnL at batch boundaries for every result that passes all non-SC checks, whether or not its platform check has run. Qualified-history backfill checks only the fetched candidate for seed admission; deferred seeds are reconciled before research advances. Collection resumes from stored facts and retry times, without a separate persistent queue.
 
 Candidate ordering also protects fully checked formulas still being optimized and preserves successive improvement opportunities. For highly correlated Sharpes of **1.50 → 1.60 → 1.70**, with 1.70 still being optimized, the selector can offer 1.50 first and defer 1.60. It replans after every confirmed submission; local screening never substitutes for live platform checks.
 

@@ -4,7 +4,7 @@ import sqlite3
 import re
 from contextlib import closing
 
-from persistence.backtests import initialize_backtest_schema
+from persistence.backtests import initialize_backtest_schema, initialize_mutation_reference_schema
 from persistence.pnl import initialize_pnl_schema
 from persistence.qualified_archive import initialize_qualified_archive_schema
 from persistence.catalog import initialize_catalog_schema
@@ -23,6 +23,7 @@ PROJECT_TABLE_NAMES = frozenset(
         "automated_run_allocations",
         "backtest_checks",
         "backtest_mutations",
+        "backtest_mutation_references",
         "backtest_results",
         "backtest_tasks",
         "backtest_yearly_stats",
@@ -148,6 +149,10 @@ def add_optimization_submission_source(connection: sqlite3.Connection) -> None:
     """Explicit transactional migration; retain all attempt data and relax only its manual source check."""
     expected = _reference_schema_objects()
     actual = _schema_objects(connection)
+    # This earlier migration must remain executable before adding repair bindings.
+    reference_key = ("table", "backtest_mutation_references", "backtest_mutation_references")
+    if reference_key not in actual:
+        expected.pop(reference_key)
     if actual == expected:
         return
     key = ("table", "formal_submission_attempts", "formal_submission_attempts")
@@ -202,6 +207,21 @@ def add_run_allocation_storage(connection: sqlite3.Connection) -> None:
     if actual != previous:
         raise ValueError("run_allocation_migration_schema_mismatch")
     initialize_run_allocation_schema(connection)
+    _require_current_schema(connection, expected)
+
+
+def add_mutation_reference_storage(connection: sqlite3.Connection) -> None:
+    """Explicit additive migration; old repairs stay unbound, never guessed."""
+    expected = _reference_schema_objects()
+    actual = _schema_objects(connection)
+    if actual == expected:
+        return
+    previous = {key: value for key, value in expected.items() if key[2] != "backtest_mutation_references"}
+    if actual != previous:
+        raise ValueError("mutation_reference_migration_schema_mismatch")
+    if not connection.in_transaction:
+        raise ValueError("mutation_reference_migration_requires_transaction")
+    initialize_mutation_reference_schema(connection)
     _require_current_schema(connection, expected)
 
 

@@ -642,7 +642,7 @@ class ImprovementCandidatePoolTests(unittest.TestCase):
 
     def test_targeted_internal_edits_keep_sc_identity_when_ordinary_edits_overlap(self):
         parent = self._parent_snapshot("parent-sc", "rank(ts_mean(close,5))")
-        references = (SelfCorrelationReference(parent.task.task_id, "ts_mean(close,22)", correlation=0.8),)
+        references = (SelfCorrelationReference(parent.task.task_id, "ts_mean(close,22)", "original-peer", correlation=0.8),)
         def pool(**kwargs):
             return self._pools(
                 eligible_parent_task_ids=(parent.task.task_id,),
@@ -656,6 +656,8 @@ class ImprovementCandidatePoolTests(unittest.TestCase):
         self.assertEqual({item.family for item in repairs}, set(SELF_CORRELATION_INTERNAL_FAMILIES))
         self.assertEqual(len({item.candidate.fingerprint for item in baseline.candidates}), len(baseline.candidates))
         for repair in repairs:
+            self.assertEqual(repair.candidate.change.conflict_reference_alpha_id, "original-peer")
+            self.assertEqual(repair.candidate.change.conflict_reference_formula, "ts_mean(close,22)")
             self.assertEqual(repair.candidate.parent_task_id, parent.task.task_id)
             self.assertEqual(repair.candidate.parent_formula_fingerprint, parent.task.formula_fingerprint)
             self.assertEqual(baseline.settings, self.settings)

@@ -130,11 +130,12 @@ def test_other_recovery_errors_preserve_their_existing_boundary(pending_recovery
         assert list_pnl_series(connection) == before
 
 
+@pytest.mark.parametrize("bound_reference", (False, True))
 @pytest.mark.parametrize("repair_action,base_passed", (
     *((action, False) for action in SELF_CORRELATION_REPAIR_FAMILIES),
     (SELF_CORRELATION_INTERNAL_FAMILIES[0], True),
 ))
-def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submit(repair_action, base_passed):
+def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submit(repair_action, base_passed, bound_reference):
     expected_band = (
         SELF_CORRELATION_LIGHT_FAMILIES if repair_action in SELF_CORRELATION_LIGHT_FAMILIES
         else SELF_CORRELATION_INTERNAL_FAMILIES if repair_action in SELF_CORRELATION_INTERNAL_FAMILIES
@@ -264,6 +265,8 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
                     leaf.change.location,
                     parent.task.formula,
                     formula,
+                    "submitted-alpha" if bound_reference else None,
+                    reference if bound_reference else None,
                 ),
             )
             assert (
@@ -290,9 +293,9 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
             child = get_backtest_task(connection, child_id)
         mutation = BacktestMutationRecord(child_id, original.task.task_id, repair_action,
                                          leaf.change.location, original.task.formula, formula)
-        references = (SelfCorrelationReference(original.task.task_id, reference, "submitted-alpha"),)
+        references = {child_id: SelfCorrelationReference(original.task.task_id, reference, "submitted-alpha")}
         assert recovery_comparisons((original, child), (mutation,), references, catalog=catalog)
-        assert not recovery_comparisons((original, child), (mutation,), (), catalog=catalog)
+        assert not recovery_comparisons((original, child), (mutation,), {}, catalog=catalog)
         assert not recovery_comparisons((original, child), (replace(mutation, after=original.task.formula),), references, catalog=catalog)
         for altered in (
             replace(child, result=replace(child.result, fitness=0.69)),
@@ -396,5 +399,21 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
                 connection.execute("SELECT COUNT(*) FROM signal_seeds").fetchone()[0]
                 == 1
             )
+        # Later checks and catalog refreshes must not rebind a measured repair.
+        with open_database(fixture.database_path) as connection:
+            payload = {"is": {
+                "checks": [{"name": name, "result": "FAIL" if name == "SELF_CORRELATION" else "PASS",
+                            **({"value": .8, "limit": .7} if name == "SELF_CORRELATION" else {})}
+                           for name in STANDARD_REGULAR_CHECK_NAMES],
+                "selfCorrelated": {"max": .8,
+                    "schema": {"properties": [{"name": "id"}, {"name": "correlation"}]},
+                    "records": [["new-peer", .8]]}}}
+            save_submission_check(connection, SubmissionCheckRecord(parent.task.task_id,
+                "2026-08-30T00:30:00+08:00", json.dumps(payload), None))
+            assert comparison in load_recovery_comparisons(connection)
+            # Unbound history with no remaining contemporaneous evidence is unknown.
+            connection.execute("DELETE FROM formal_submission_attempts")
+            connection.execute("DELETE FROM platform_submitted_alphas")
+            assert (comparison in load_recovery_comparisons(connection)) == bound_reference
     finally:
         fixture.doCleanups()

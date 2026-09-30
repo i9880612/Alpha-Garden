@@ -13,6 +13,7 @@ from generation.self_correlation import (
     SELF_CORRELATION_LIGHT_FAMILIES,
 )
 from learning.recovery import RecoveryComparison, recovery_comparisons
+from learning.self_correlation import SelfCorrelationReference
 from persistence.backtests import (
     BacktestSnapshot,
     list_completed_backtests,
@@ -41,6 +42,8 @@ def load_recovery_comparisons(
     }
     if not parent_ids:
         return ()
+    by_task = {item.task.task_id: item for item in completed}
+    cutoff = observed_at or datetime.now().astimezone()
     comparisons = []
     for account in sorted(
         {
@@ -54,13 +57,30 @@ def load_recovery_comparisons(
             for item in completed
             if item.task.task_id in parent_ids and item.task.account_scope == account
         )
-        references = load_self_correlation_references(
-            connection,
-            parents=parents,
-            submitted_alphas=list_platform_submitted_alphas(connection, account_scope=account),
-            account_scope=account,
-            observed_at=observed_at or datetime.now().astimezone(),
-        )
+        references = {}
+        submitted = list_platform_submitted_alphas(connection, account_scope=account)
+        for mutation in mutations:
+            if mutation.action not in SELF_CORRELATION_REPAIR_FAMILIES:
+                continue
+            parent = by_task.get(mutation.parent_task_id)
+            child = by_task.get(mutation.child_task_id)
+            if parent is None or child is None or parent.task.account_scope != account:
+                continue
+            if mutation.conflict_reference_alpha_id is not None:
+                references[mutation.child_task_id] = SelfCorrelationReference(
+                    mutation.parent_task_id, mutation.conflict_reference_formula,
+                    mutation.conflict_reference_alpha_id,
+                )
+            else:
+                # Old tasks have no binding. Only evidence available when the
+                # repair was created can establish a historical comparison.
+                historical = load_self_correlation_references(
+                    connection, parents=(parent,), submitted_alphas=submitted,
+                    account_scope=account,
+                    observed_at=min(cutoff, datetime.fromisoformat(child.task.created_at)),
+                )
+                if historical:
+                    references[mutation.child_task_id] = historical[0]
         catalog = None
         account_parents = {p.task.task_id for p in parents}
         if any(m.action in (*SELF_CORRELATION_HALF_FAMILIES, *SELF_CORRELATION_LIGHT_FAMILIES)
@@ -71,7 +91,7 @@ def load_recovery_comparisons(
                 catalog = load_generation_catalog(connection, sync.context, account_scope=account)
         comparisons.extend(recovery_comparisons(
             tuple(s for s in completed if s.task.account_scope == account),
-            mutations, tuple(references), catalog=catalog,
+            mutations, references, catalog=catalog,
         ))
     return tuple(comparisons)
 

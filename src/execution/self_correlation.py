@@ -48,6 +48,7 @@ def load_self_correlation_references(
             observations.append((check.observed_at, check.payload_json,
                                  "ineligible" if assessment.state == "failed" else assessment.state))
         evidence = None
+        observations = [item for item in observations if datetime.fromisoformat(item[0]) <= observed_at]
         if observations:
             check_time, payload_json, check_status = max(observations, key=lambda item: datetime.fromisoformat(item[0]))
             payload = json.loads(payload_json)

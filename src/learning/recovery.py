@@ -34,13 +34,12 @@ class RecoveryComparison:
 def recovery_comparisons(
     snapshots: tuple[BacktestSnapshot, ...],
     mutations: tuple[BacktestMutationRecord, ...],
-    references: tuple[SelfCorrelationReference, ...],
+    references: dict[str, SelfCorrelationReference],
     *, catalog: GenerationCatalog | None = None,
 ) -> tuple[RecoveryComparison, ...]:
     """Only descendants of a verifiable repair against the original conflict."""
     by_task = {item.task.task_id: item for item in snapshots}
     by_child = {item.child_task_id: item for item in mutations}
-    by_parent = {item.parent_task_id: item for item in references}
     comparisons = []
     for child in snapshots:
         if not child.task.platform_alpha_id or not assess_signal_seed(child).eligible:
@@ -66,9 +65,10 @@ def recovery_comparisons(
             ):
                 break
             if mutation.action in SELF_CORRELATION_REPAIR_FAMILIES:
-                reference = by_parent.get(parent.task.task_id)
+                reference = references.get(task.task_id)
                 if (
                     reference is None
+                    or reference.parent_task_id != parent.task.task_id
                     or not reference.platform_alpha_id
                     or not parent.task.platform_alpha_id
                 ):

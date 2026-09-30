@@ -92,6 +92,57 @@ def _checks(statuses: dict[str, str]) -> tuple[BacktestCheck, ...]:
 
 
 class AutomatedCyclePlanningTests(unittest.TestCase):
+    def test_action_learning_uses_independent_checks_with_account_and_time_boundaries(self):
+        from datetime import datetime
+        from execution.cycles import _explicit_self_correlation_evidence
+        from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
+
+        run_id = self._start_run()
+        plan = plan_automated_cycle(self.database_path, run_id=run_id, created_at="2026-08-30T00:04:00+08:00")
+        self._complete_plan(plan, observed_at="2026-08-30T00:05:00+08:00")
+        task_id = plan.backtests[0].task.task_id
+        self._record_formal_attempt(
+            task_id=task_id, run_id=run_id, family_root_task_id=task_id,
+            observed_at="2026-08-30T00:07:00+08:00", checks={"SELF_CORRELATION": "FAIL"},
+        )
+        with open_database(self.database_path) as connection:
+            outsider = prepare_backtest_task(connection, account_scope="other-account", formula="rank(close)",
+                settings=self.settings, created_at="2026-08-30T00:00:00+08:00")
+            payload = canonical_submission_json({"is": {"checks": [
+                {"name": name, "result": "PASS"} for name in STANDARD_REGULAR_CHECK_NAMES]}})
+            for target in (task_id, outsider.task.task_id):
+                save_submission_check(connection, SubmissionCheckRecord(target, "2026-08-30T00:08:00+08:00", payload, None))
+            def evidence(minute):
+                return _explicit_self_correlation_evidence(connection, account_scope="group-account",
+                    evidence_cutoff=datetime.fromisoformat(f"2026-08-30T00:{minute:02d}:00+08:00"))
+            self.assertEqual(evidence(6), ())
+            self.assertEqual([(e.task_id, e.status) for e in evidence(7)], [(task_id, "FAIL")])
+            self.assertEqual([(e.task_id, e.status, e.formal_check_state) for e in evidence(8)],
+                             [(task_id, "PASS", "passed")])
+            save_submission_check(connection, SubmissionCheckRecord(task_id, "2026-08-30T00:09:00+08:00",
+                None, "request_error", attempt_count=2))
+            self.assertEqual([(e.status, e.formal_check_state) for e in evidence(9)], [("PENDING", "pending")])
+
+    def test_equal_time_conflicting_checks_do_not_produce_a_learning_success(self):
+        from datetime import datetime
+        from execution.cycles import _explicit_self_correlation_evidence
+        from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
+
+        run_id = self._start_run()
+        plan = plan_automated_cycle(self.database_path, run_id=run_id, created_at="2026-08-30T00:04:00+08:00")
+        self._complete_plan(plan, observed_at="2026-08-30T00:05:00+08:00")
+        task_id = plan.backtests[0].task.task_id
+        stamp = "2026-08-30T00:07:00+08:00"
+        self._record_formal_attempt(task_id=task_id, run_id=run_id, family_root_task_id=task_id,
+                                   observed_at=stamp, checks={"SELF_CORRELATION": "FAIL"})
+        with open_database(self.database_path) as connection:
+            payload = canonical_submission_json({"is": {"checks": [
+                {"name": name, "result": "PASS"} for name in STANDARD_REGULAR_CHECK_NAMES]}})
+            save_submission_check(connection, SubmissionCheckRecord(task_id, stamp, payload, None))
+            evidence = _explicit_self_correlation_evidence(connection, account_scope="group-account",
+                                                           evidence_cutoff=datetime.fromisoformat(stamp))
+            self.assertEqual([(e.status, e.formal_check_state) for e in evidence], [("PENDING", "pending")])
+
     def test_optimization_empty_pool_finishes_authorized_late_submission(self):
         from execution.runner import run_automated_run
         from execution.submission_queue import synchronize_submission_queue
@@ -1470,6 +1521,8 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
                 if mutation and mutation.parent_task_id == parent_id:
                     attempted_children += 1
                 if mutation and mutation.action in SELF_CORRELATION_REPAIR_FAMILIES:
+                    self.assertEqual(mutation.conflict_reference_alpha_id, "submitted-alpha")
+                    self.assertEqual(mutation.conflict_reference_formula, reference_formula)
                     repair_families.add(mutation.action)
                     self.assertNotIn(snapshot.task.formula_fingerprint, repair_fingerprints)
                     repair_fingerprints.add(snapshot.task.formula_fingerprint)

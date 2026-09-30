@@ -94,6 +94,8 @@ class BacktestMutationRecord:
     location: str
     before: str
     after: str
+    conflict_reference_alpha_id: str | None = None
+    conflict_reference_formula: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +213,17 @@ def initialize_backtest_schema(connection: sqlite3.Connection) -> None:
     )
     initialize_signal_seed_schema(connection)
     initialize_qualified_archive_schema(connection)
+    initialize_mutation_reference_schema(connection)
+
+
+def initialize_mutation_reference_schema(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS backtest_mutation_references (
+            child_task_id TEXT PRIMARY KEY REFERENCES backtest_mutations(child_task_id),
+            conflict_reference_alpha_id TEXT NOT NULL,
+            conflict_reference_formula TEXT NOT NULL
+        )
+    """)
 
 
 def create_backtest_task(
@@ -451,6 +464,12 @@ def create_backtest_mutation(
             mutation.after,
         ),
     )
+    if mutation.conflict_reference_alpha_id is not None:
+        connection.execute(
+            "INSERT INTO backtest_mutation_references "
+            "(child_task_id, conflict_reference_alpha_id, conflict_reference_formula) VALUES (?, ?, ?)",
+            (mutation.child_task_id, mutation.conflict_reference_alpha_id, mutation.conflict_reference_formula),
+        )
     return mutation
 
 
@@ -556,7 +575,8 @@ def get_backtest_mutation(
     child_task_id: str,
 ) -> BacktestMutationRecord | None:
     row = connection.execute(
-        "SELECT * FROM backtest_mutations WHERE child_task_id = ?",
+        "SELECT * FROM backtest_mutations LEFT JOIN backtest_mutation_references USING (child_task_id) "
+        "WHERE child_task_id = ?",
         (child_task_id,),
     ).fetchone()
     return _mutation_from_row(row) if row is not None else None
@@ -572,7 +592,8 @@ def list_backtest_mutations(
     scope = "" if parent_task_ids is None else "WHERE parent_task_id IN (SELECT value FROM json_each(?))"
     parameters = () if parent_task_ids is None else (json.dumps(sorted(parent_task_ids)),)
     rows = connection.execute(
-        f"SELECT * FROM backtest_mutations {scope} ORDER BY child_task_id", parameters,
+        "SELECT * FROM backtest_mutations LEFT JOIN backtest_mutation_references USING (child_task_id) "
+        f"{scope} ORDER BY child_task_id", parameters,
     ).fetchall()
     return tuple(_mutation_from_row(row) for row in rows)
 
@@ -963,6 +984,11 @@ def _validate_mutation(mutation: BacktestMutationRecord) -> None:
         _require_text(value, error)
     if mutation.child_task_id == mutation.parent_task_id:
         raise ValueError("backtest_mutation_self_parent")
+    if (mutation.conflict_reference_alpha_id is None) != (mutation.conflict_reference_formula is None):
+        raise ValueError("backtest_mutation_reference_incomplete")
+    if mutation.conflict_reference_alpha_id is not None:
+        _require_text(mutation.conflict_reference_alpha_id, "backtest_mutation_reference_invalid")
+        _require_text(mutation.conflict_reference_formula, "backtest_mutation_reference_invalid")
 
 
 def _task_identity(task: BacktestTaskRecord) -> tuple[str, ...]:
@@ -1084,6 +1110,8 @@ def _mutation_from_row(row: sqlite3.Row) -> BacktestMutationRecord:
         location=row["location"],
         before=row["before"],
         after=row["after"],
+        conflict_reference_alpha_id=row["conflict_reference_alpha_id"],
+        conflict_reference_formula=row["conflict_reference_formula"],
     )
 
 

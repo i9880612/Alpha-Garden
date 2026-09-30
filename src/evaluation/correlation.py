@@ -6,6 +6,8 @@ import math
 
 CORRELATION_CUTOFF = 0.7
 MIN_CORRELATION_INTERVALS = 252
+# The platform compares daily increments ending in the four most recent calendar years.
+CORRELATION_CALENDAR_YEARS = 4
 
 
 def sharpe_improves(candidate: float | None, reference: float | None) -> bool | None:

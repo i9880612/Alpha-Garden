@@ -70,6 +70,7 @@ from persistence.runs import (
     list_automated_run_backtests,
 )
 from persistence.seeds import list_signal_seeds
+from persistence.submission_checks import list_submission_checks
 from persistence.submissions import (
     list_formal_submission_attempts,
     list_platform_submitted_alphas,
@@ -528,38 +529,38 @@ def _explicit_self_correlation_evidence(
     account_scope: str,
     evidence_cutoff: datetime,
 ) -> tuple[ExplicitSelfCorrelationEvidence, ...]:
-    built: list[ExplicitSelfCorrelationEvidence] = []
-    for attempt in list_formal_submission_attempts(
-        connection,
-        account_scope=account_scope,
-    ):
-        if (
-            attempt.check_payload_json is None
-            or attempt.check_observed_at is None
-            or _timestamp(
-                attempt.check_observed_at,
-                "action_effect_formal_check_timestamp_invalid",
-            )
-            > evidence_cutoff
-        ):
+    observations = [
+        (attempt.task_id, attempt.check_observed_at, attempt.check_payload_json)
+        for attempt in list_formal_submission_attempts(connection, account_scope=account_scope)
+        if attempt.check_observed_at is not None
+    ]
+    observations.extend((check.task_id, check.observed_at, check.payload_json)
+                        for check in list_submission_checks(connection, account_scope=account_scope))
+    latest: dict[str, ExplicitSelfCorrelationEvidence] = {}
+    for task_id, observed_at, payload_json in observations:
+        timestamp = _timestamp(observed_at, "action_effect_formal_check_timestamp_invalid")
+        if timestamp > evidence_cutoff:
+            continue
+        previous = latest.get(task_id)
+        if previous is not None and timestamp < datetime.fromisoformat(previous.observed_at):
             continue
         try:
-            payload = json.loads(attempt.check_payload_json)
+            payload = json.loads(payload_json) if payload_json is not None else None
         except json.JSONDecodeError as exc:
             raise ValueError("action_effect_formal_check_payload_invalid") from exc
         assessment = assess_formal_check_payload(payload)
         status = dict(assessment.statuses).get("SELF_CORRELATION")
         if status not in {"PASS", "FAIL"}:
-            continue
-        built.append(
-            ExplicitSelfCorrelationEvidence(
-                task_id=attempt.task_id,
-                status=status,
-                formal_check_state=assessment.state,
-                observed_at=attempt.check_observed_at,
-            )
+            status = "PENDING"
+        current = ExplicitSelfCorrelationEvidence(
+            task_id=task_id, status=status, formal_check_state=assessment.state, observed_at=observed_at,
         )
-    return tuple(built)
+        # Equal-time contradictory observations have no trustworthy ordering.
+        if (previous is not None and timestamp == datetime.fromisoformat(previous.observed_at)
+                and (previous.status, previous.formal_check_state) != (current.status, current.formal_check_state)):
+            current = ExplicitSelfCorrelationEvidence(task_id, "PENDING", "pending", observed_at)
+        latest[task_id] = current
+    return tuple(latest[task_id] for task_id in sorted(latest))
 
 
 def _eligible_improvement_parent_task_ids(

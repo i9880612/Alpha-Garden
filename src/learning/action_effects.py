@@ -408,6 +408,8 @@ def _effective_sc_status(
         backtest_status = "missing"
     if explicit_sc is None:
         return backtest_status
+    if explicit_sc.status == "PENDING":
+        return "unresolved"
     if explicit_sc.status == "PASS" and explicit_sc.formal_check_state != "passed":
         return "unresolved"
     formal_status = {"PASS": "passed", "FAIL": "failed"}[explicit_sc.status]
@@ -577,7 +579,7 @@ def _self_correlations_by_task(
             not isinstance(value, ExplicitSelfCorrelationEvidence)
             or not isinstance(value.task_id, str)
             or not value.task_id.strip()
-            or value.status not in {"PASS", "FAIL"}
+            or value.status not in {"PASS", "FAIL", "PENDING"}
             or value.formal_check_state not in {"passed", "failed", "pending"}
             or (value.status == "FAIL" and value.formal_check_state != "failed")
         ):
