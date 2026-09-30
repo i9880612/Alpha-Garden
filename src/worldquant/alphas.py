@@ -16,6 +16,7 @@ class UserAlphaRecord:
     settings: Mapping[str, object] | None
     created_at: datetime
     hidden: bool
+    submitted_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +101,8 @@ def parse_user_alpha_page(payload: object) -> UserAlphaPage:
                 settings=settings,
                 created_at=created_at,
                 hidden=hidden,
+                submitted_at=(None if value.get("dateSubmitted") is None
+                              else _aware_timestamp(value["dateSubmitted"])),
             )
         )
     return UserAlphaPage(

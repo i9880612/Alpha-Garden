@@ -25,6 +25,31 @@ from worldquant.client import WorldQuantRequestError
 
 
 class CommandLineTests(unittest.TestCase):
+    def test_sync_throttle_reports_retry_after_without_continuing(self):
+        error = WorldQuantRequestError("worldquant_pnl_http_error", status_code=429,
+            retryable=True, outcome_unknown=False, retry_after_seconds=120)
+        error.__cause__ = RuntimeError("private-credential")
+        output = io.StringIO()
+        with patch("alpha_garden.cli.sync_submitted_alphas", side_effect=error), redirect_stderr(output):
+            self.assertEqual(run(["sync-submitted"]), 1)
+        self.assertIn("HTTP 429", output.getvalue())
+        self.assertIn("至少等待 120 秒", output.getvalue())
+        self.assertNotIn("private-credential", output.getvalue())
+
+    def test_sync_submitted_reports_complete_and_pending_without_running_research(self):
+        from execution.submitted_sync import SubmittedSyncResult
+        for complete in (True, False):
+            with self.subTest(complete=complete):
+                result = SubmittedSyncResult("fixture-account", 2, 1, 2 if complete else 1,
+                                             0 if complete else 1, complete)
+                with patch("alpha_garden.cli.sync_submitted_alphas", return_value=result) as sync, \
+                     patch("alpha_garden.cli.launch_automated_run") as launch, \
+                     patch("alpha_garden.cli.submit_queued_alphas") as submit, redirect_stdout(io.StringIO()):
+                    self.assertEqual(run(["sync-submitted"]), 0 if complete else 1)
+                sync.assert_called_once_with(Path("data/alpha_garden.sqlite3"), Path(".env"))
+                launch.assert_not_called()
+                submit.assert_not_called()
+
     def test_qualified_submission_command_count_and_recovery_guidance(self):
         for arguments, count, grade in ((["submit", "good"], None, "GOOD"),
                                          (["submit", "GOOD", "2"], 2, "GOOD"),

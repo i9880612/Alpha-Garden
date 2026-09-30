@@ -27,6 +27,7 @@ from execution.runs import (
 )
 from persistence.catalog import FieldCatalogContext
 from persistence.database import open_database
+from persistence.submitted_sync import require_submitted_baseline
 from persistence.runs import (
     AutomatedRunRecord,
     automated_run_has_submission_unknown,
@@ -72,6 +73,7 @@ def launch_automated_run(
                                     policy.universe, policy.delay),
                 account_scope=connection_settings.account_scope,
             )
+            require_submitted_baseline(connection, account_scope=connection_settings.account_scope)
         retire_previous_automated_runs(
             database_path, account_scope=connection_settings.account_scope,
             observed_at=created_at,
@@ -163,6 +165,7 @@ def _require_run_account_scope(
         rejection = run_resume_rejection(connection, run)
         if rejection:
             raise ValueError(rejection)
+        require_submitted_baseline(connection, account_scope=account_scope)
         if run.status in {"created", "running"}:
             settings_policy = BacktestSettingsPolicy.from_config_dict(
                 json.loads(run.settings_policy_json)

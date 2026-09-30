@@ -60,6 +60,7 @@ from persistence.run_diagnostics import (
 )
 from persistence.runs import list_active_automated_runs, get_automated_run
 from persistence.schema import initialize_database_schema
+from persistence.submitted_sync import complete_submitted_sync
 from worldquant.backtests import (
     BacktestCheck,
     BacktestDetail,
@@ -221,7 +222,30 @@ class AutomatedRunLaunchTests(unittest.TestCase):
         )
         with open_database(self.database_path) as connection:
             initialize_database_schema(connection)
+            complete_submitted_sync(connection, account_scope="group-account", alpha_ids=(),
+                                    completed_at="2026-08-29T00:00:00+08:00")
         self._initialize_catalog()
+
+    def test_unsynced_baseline_blocks_launch_before_run_creation_and_client_access(self):
+        with open_database(self.database_path) as connection:
+            connection.execute("DELETE FROM platform_submitted_alpha_syncs")
+        with patch("execution.launch._default_client_factory") as factory:
+            with self.assertRaisesRegex(ValueError, "submitted_baseline_incomplete"):
+                launch_automated_run(self.database_path, self.settings_path, self.environment_path,
+                                     limits=self._limits())
+            factory.assert_not_called()
+        with open_database(self.database_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM automated_runs").fetchone()[0], 0)
+
+    def test_unsynced_baseline_blocks_resume_before_client_access(self):
+        run = prepare_automated_run(self.database_path, self.settings_path, account_scope="group-account",
+                                    limits=self._limits(), created_at="2026-08-30T00:00:00+08:00")
+        with open_database(self.database_path) as connection:
+            connection.execute("DELETE FROM platform_submitted_alpha_syncs")
+        with patch("execution.launch._default_client_factory") as factory:
+            with self.assertRaisesRegex(ValueError, "submitted_baseline_incomplete"):
+                resume_automated_run(self.database_path, self.environment_path, run.run_id)
+            factory.assert_not_called()
 
     def test_explicit_parameters_create_and_complete_one_run(self) -> None:
         fake_time = FakeTime("2026-08-30T00:00:00+08:00")

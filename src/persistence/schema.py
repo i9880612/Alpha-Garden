@@ -13,6 +13,7 @@ from persistence.run_allocations import initialize_run_allocation_schema
 from persistence.submission_queue import initialize_submission_queue_schema
 from persistence.submissions import initialize_submission_schema
 from persistence.submission_checks import initialize_submission_check_schema
+from persistence.submitted_sync import initialize_submitted_sync_schema
 
 
 PROJECT_TABLE_NAMES = frozenset(
@@ -36,6 +37,7 @@ PROJECT_TABLE_NAMES = frozenset(
         "platform_fields",
         "platform_operators",
         "platform_submitted_alphas",
+        "platform_submitted_alpha_syncs",
         "platform_pnl_series",
         "signal_seeds",
         "qualified_alpha_archive",
@@ -54,12 +56,28 @@ def initialize_database_schema(connection: sqlite3.Connection) -> None:
     _require_current_schema(connection, expected_schema)
 
 
+def add_submitted_sync_storage(connection: sqlite3.Connection) -> None:
+    """Explicit additive migration for sync-submitted; no historical facts change."""
+    expected = _reference_schema_objects()
+    actual = _schema_objects(connection)
+    if actual == expected:
+        return
+    previous = {key: value for key, value in expected.items()
+                if key[2] != "platform_submitted_alpha_syncs"}
+    if actual != previous:
+        raise ValueError("submitted_sync_migration_schema_mismatch")
+    if not connection.in_transaction:
+        raise ValueError("submitted_sync_migration_requires_transaction")
+    initialize_submitted_sync_schema(connection)
+    _require_current_schema(connection, expected)
+
+
 def add_pnl_storage(connection: sqlite3.Connection) -> None:
     """Explicit additive migration; reject unrelated or partially altered schemas.
 
     The caller owns the transaction. Existing tables and data are never rewritten.
     """
-    expected = _reference_schema_objects()
+    expected = _migration_schema_objects(connection)
     actual = _schema_objects(connection)
     if actual == expected:
         return
@@ -74,7 +92,7 @@ def add_pnl_storage(connection: sqlite3.Connection) -> None:
 
 def add_submission_research_storage(connection: sqlite3.Connection) -> None:
     """Add grade evidence and retirement storage, including the observed grade-only schema."""
-    expected = _reference_schema_objects()
+    expected = _migration_schema_objects(connection)
     actual = _schema_objects(connection)
     if actual == expected:
         return
@@ -121,7 +139,7 @@ def add_submission_research_storage(connection: sqlite3.Connection) -> None:
 
 def add_submission_source_storage(connection: sqlite3.Connection) -> None:
     """Explicit additive migration; historical attempts retain the queue policy."""
-    expected = _reference_schema_objects()
+    expected = _migration_schema_objects(connection)
     actual = _schema_objects(connection)
     if actual == expected:
         return
@@ -147,7 +165,7 @@ def require_optimization_submission_storage(connection: sqlite3.Connection) -> N
 
 def add_optimization_submission_source(connection: sqlite3.Connection) -> None:
     """Explicit transactional migration; retain all attempt data and relax only its manual source check."""
-    expected = _reference_schema_objects()
+    expected = _migration_schema_objects(connection)
     actual = _schema_objects(connection)
     # This earlier migration must remain executable before adding repair bindings.
     reference_key = ("table", "backtest_mutation_references", "backtest_mutation_references")
@@ -178,7 +196,7 @@ def add_optimization_submission_source(connection: sqlite3.Connection) -> None:
 
 def add_optimization_run_storage(connection: sqlite3.Connection) -> None:
     """Freeze the explicit optimization mode; historical runs remain ordinary runs."""
-    expected = _reference_schema_objects()
+    expected = _migration_schema_objects(connection)
     actual = _schema_objects(connection)
     if actual == expected:
         return
@@ -196,7 +214,7 @@ def add_optimization_run_storage(connection: sqlite3.Connection) -> None:
 
 def add_run_allocation_storage(connection: sqlite3.Connection) -> None:
     """Explicit additive migration; caller owns the transaction, no history rewrite."""
-    expected = _reference_schema_objects()
+    expected = _migration_schema_objects(connection)
     actual = _schema_objects(connection)
     if actual == expected:
         return
@@ -212,7 +230,7 @@ def add_run_allocation_storage(connection: sqlite3.Connection) -> None:
 
 def add_mutation_reference_storage(connection: sqlite3.Connection) -> None:
     """Explicit additive migration; old repairs stay unbound, never guessed."""
-    expected = _reference_schema_objects()
+    expected = _migration_schema_objects(connection)
     actual = _schema_objects(connection)
     if actual == expected:
         return
@@ -227,7 +245,7 @@ def add_mutation_reference_storage(connection: sqlite3.Connection) -> None:
 
 def add_submission_check_storage(connection: sqlite3.Connection) -> None:
     """Explicit additive migration; no existing rows or tables are changed."""
-    expected = _reference_schema_objects()
+    expected = _migration_schema_objects(connection)
     actual = _schema_objects(connection)
     if actual == expected:
         return
@@ -244,7 +262,7 @@ def migrate_cancelled_backtest_reservations(connection: sqlite3.Connection) -> N
     Caller disables foreign keys before BEGIN IMMEDIATE and restores them after
     commit/rollback. Renaming the original table would redirect child references.
     """
-    expected = _reference_schema_objects()
+    expected = _migration_schema_objects(connection)
     actual = _schema_objects(connection)
     if actual == expected:
         return
@@ -278,6 +296,7 @@ def _create_current_schema(connection: sqlite3.Connection) -> None:
     initialize_backtest_schema(connection)
     initialize_run_schema(connection)
     initialize_submission_schema(connection)
+    initialize_submitted_sync_schema(connection)
     initialize_submission_queue_schema(connection)
 
 
@@ -289,6 +308,15 @@ def _reference_schema_objects() -> dict[tuple[str, str, str], str]:
         if table_names != PROJECT_TABLE_NAMES:
             raise AssertionError("project_table_inventory_invalid")
         return _schema_objects(reference)
+
+
+def _migration_schema_objects(connection) -> dict[tuple[str, str, str], str]:
+    """Earlier explicit migrations must remain usable before the sync upgrade."""
+    expected = _reference_schema_objects()
+    key = ("table", "platform_submitted_alpha_syncs", "platform_submitted_alpha_syncs")
+    if key not in _schema_objects(connection):
+        expected.pop(key)
+    return expected
 
 
 def _require_current_schema(

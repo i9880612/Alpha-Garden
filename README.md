@@ -120,6 +120,16 @@ Initialization prepares the local database and research definitions. If a comple
 
 ### 3. Build and open the console
 
+Before starting research, build the account's submitted-alpha and PnL baseline:
+
+```powershell
+alpha-garden sync-submitted
+```
+
+This reads every visible and hidden page using `status!=UNSUBMITTED` and `order=-dateSubmitted`, verifies full details, and captures PnL, including decommissioned submissions. It imports no historical seeds or backtests and submits no formulas. Inconsistent snapshots, missing pages, conflicting identities, and unsupported alpha types fail explicitly. Pending PnL keeps its retry time and completed captures; rerun the command to continue. Completion means all reference curves were captured, not that they satisfy local SC requirements: insufficient overlap, flat curves, or missing required Sharpe remain unknown under the existing rules.
+
+Authentication failures and HTTP 429 throttles that exhaust bounded retries stop all subsequent requests. Wait for the reported `Retry-After` before rerunning. Starting or resuming research requires a completed baseline for the configured account. A verified zero-submission account can cold-start exploration. Keep `WQB_ACCOUNT_SCOPE` bound to the actual account. The command uses the existing `--env` file and `--database` options; process environment variables do not replace the file. For the immediately preceding database schema, this explicit command adds only the completeness metadata table and preserves research history. Other old schemas require their corresponding migrations. A fresh database still needs `init` first.
+
 ```powershell
 pnpm --dir webui install --frozen-lockfile
 pnpm --dir webui build
@@ -149,6 +159,7 @@ New runs started from the console have **automatic submission disabled**. Closin
 
 | Action | Command |
 | --- | --- |
+| Sync all submitted alphas and PnL | `alpha-garden sync-submitted` |
 | Run one cycle | `alpha-garden run` |
 | Run five cycles | `alpha-garden run 5` |
 | Optimize qualified formulas | `alpha-garden run -opt` |

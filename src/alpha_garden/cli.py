@@ -18,6 +18,7 @@ from execution.submission_runner import (
     submit_queued_alphas,
 )
 from execution.submitted_formulas import export_submitted_formulas
+from execution.submitted_sync import sync_submitted_alphas
 from persistence.runs import AutomatedRunRecord
 from submission.formal import BELOW_TARGET_GRADES
 from worldquant.client import WorldQuantRequestError
@@ -29,6 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="初始化 Alpha Garden，或执行有界的真实回测自动运行。",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    sync = commands.add_parser("sync-submitted", help="全量读取已提交公式和 PnL，建立同账号 SC 基线；不导入种子。")
+    sync.add_argument("--database", type=Path, default=Path("data/alpha_garden.sqlite3"))
+    sync.add_argument("--env", type=Path, default=Path(".env"))
     web = commands.add_parser("web", help="启动本机网页控制台和接口；不会自动运行或提交。")
     web.add_argument("--port", type=int, default=8787)
     web.add_argument("--read-only", action="store_true", help="仅查看本地数据，禁用运行和提交操作。")
@@ -179,6 +183,30 @@ def build_parser() -> argparse.ArgumentParser:
 def run(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     arguments = parser.parse_args(argv)
+    if arguments.command == "sync-submitted":
+        try:
+            with run_progress_console():
+                result = sync_submitted_alphas(arguments.database, arguments.env)
+        except KeyboardInterrupt:
+            print("同步已中断，已保存的事实保留；再次 sync-submitted 可接续。")
+            return 130
+        except WorldQuantRequestError as exc:
+            details = [exc.code]
+            if exc.status_code is not None:
+                details.append(f"HTTP {exc.status_code}")
+            if exc.retry_after_seconds is not None:
+                details.append(f"至少等待 {exc.retry_after_seconds:g} 秒后再试")
+            print("已提交基线同步暂停：" + "；".join(details)
+                  + "。已有事实保留，之后再次 sync-submitted 可接续。", file=sys.stderr)
+            return 1
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            print(f"已提交基线同步未完成：{exc}。修复后再次 sync-submitted。", file=sys.stderr)
+            return 1
+        print(f"已提交公式 {result.submitted_count} 条（含隐藏 {result.hidden_count} 条），"
+              f"PnL 已保存 {result.pnl_captured_count} 条，待定 {result.pnl_pending_count} 条。")
+        print("全量基线同步完成；未导入历史种子。" if result.completed else
+              "基线仍不完整，暂不启动研究；等待重试时间后再次 sync-submitted。")
+        return 0 if result.completed else 1
     if arguments.command == "web":
         from alpha_garden.web import serve_console
         from execution.console import ConsolePaths

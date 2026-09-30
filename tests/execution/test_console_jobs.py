@@ -136,6 +136,11 @@ class ConsoleJobsTests(unittest.TestCase):
             client.assert_not_called()
 
     def test_pause_real_launch_preserves_run_and_resume_uses_same_id(self):
+        from persistence.database import open_database
+        from persistence.submitted_sync import complete_submitted_sync
+        with open_database(self.reader.paths.database) as connection:
+            complete_submitted_sync(connection, account_scope="group-account", alpha_ids=(),
+                                    completed_at="2026-09-01T00:00:00+00:00")
         def client_created(settings):
             self.jobs.stop(self.jobs.snapshot()["items"][0]["id"])
             return SimpleNamespace()

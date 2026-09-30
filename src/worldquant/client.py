@@ -435,6 +435,8 @@ class WorldQuantClient:
         offset: int,
         hidden: bool,
         status: str | None = None,
+        exclude_status: str | None = None,
+        order: str = "-dateCreated",
     ) -> UserAlphaPage:
         self._require_authenticated()
         if (
@@ -453,14 +455,23 @@ class WorldQuantClient:
             raise ValueError("worldquant_user_alphas_status_invalid")
         if not isinstance(hidden, bool):
             raise ValueError("worldquant_user_alphas_hidden_invalid")
+        if exclude_status is not None and (
+            status is not None or not isinstance(exclude_status, str)
+            or not exclude_status.strip() or exclude_status != exclude_status.strip()
+        ):
+            raise ValueError("worldquant_user_alphas_status_invalid")
+        if order not in {"-dateCreated", "-dateSubmitted"}:
+            raise ValueError("worldquant_user_alphas_order_invalid")
         parameters = {
             "limit": limit,
             "offset": offset,
-            "order": "-dateCreated",
+            "order": order,
             "hidden": str(hidden).lower(),
         }
         if status is not None:
             parameters["status"] = status
+        if exclude_status is not None:
+            parameters["status!"] = exclude_status
         query = urlencode(parameters)
         response = self._send(
             Request(
@@ -483,6 +494,9 @@ class WorldQuantClient:
         if any(record.hidden is not hidden for record in page.records) or (
             status is not None
             and any(record.status != status for record in page.records)
+        ) or (
+            exclude_status is not None
+            and any(record.status == exclude_status for record in page.records)
         ):
             raise WorldQuantRequestError(
                 "worldquant_user_alphas_filter_mismatch",
