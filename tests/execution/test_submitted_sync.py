@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -12,11 +13,59 @@ from persistence.schema import initialize_database_schema
 from persistence.submissions import list_platform_submitted_alphas
 from persistence.submitted_sync import require_submitted_baseline
 from worldquant.alphas import parse_user_alpha_page
-from worldquant.client import WorldQuantRequestError
+from worldquant.client import WorldQuantRequestError, WorldQuantClient, WorldQuantCredentials, WorldQuantResponse
 from worldquant.pnl import PnlObservation
 
 
 STAMP = "2026-09-01T00:00:00+00:00"
+
+
+@pytest.mark.parametrize("statuses,success", [
+    ([201, 401, 503, 201, 200, 200, 200, 200], True),
+    ([201, 401, 503, 503, 503], False),
+    ([201, 401, 403], False),
+])
+def test_refresh_failure_reauthenticates_inside_the_bounded_read_retry_budget(setup, statuses, success):
+    database, _, run = setup
+    replies = list(statuses)
+    requests = []
+    def execute(request, timeout):
+        requests.append((request.get_method(), request.full_url.split("?")[0]))
+        status = replies.pop(0)
+        body = {"count": 0, "next": None, "previous": None, "results": []}
+        return WorldQuantResponse(status, {}, json.dumps(body).encode())
+    client = WorldQuantClient(base_url="https://api.worldquantbrain.com",
+        credentials=WorldQuantCredentials(bearer_token="synthetic-test-token"), request_executor=execute)
+    if success:
+        assert run(client).completed
+        assert [method for method, _ in requests] == ["POST", "GET", "POST", "POST", "GET", "GET", "GET", "GET"]
+    else:
+        with pytest.raises(WorldQuantRequestError) as error:
+            run(client)
+        assert error.value.status_code == statuses[-1]
+        with pytest.raises(ValueError, match="baseline_incomplete"):
+            require_complete(database)
+    assert not replies
+    assert len(requests) == len(statuses)
+
+
+def test_identical_resync_keeps_evidence_time_but_updates_completed_scan_time(setup):
+    database, clock, run = setup
+    client = ReadOnlyClient([payload()])
+    run(client)
+    clock[0] += timedelta(days=1)
+    run(client)
+    with open_database(database) as connection:
+        assert list_platform_submitted_alphas(connection, account_scope="fixture-account")[0].observed_at == STAMP
+        assert connection.execute("SELECT completed_at FROM platform_submitted_alpha_syncs").fetchone()[0] == clock[0].isoformat()
+    # Changed economic evidence is current evidence, never backdated to the first scan.
+    client.values[0]["is"]["sharpe"] = 2.0
+    clock[0] += timedelta(days=1)
+    run(client)
+    with open_database(database) as connection:
+        record, = list_platform_submitted_alphas(connection, account_scope="fixture-account")
+        assert record.observed_at == clock[0].isoformat()
+        assert record.raw_payload["is"]["sharpe"] == 2.0
 
 
 def payload(alpha="a", *, hidden=False, status="ACTIVE"):
@@ -29,7 +78,8 @@ def payload(alpha="a", *, hidden=False, status="ACTIVE"):
 class ReadOnlyClient:
     def __init__(self, values):
         self.values = values
-        self.authenticate = Mock()
+        self.authenticated = False
+        self.authenticate = Mock(side_effect=lambda: setattr(self, "authenticated", True))
         self.fetch_user_alpha_page = Mock(side_effect=self.page)
         self.fetch_alpha_detail = Mock(side_effect=lambda *, platform_alpha_id:
             SimpleNamespace(payload=deepcopy(next(p for p in self.values if p["id"] == platform_alpha_id))))

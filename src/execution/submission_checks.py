@@ -7,6 +7,7 @@ from pathlib import Path
 
 from persistence.backtests import get_backtest_task
 from persistence.database import open_database
+from persistence.runs import get_automated_run, get_automated_run_backtest_by_task
 from persistence.submission_checks import SubmissionCheckRecord, get_submission_check, save_submission_check
 from persistence.submissions import (
     canonical_submission_json, get_formal_submission_attempt,
@@ -21,11 +22,12 @@ from worldquant.client import WorldQuantClient, WorldQuantRequestError
 
 
 MAX_SUBMISSION_CHECK_ATTEMPTS = 3
+MAX_RESEARCH_SUBMISSION_CHECK_ATTEMPTS = 6
 DEFERRED_SUBMISSION_CHECK_SECONDS = 600
 
 
-def remaining_submission_check_seconds(connection, snapshot, observed_at: str, *, include_deferred: bool = False,
-                                       research_only: bool = False) -> float | None:
+def remaining_submission_check_seconds(connection, snapshot, observed_at: str, *, include_deferred: bool = False) -> float | None:
+    research_only = _is_research_check(connection, snapshot.task.task_id)
     if research_only:
         if (snapshot.task.status != "completed" or snapshot.task.platform_alpha_id is None
                 or snapshot.result is None):
@@ -41,6 +43,8 @@ def remaining_submission_check_seconds(connection, snapshot, observed_at: str, *
     saved = get_submission_check(connection, snapshot.task.task_id)
     if saved is None:
         return 0.0
+    if research_only and saved.attempt_count >= MAX_RESEARCH_SUBMISSION_CHECK_ATTEMPTS:
+        return None
     if saved.attempt_count >= MAX_SUBMISSION_CHECK_ATTEMPTS and not include_deferred:
         return None
     retry_at = saved.retry_not_before
@@ -49,7 +53,7 @@ def remaining_submission_check_seconds(connection, snapshot, observed_at: str, *
         # pending result remains usable without rewriting history on reads.
         if (saved.attempt_count < MAX_SUBMISSION_CHECK_ATTEMPTS
                 or saved.payload_json is None
-                or assess_formal_check_payload(json.loads(saved.payload_json)).state != "pending"):
+                or not _check_needs_retry(assess_formal_check_payload(json.loads(saved.payload_json)), research_only)):
             return None
         retry_at = (datetime.fromisoformat(saved.observed_at)
                     + timedelta(seconds=DEFERRED_SUBMISSION_CHECK_SECONDS)).isoformat()
@@ -59,7 +63,7 @@ def remaining_submission_check_seconds(connection, snapshot, observed_at: str, *
 
 def check_completed_backtest(
     database_path: str | Path, client: WorldQuantClient, task_id: str, *, observed_at: str,
-    recovered: bool = False, include_deferred: bool = False, research_only: bool = False,
+    recovered: bool = False, include_deferred: bool = False,
 ) -> bool:
     """Run one due check read; terminal checks are not repeated, transient reads are bounded."""
     with open_database(database_path) as connection:
@@ -67,18 +71,20 @@ def check_completed_backtest(
         if snapshot is None:
             return False
         delay = remaining_submission_check_seconds(connection, snapshot, observed_at,
-            include_deferred=include_deferred, research_only=research_only)
+            include_deferred=include_deferred)
         if delay is None or delay > 0:
             return False
         previous = get_submission_check(connection, task_id)
         attempts = previous.attempt_count + 1 if previous else 1
+        research_only = _is_research_check(connection, task_id)
     assert snapshot.task.platform_alpha_id is not None
     try:
         observation = client.fetch_formal_submission_check(platform_alpha_id=snapshot.task.platform_alpha_id)
         payload = canonical_submission_json(observation.payload)
         error_code = None
-        state = assess_formal_check_payload(observation.payload).state
-        retryable = state == "pending"
+        assessment = assess_formal_check_payload(observation.payload)
+        state = assessment.state
+        retryable = _check_needs_retry(assessment, research_only)
         retry_after = observation.retry_after_seconds
     except (WorldQuantRequestError, WorldQuantProtocolError) as exc:
         if isinstance(exc, WorldQuantRequestError) and (
@@ -90,7 +96,8 @@ def check_completed_backtest(
         retryable = isinstance(exc, WorldQuantProtocolError) or exc.retryable
         retry_after = getattr(exc, "retry_after_seconds", None)
     retry_at = None
-    if retryable:
+    exhausted = research_only and attempts >= MAX_RESEARCH_SUBMISSION_CHECK_ATTEMPTS
+    if retryable and not exhausted:
         interval = (30.0 * attempts if attempts < MAX_SUBMISSION_CHECK_ATTEMPTS
                     else DEFERRED_SUBMISSION_CHECK_SECONDS)
         retry_at = (datetime.fromisoformat(observed_at)
@@ -112,6 +119,8 @@ def check_completed_backtest(
     deferred = retry_at is not None and attempts >= MAX_SUBMISSION_CHECK_ATTEMPTS
     if deferred:
         label += "；已安排延后自动复查，不阻塞回测"
+    elif retryable and exhausted:
+        label += "；SC 研究检查重试额度耗尽，保留待定证据"
     logging.getLogger("execution.progress").info(
         "%s入队检查 %s：%s", "旧" if recovered else "本批", snapshot.task.platform_alpha_id, label,
         extra={"transient": retry_at is not None and not deferred},
@@ -119,13 +128,28 @@ def check_completed_backtest(
     return True
 
 
-def advance_deferred_submission_check(database_path, client, *, account_scope: str, observed_at: str) -> bool:
+def _is_research_check(connection, task_id: str) -> bool:
+    """The frozen owning run determines eligibility on every execution path."""
+    link = get_automated_run_backtest_by_task(connection, task_id)
+    owner = get_automated_run(connection, link.run_id) if link is not None else None
+    return owner is not None and owner.self_correlation_plan_json is not None
+
+
+def _check_needs_retry(assessment, research_only: bool) -> bool:
+    return assessment.state == "pending" or (research_only
+        and dict(assessment.statuses).get("SELF_CORRELATION") not in {"PASS", "FAIL"})
+
+
+def advance_deferred_submission_check(database_path, client, *, account_scope: str, observed_at: str,
+                                      run_id: str | None = None) -> bool:
     """Read at most one due deferred check; never wait or reopen a backtest."""
     with open_database(database_path) as connection:
         rows = connection.execute(
             "SELECT c.task_id FROM submission_checks c JOIN backtest_tasks t ON t.task_id=c.task_id "
+            "LEFT JOIN automated_run_backtests b ON b.task_id=c.task_id "
             "WHERE t.account_scope=? AND t.status='completed' AND c.attempt_count>=? "
-            "ORDER BY c.observed_at, c.task_id", (account_scope, MAX_SUBMISSION_CHECK_ATTEMPTS),
+            "AND (? IS NULL OR b.run_id=?) "
+            "ORDER BY c.observed_at, c.task_id", (account_scope, MAX_SUBMISSION_CHECK_ATTEMPTS, run_id, run_id),
         ).fetchall()
         selected = None
         for row in rows:

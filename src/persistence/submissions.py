@@ -177,6 +177,9 @@ def record_platform_submitted_alphas(
         prepared.append((record, raw_payload_json))
 
     for record, raw_payload_json in prepared:
+        # Unchanged evidence was already available at its original observation.
+        # The account sync marker separately records the last complete scan.
+        # Any payload/status change starts a new evidence time, never backdated.
         write = connection.execute(
             """
             INSERT INTO platform_submitted_alphas (
@@ -189,7 +192,12 @@ def record_platform_submitted_alphas(
                 status = excluded.status,
                 hidden = excluded.hidden,
                 raw_payload_json = excluded.raw_payload_json,
-                observed_at = excluded.observed_at
+                observed_at = CASE WHEN
+                    platform_submitted_alphas.formula = excluded.formula
+                    AND platform_submitted_alphas.status = excluded.status
+                    AND platform_submitted_alphas.hidden = excluded.hidden
+                    AND platform_submitted_alphas.raw_payload_json = excluded.raw_payload_json
+                    THEN platform_submitted_alphas.observed_at ELSE excluded.observed_at END
             WHERE
                 platform_submitted_alphas.normalized_formula
                     = excluded.normalized_formula

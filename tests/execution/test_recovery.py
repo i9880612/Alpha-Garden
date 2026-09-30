@@ -29,7 +29,7 @@ from learning.recovery import RecoveryComparison, recovery_comparisons, recovery
 from learning.self_correlation import SelfCorrelationReference
 from persistence.database import open_database
 from persistence.pnl import initialize_pnl_schema, list_pnl_series, save_pnl_series
-from persistence.submissions import list_platform_submitted_alphas
+from persistence.submissions import list_platform_submitted_alphas, record_platform_submitted_alphas
 from learning.seed_correlation import assess_seed_correlation
 from worldquant.backtests import BacktestSettings, STANDARD_REGULAR_CHECK_NAMES, WorldQuantProtocolError
 from worldquant.client import WorldQuantRequestError
@@ -332,6 +332,12 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
             assert synchronize_signal_seeds(connection) == ()
             comparisons = load_recovery_comparisons(connection)
             assert len(comparisons) == 1
+            # Re-observing identical submitted facts must not erase evidence that
+            # existed before an old, unbound repair was generated.
+            submitted = list_platform_submitted_alphas(connection, account_scope="group-account")
+            record_platform_submitted_alphas(connection, tuple(replace(item,
+                observed_at="2026-09-02T00:00:00+08:00") for item in submitted))
+            assert load_recovery_comparisons(connection) == comparisons
         if base_passed:
             with open_database(fixture.database_path) as connection:
                 connection.execute("INSERT INTO backtest_yearly_stats(task_id,stage,year,sharpe) VALUES (?, 'IS', 2023, 1.4)", (child_id,))

@@ -59,7 +59,7 @@ class PlatformSubmittedAlphaPersistenceTests(unittest.TestCase):
                 account_scope="account-main",
             )
 
-        self.assertEqual(stored, (refreshed,))
+        self.assertEqual(stored, (original,))
         self.assertEqual(stored[0].raw_payload, original.raw_payload)
         self.assertEqual(
             stored[0].normalized_formula,

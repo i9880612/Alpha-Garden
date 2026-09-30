@@ -101,15 +101,14 @@ def advance_automated_cycle_backtests(
         sc_research = run.self_correlation_plan_json is not None
         for snapshot in snapshots:
             if check_completed_backtest(database_path, client, snapshot.task.task_id,
-                                        observed_at=observed_at, research_only=sc_research):
+                                        observed_at=observed_at):
                 return _advance_result(
                     run=run, cycle_number=cycle_number, action="submission_check_observed",
                     snapshot=snapshot, counts=counts, platform_request_performed=True,
                 )
         with open_database(database_path) as connection:
             delays = [delay for snapshot in snapshots
-                      if (delay := remaining_submission_check_seconds(connection, snapshot, observed_at,
-                                                                      research_only=sc_research)) is not None]
+                      if (delay := remaining_submission_check_seconds(connection, snapshot, observed_at)) is not None]
         if delays:
             return _advance_result(
                 run=run, cycle_number=cycle_number, action="submission_check_wait", snapshot=None,

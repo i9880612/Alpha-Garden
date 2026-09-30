@@ -14,9 +14,10 @@ from execution.cycle_backtests import settle_failed_automated_cycle_if_terminal
 from execution.real_backtests import RealBacktestAdvance, advance_real_backtest
 from execution.seeds import synchronize_signal_seeds
 from execution.qualified_archive import synchronize_qualified_alpha_archive
-from execution.submission_checks import check_completed_backtest, remaining_submission_check_seconds
+from execution.submission_checks import check_completed_backtest, remaining_submission_check_seconds, MAX_SUBMISSION_CHECK_ATTEMPTS
 from persistence.backtests import get_backtest_task, list_active_backtest_tasks
 from persistence.database import open_database
+from persistence.submission_checks import get_submission_check
 from persistence.runs import (
     get_automated_run, get_automated_run_backtest_by_task,
     list_failed_automated_runs, list_automated_run_backtests, get_automated_cycle_settlement,
@@ -40,10 +41,14 @@ def _stopped_work(connection, account_scope, observed_at, run_id=None):
                         snapshot, observed_at, max_pending_seconds=owner.max_pending_seconds,
                     ),
                 )
-            elif get_automated_cycle_settlement(connection, owner.run_id, link.cycle_number) is None:
-                delay = remaining_submission_check_seconds(connection, snapshot, observed_at)
             else:
-                continue
+                include_deferred = run_id is not None and owner.self_correlation_plan_json is not None
+                if get_automated_cycle_settlement(connection, owner.run_id, link.cycle_number) is not None:
+                    saved = get_submission_check(connection, snapshot.task.task_id)
+                    if not include_deferred or saved is None or saved.attempt_count < MAX_SUBMISSION_CHECK_ATTEMPTS:
+                        continue
+                delay = remaining_submission_check_seconds(connection, snapshot, observed_at,
+                                                            include_deferred=include_deferred)
             if delay is not None:
                 work.append((snapshot, owner, delay))
     return sorted(work, key=lambda item: (
@@ -62,7 +67,7 @@ def advance_stopped_run_check(
     database_path: str | Path, client: WorldQuantClient, *, account_scope: str,
     observed_at: str, run_id: str | None = None,
 ) -> RealBacktestAdvance | None:
-    """Drain unfinished check work only at a batch boundary, never historical settlements."""
+    """Drain unfinished checks; explicit SC resume may also finish saved deferred checks."""
     with open_database(database_path) as connection:
         checks = [item for item in _stopped_work(connection, account_scope, observed_at, run_id)
                   if item[0].task.status == "completed"]
@@ -72,7 +77,8 @@ def advance_stopped_run_check(
     if delay > 0:
         return RealBacktestAdvance("submission_check_wait", selected, False, delay)
     performed = check_completed_backtest(database_path, client, selected.task.task_id,
-                                       observed_at=observed_at, recovered=True)
+        observed_at=observed_at, recovered=True,
+        include_deferred=run_id is not None and owner.self_correlation_plan_json is not None)
     while settle_failed_automated_cycle_if_terminal(database_path, owner.run_id, observed_at=observed_at) is not None:
         pass
     return RealBacktestAdvance("submission_check_observed", selected, performed)
@@ -96,7 +102,7 @@ def advance_stopped_run_backtest(
             max_pending_seconds=owner.max_pending_seconds,
         )
     except WorldQuantRequestError as exc:
-        if exc.status_code in {401, 403} or exc.code.startswith("worldquant_authentication_"):
+        if exc.status_code in {401, 403, 429} or exc.code.startswith("worldquant_authentication_"):
             raise
         # Defer a task-specific failed read within the original wait bound.
         # Account authentication and permission errors must remain visible.

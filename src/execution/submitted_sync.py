@@ -85,7 +85,7 @@ def sync_submitted_alphas(database_path, environment_path, *, policy=None,
             if item.alpha_type != "REGULAR" or item.formula is None:
                 raise ValueError("submitted_sync_alpha_type_unsupported:" + item.alpha_type)
             payload = _read(lambda: client.fetch_alpha_detail(
-                platform_alpha_id=item.platform_alpha_id), policy, wait).payload
+                platform_alpha_id=item.platform_alpha_id), policy, wait, client=client).payload
             if (not isinstance(payload, Mapping) or not isinstance(payload.get("regular"), Mapping)
                     or payload.get("id") != item.platform_alpha_id or payload.get("status") != item.status
                     or payload.get("hidden") is not item.hidden
@@ -114,7 +114,7 @@ def sync_submitted_alphas(database_path, environment_path, *, policy=None,
             error_code = None
             try:
                 observation = _read(lambda: client.fetch_pnl(
-                    platform_alpha_id=item.platform_alpha_id), policy, wait)
+                    platform_alpha_id=item.platform_alpha_id), policy, wait, client=client)
                 points, retry = observation.points, observation.retry_after_seconds
             except (WorldQuantRequestError, WorldQuantProtocolError) as exc:
                 # An exhausted account throttle must stop all later reads, not
@@ -152,7 +152,7 @@ def _scan(client, policy, wait):
         offset, expected, previous_time = 0, None, None
         while True:
             page = _read(lambda: client.fetch_user_alpha_page(limit=policy.page_size,
-                offset=offset, hidden=hidden, exclude_status="UNSUBMITTED", order="-dateSubmitted"), policy, wait)
+                offset=offset, hidden=hidden, exclude_status="UNSUBMITTED", order="-dateSubmitted"), policy, wait, client=client)
             if expected is None:
                 expected = page.total_count
             if page.total_count != expected:
@@ -181,11 +181,15 @@ def _scan(client, policy, wait):
     return tuple(sorted(records, key=lambda item: item.platform_alpha_id))
 
 
-def _read(operation, policy, wait):
+def _read(operation, policy, wait, *, client=None):
     for attempt in range(policy.max_attempts):
         if policy.request_interval_seconds:
             wait(policy.request_interval_seconds)
         try:
+            # A failed 401 refresh clears authentication. Restore it inside this
+            # read's retry budget; never start an independent nested retry loop.
+            if client is not None and not client.authenticated:
+                client.authenticate()
             return operation()
         except WorldQuantRequestError as exc:
             delay = exc.retry_after_seconds if exc.retry_after_seconds is not None else 2 ** attempt

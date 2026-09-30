@@ -50,6 +50,24 @@ class RecoveryClient(fixture.LaunchClient):
 
 
 class RunRecoveryTests(unittest.TestCase):
+    def test_old_account_throttle_is_not_downgraded_to_a_single_task_retry(self):
+        _, tasks = self._old(failed=True, elapsed_seconds=0)
+        client = RecoveryClient()
+        client.authenticated = True
+        error = WorldQuantRequestError("account_throttled", status_code=429, retryable=True,
+                                      outcome_unknown=False, retry_after_seconds=60)
+        def poll(remote_id):
+            raise error
+        client.poll_backtest = poll
+        with self.assertRaises(WorldQuantRequestError) as raised:
+            advance_stopped_run_backtest(self.db, client, account_scope="group-account",
+                                        observed_at=self.time.now().isoformat())
+        self.assertIs(raised.exception, error)
+        with open_database(self.db) as connection:
+            task = get_backtest_task(connection, tasks[0].task.task_id).task
+            self.assertEqual(task.status, "pending")
+            self.assertIsNone(task.failure_code)
+
     def test_stopped_result_recovery_also_archives_exhausted_qualified_parents(self):
         from tests.execution import test_qualified_archive as archive_fixture
         from execution.run_recovery import settle_stopped_run_results
