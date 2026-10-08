@@ -13,6 +13,7 @@ from execution.catalog_sync import (
     require_catalog_refresh_allowed,
 )
 from execution.catalog import load_generation_catalog
+from execution.process_lock import exclusive_run_process
 from generation.project_catalog import (
     OPERATOR_OUTPUTS,
     OPERATOR_ROLES,
@@ -32,7 +33,8 @@ from persistence.catalog import (
     replace_window_catalog,
 )
 from persistence.database import open_database
-from persistence.schema import PROJECT_TABLE_NAMES, initialize_database_schema
+from persistence.catalog_downloads import CatalogDownloadScope, catalog_field_download_pending
+from persistence.schema import PROJECT_TABLE_NAMES, initialize_database_schema, add_catalog_download_storage
 from selection.settings import load_backtest_settings_policy
 from worldquant.config import load_worldquant_connection_settings
 
@@ -68,6 +70,7 @@ def initialize_project(
     clock: Clock | None = None,
     waiter: Waiter | None = None,
     client_factory: ClientFactory | None = None,
+    upgrade_catalog_storage: bool = False,
 ) -> ProjectInitializationResult:
     path = Path(database_path)
     if path.exists() and not path.is_file():
@@ -76,8 +79,11 @@ def initialize_project(
         raise ValueError("project_database_parent_missing")
     database_created = not path.is_file()
 
-    with open_database(path) as connection:
+    with exclusive_run_process(path), open_database(path) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if upgrade_catalog_storage and not database_created:
+            require_catalog_refresh_allowed(connection)
+            add_catalog_download_storage(connection)
         initialize_database_schema(connection)
         semantics_initialized = _initialize_project_semantics(connection)
 
@@ -122,6 +128,9 @@ def _load_existing_platform_catalog(
         delay=settings_policy.delay,
     )
     with open_database(database_path) as connection:
+        if catalog_field_download_pending(connection, CatalogDownloadScope(connection_settings.account_scope,
+                connection_settings.base_url.rstrip("/"), context)):
+            return None
         sync = get_platform_catalog_sync(connection)
         if (
             sync is None

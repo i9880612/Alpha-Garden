@@ -24,13 +24,44 @@ from persistence.schema import (
     add_sc_research_plan_storage,
     add_submitted_sync_storage,
     add_quality_research_storage,
+    add_catalog_download_storage,
 )
 
 
 class DatabaseSchemaTests(unittest.TestCase):
+    def test_catalog_download_upgrade_is_explicit_atomic_and_preserves_history(self):
+        with open_database(":memory:") as connection:
+            initialize_database_schema(connection)
+            connection.execute("DROP TABLE platform_field_download_pages")
+            connection.execute("INSERT INTO generation_windows (value,horizon) VALUES (22,'month')")
+            connection.commit()
+            before = connection.execute("SELECT name,sql FROM sqlite_master ORDER BY name").fetchall()
+            with self.assertRaisesRegex(ValueError, "requires_transaction"):
+                add_catalog_download_storage(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            add_catalog_download_storage(connection)
+            connection.rollback()
+            self.assertEqual(connection.execute("SELECT name,sql FROM sqlite_master ORDER BY name").fetchall(), before)
+            connection.execute("BEGIN IMMEDIATE")
+            add_catalog_download_storage(connection)
+            add_catalog_download_storage(connection)
+            initialize_database_schema(connection)
+            self.assertEqual(tuple(connection.execute("SELECT value,horizon FROM generation_windows").fetchone()), (22,"month"))
+
+    def test_catalog_download_upgrade_rejects_unrelated_schema(self):
+        with open_database(":memory:") as connection:
+            initialize_database_schema(connection)
+            connection.execute("DROP TABLE platform_field_download_pages")
+            connection.execute("CREATE TABLE unrelated (value TEXT)")
+            connection.execute("BEGIN IMMEDIATE")
+            with self.assertRaisesRegex(ValueError, "catalog_download_migration_schema_mismatch"):
+                add_catalog_download_storage(connection)
+            self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name='platform_field_download_pages'").fetchone())
+
     def test_existing_local_schema_upgrades_before_sc_storage_without_losing_history(self):
         with open_database(":memory:") as connection:
             initialize_database_schema(connection)
+            connection.execute("DROP TABLE platform_field_download_pages")
             connection.execute("DROP TABLE quality_research_tasks")
             connection.execute("DROP TABLE platform_submitted_alpha_syncs")
             connection.execute("DROP TABLE backtest_mutation_references")
@@ -50,6 +81,7 @@ class DatabaseSchemaTests(unittest.TestCase):
             add_sc_research_plan_storage(connection)
             add_submitted_sync_storage(connection)
             add_quality_research_storage(connection)
+            add_catalog_download_storage(connection)
             initialize_database_schema(connection)
             connection.rollback()
             self.assertEqual(connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall(), before)
@@ -59,6 +91,7 @@ class DatabaseSchemaTests(unittest.TestCase):
             add_sc_research_plan_storage(connection)
             add_submitted_sync_storage(connection)
             add_quality_research_storage(connection)
+            add_catalog_download_storage(connection)
             initialize_database_schema(connection)
             self.assertEqual(tuple(connection.execute("SELECT value,horizon FROM generation_windows").fetchone()), (22,"month"))
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])

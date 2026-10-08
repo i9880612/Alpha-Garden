@@ -223,6 +223,15 @@ class CommandLineTests(unittest.TestCase):
         ):
             self.assertIn(expected, rendered)
 
+    def test_init_interruption_reports_saved_checkpoint_and_explicit_upgrade_option(self):
+        output = io.StringIO()
+        with patch("alpha_garden.cli.initialize_project", side_effect=KeyboardInterrupt()) as call:
+            with redirect_stdout(output):
+                self.assertEqual(run(["init", "--upgrade-catalog-storage"]), 130)
+        call.assert_called_once_with(Path("data/alpha_garden.sqlite3"),
+            Path("config/backtest.default.json"), Path(".env"), upgrade_catalog_storage=True)
+        self.assertIn("已保存分页保留", output.getvalue())
+
     def test_init_reports_when_existing_platform_catalog_is_reused(self) -> None:
         result = ProjectInitializationResult(
             database_path=Path("data/alpha_garden.sqlite3"),

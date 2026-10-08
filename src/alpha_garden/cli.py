@@ -82,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path(".env"),
         help="WQB 账号环境文件路径（默认：.env）。",
     )
+    initialize.add_argument("--upgrade-catalog-storage", action="store_true",
+        help="显式为前一版数据库添加字段分页断点表，保留已有研究数据。")
     automated_run = commands.add_parser(
         "run",
         help="按指定轮数启动真实回测自动运行（默认 1 轮，-1 持续运行）。",
@@ -301,11 +303,16 @@ def run(argv: Sequence[str] | None = None) -> int:
     if arguments.command != "init":
         raise AssertionError("command_dispatch_invalid")
     try:
-        result = initialize_project(
-            arguments.database,
-            arguments.settings,
-            arguments.env,
-        )
+        with run_progress_console():
+            result = initialize_project(
+                arguments.database,
+                arguments.settings,
+                arguments.env,
+                **({"upgrade_catalog_storage": True} if arguments.upgrade_catalog_storage else {}),
+            )
+    except KeyboardInterrupt:
+        print("字段同步已中断，已保存分页保留；再次执行相同的 init 命令可接续。")
+        return 130
     except (OSError, sqlite3.Error, ValueError, WorldQuantRequestError) as exc:
         print(f"初始化失败：{exc}", file=sys.stderr)
         return 1

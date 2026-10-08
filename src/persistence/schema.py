@@ -8,6 +8,7 @@ from persistence.backtests import initialize_backtest_schema, initialize_mutatio
 from persistence.pnl import initialize_pnl_schema
 from persistence.qualified_archive import initialize_qualified_archive_schema
 from persistence.catalog import initialize_catalog_schema
+from persistence.catalog_downloads import initialize_catalog_download_schema
 from persistence.runs import initialize_run_schema
 from persistence.run_allocations import initialize_run_allocation_schema
 from persistence.submission_queue import initialize_submission_queue_schema
@@ -35,6 +36,7 @@ PROJECT_TABLE_NAMES = frozenset(
         "generation_windows",
         "formal_submission_attempts",
         "platform_catalog_syncs",
+        "platform_field_download_pages",
         "platform_fields",
         "platform_operators",
         "platform_submitted_alphas",
@@ -62,6 +64,7 @@ def add_submitted_sync_storage(connection: sqlite3.Connection) -> None:
     """Explicit additive migration for sync-submitted; no historical facts change."""
     expected = _reference_schema_objects()
     actual = _schema_objects(connection)
+    _omit_missing_catalog_download_storage(expected, actual)
     quality_key = ("table", "quality_research_tasks", "quality_research_tasks")
     if quality_key not in actual:
         expected.pop(quality_key)
@@ -260,6 +263,7 @@ def add_quality_research_storage(connection: sqlite3.Connection) -> None:
     """Explicit additive upgrade; leave historical tasks and counters untouched."""
     expected = _reference_schema_objects()
     actual = _schema_objects(connection)
+    _omit_missing_catalog_download_storage(expected, actual)
     if actual == expected:
         return
     previous = {key: value for key, value in expected.items() if key[2] != "quality_research_tasks"}
@@ -336,8 +340,24 @@ def migrate_cancelled_backtest_reservations(connection: sqlite3.Connection) -> N
         raise ValueError("backtest_reservation_migration_foreign_key_violation")
 
 
+def add_catalog_download_storage(connection: sqlite3.Connection) -> None:
+    """Explicit additive upgrade from the previous schema; retain all research facts."""
+    expected = _reference_schema_objects()
+    actual = _schema_objects(connection)
+    if actual == expected:
+        return
+    previous = {key: value for key, value in expected.items() if key[2] != "platform_field_download_pages"}
+    if actual != previous:
+        raise ValueError("catalog_download_migration_schema_mismatch")
+    if not connection.in_transaction:
+        raise ValueError("catalog_download_migration_requires_transaction")
+    initialize_catalog_download_schema(connection)
+    _require_current_schema(connection, expected)
+
+
 def _create_current_schema(connection: sqlite3.Connection) -> None:
     initialize_catalog_schema(connection)
+    initialize_catalog_download_schema(connection)
     initialize_backtest_schema(connection)
     initialize_run_schema(connection)
     initialize_submission_schema(connection)
@@ -358,6 +378,7 @@ def _reference_schema_objects() -> dict[tuple[str, str, str], str]:
 def _migration_schema_objects(connection) -> dict[tuple[str, str, str], str]:
     """Earlier explicit migrations must remain usable before the sync upgrade."""
     expected = _reference_schema_objects()
+    _omit_missing_catalog_download_storage(expected, _schema_objects(connection))
     key = ("table", "platform_submitted_alpha_syncs", "platform_submitted_alpha_syncs")
     if key not in _schema_objects(connection):
         expected.pop(key)
@@ -365,6 +386,13 @@ def _migration_schema_objects(connection) -> dict[tuple[str, str, str], str]:
     if quality_key not in _schema_objects(connection):
         expected.pop(quality_key)
     return expected
+
+
+def _omit_missing_catalog_download_storage(expected, actual) -> None:
+    # Existing explicit upgrades can still run before the field-download upgrade.
+    key = ("table", "platform_field_download_pages", "platform_field_download_pages")
+    if key not in actual:
+        expected.pop(key)
 
 
 def _require_current_schema(

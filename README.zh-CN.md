@@ -118,6 +118,10 @@ alpha-garden init
 
 初始化会准备本地数据库与研究定义。如果缺少完整且匹配的数据目录，会认证 WorldQuant BRAIN 并同步字段和算子，不会启动回测或提交公式。更新项目时保留已有配置和研究数据。
 
+字段每下载一页即保存到 SQLite 暂存区。网络失败、重试耗尽或中断后，使用相同的 `--database`、`--settings` 和 `--env` 再次执行 `alpha-garden init` 即可接续；恢复时会先核对最后一页，再请求尚未保存的页。断点按账号、平台地址、Instrument Type、Region、Universe 和 Delay 隔离。全部字段与算子通过校验后才原子替换正式目录并清除该断点；不完整下载不会覆盖旧目录。若发现总数、断点页字段顺序变化或重复分页，会停止并清除该次暂存，重跑从第一页开始。
+
+前一版数据库首次启用分页保存时，执行 `alpha-garden init --upgrade-catalog-storage`，显式添加断点表并继续初始化；已有研究记录保持不变。更早的数据库先完成原有结构升级。新数据库直接执行 `alpha-garden init`。
+
 首次开始研究前，再建立同账号的已提交公式与 PnL 基线：
 
 ```powershell

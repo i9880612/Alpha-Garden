@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import math
+import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 
 from execution.catalog import load_generation_catalog
+from execution.process_lock import exclusive_run_process
 from persistence.catalog import (
     FieldCatalogContext,
     FieldCatalogRecord,
@@ -20,6 +22,10 @@ from persistence.catalog import (
     replace_platform_catalog,
 )
 from persistence.database import open_database
+from persistence.catalog_downloads import (
+    CatalogDownloadScope, CatalogFieldPage, list_catalog_field_pages,
+    save_catalog_field_page, clear_catalog_field_pages,
+)
 from persistence.runs import (
     list_active_automated_runs,
     list_submission_reconciliation_runs,
@@ -116,12 +122,8 @@ def refresh_generation_catalog(
         universe=settings_policy.universe,
         delay=settings_policy.delay,
     )
-    platform_context = CatalogContext(
-        instrument_type=context.instrument_type,
-        region=context.region,
-        universe=context.universe,
-        delay=context.delay,
-    )
+    scope = CatalogDownloadScope(connection_settings.account_scope,
+                                 connection_settings.base_url.rstrip("/"), context)
     if refresh_policy is not None and not isinstance(
         refresh_policy, CatalogRefreshPolicy
     ):
@@ -130,57 +132,45 @@ def refresh_generation_catalog(
     current_time = clock or _utc_now
     wait = waiter or time.sleep
 
-    with open_database(path) as connection:
-        require_catalog_refresh_allowed(connection)
-        _require_local_generation_semantics(connection)
+    with exclusive_run_process(path):
+        with open_database(path) as connection:
+            require_catalog_refresh_allowed(connection)
+            _require_local_generation_semantics(connection)
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                                  ("platform_field_download_pages",)).fetchone() is None:
+                raise ValueError("catalog_download_storage_missing:run init --upgrade-catalog-storage")
 
-    make_client = client_factory or _default_client_factory
-    client = make_client(connection_settings)
-    client.authenticate()
-    fields = _fetch_all_fields(
-        client,
-        platform_context,
-        policy=policy,
-        waiter=wait,
-    )
-    operators = _with_retry(
-        client.fetch_operators,
-        policy=policy,
-        waiter=wait,
-    )
-    synced_at = _aware_time(current_time()).isoformat()
-    field_records = tuple(
-        _field_record(field, context=context, synced_at=synced_at)
-        for field in fields
-    )
-    operator_records = tuple(
-        _operator_record(operator, synced_at=synced_at)
-        for operator in operators
-    )
-    sync = PlatformCatalogSyncRecord(
-        account_scope=connection_settings.account_scope,
-        context=context,
-        field_count=len(field_records),
-        operator_count=len(operator_records),
-        synced_at=synced_at,
-    )
-
-    with open_database(path) as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        initialize_catalog_schema(connection)
-        require_catalog_refresh_allowed(connection)
-        _require_local_generation_semantics(connection)
-        replace_platform_catalog(
-            connection,
-            sync,
-            field_records,
-            operator_records,
+        make_client = client_factory or _default_client_factory
+        client = make_client(connection_settings)
+        client.authenticate()
+        fields = _fetch_all_fields(path, client, scope, policy=policy, waiter=wait, clock=current_time)
+        operators = _with_retry(
+            client.fetch_operators,
+            policy=policy,
+            waiter=wait,
         )
-        catalog = load_generation_catalog(
-            connection,
-            context,
+        synced_at = _aware_time(current_time()).isoformat()
+        field_records = tuple(replace(field, synced_at=synced_at) for field in fields)
+        operator_records = tuple(
+            _operator_record(operator, synced_at=synced_at)
+            for operator in operators
+        )
+        sync = PlatformCatalogSyncRecord(
             account_scope=connection_settings.account_scope,
+            context=context,
+            field_count=len(field_records),
+            operator_count=len(operator_records),
+            synced_at=synced_at,
         )
+
+        with open_database(path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            initialize_catalog_schema(connection)
+            require_catalog_refresh_allowed(connection)
+            _require_local_generation_semantics(connection)
+            replace_platform_catalog(connection, sync, field_records, operator_records)
+            catalog = load_generation_catalog(connection, context, account_scope=connection_settings.account_scope)
+            clear_catalog_field_pages(connection, scope)
 
     return CatalogRefreshResult(
         account_scope=connection_settings.account_scope,
@@ -193,15 +183,39 @@ def refresh_generation_catalog(
 
 
 def _fetch_all_fields(
+    database_path: Path,
     client: WorldQuantClient,
-    context: CatalogContext,
+    scope: CatalogDownloadScope,
     *,
     policy: CatalogRefreshPolicy,
     waiter: Waiter,
-) -> tuple[DataField, ...]:
-    fields: list[DataField] = []
+    clock: Clock,
+) -> tuple[FieldCatalogRecord, ...]:
+    context = CatalogContext(scope.context.instrument_type, scope.context.region,
+                             scope.context.universe, scope.context.delay)
+    fields: list[FieldCatalogRecord] = []
     identifiers: set[str] = set()
     expected_total: int | None = None
+    with open_database(database_path) as connection:
+        saved_pages = list_catalog_field_pages(connection, scope)
+    for saved in saved_pages:
+        _validate_field_page(saved, offset=len(fields), expected_total=expected_total, identifiers=identifiers)
+        fields.extend(saved.fields)
+        identifiers.update(field.field_id for field in saved.fields)
+        expected_total = saved.total_count
+    logger = logging.getLogger("execution.progress")
+    if saved_pages:
+        last = saved_pages[-1]
+        boundary = _with_retry(lambda: client.fetch_data_field_page(
+            context=context, limit=last.page_size, offset=last.offset), policy=policy, waiter=waiter)
+        if (boundary.total_count != expected_total
+                or tuple(field.field_id for field in boundary.fields) != tuple(field.field_id for field in last.fields)):
+            with open_database(database_path) as connection:
+                clear_catalog_field_pages(connection, scope)
+            raise ValueError("catalog_refresh_checkpoint_changed:rerun init to download from offset 0")
+        logger.info("字段断点已核对：%d/%d；从 offset=%d 接续。", len(fields), expected_total, len(fields))
+        if len(fields) < expected_total and policy.page_interval_seconds:
+            waiter(float(policy.page_interval_seconds))
     while expected_total is None or len(fields) < expected_total:
         page = _with_retry(
             lambda: client.fetch_data_field_page(
@@ -212,25 +226,46 @@ def _fetch_all_fields(
             policy=policy,
             waiter=waiter,
         )
-        if expected_total is None:
-            expected_total = page.total_count
-        elif page.total_count != expected_total:
-            raise ValueError("catalog_refresh_field_total_changed")
-        if not page.fields:
-            raise ValueError("catalog_refresh_field_page_empty")
-        page_identifiers = {field.field_id for field in page.fields}
-        if identifiers.intersection(page_identifiers):
-            raise ValueError("catalog_refresh_field_duplicate")
-        identifiers.update(page_identifiers)
-        fields.extend(page.fields)
-        if len(fields) > expected_total:
-            raise ValueError("catalog_refresh_field_count_exceeded")
+        observed_at = _aware_time(clock()).isoformat()
+        saved = CatalogFieldPage(len(fields), policy.page_size, page.total_count,
+            tuple(_field_record(field, context=scope.context, synced_at=observed_at) for field in page.fields))
+        try:
+            _validate_field_page(saved, offset=len(fields), expected_total=expected_total, identifiers=identifiers)
+        except ValueError:
+            # An inconsistent listing cannot be completed by mixing its pages.
+            # Leave the published catalog intact; the next attempt starts fresh.
+            with open_database(database_path) as connection:
+                clear_catalog_field_pages(connection, scope)
+            raise
+        with open_database(database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            require_catalog_refresh_allowed(connection)
+            save_catalog_field_page(connection, scope, saved)
+        expected_total = page.total_count
+        identifiers.update(field.field_id for field in saved.fields)
+        fields.extend(saved.fields)
+        logger.info("字段分页已保存：%d/%d；下次从 offset=%d 继续。", len(fields), expected_total, len(fields))
         if len(fields) < expected_total and policy.page_interval_seconds:
             waiter(float(policy.page_interval_seconds))
     assert expected_total is not None
     if len(fields) != expected_total:
         raise ValueError("catalog_refresh_field_count_mismatch")
     return tuple(fields)
+
+
+def _validate_field_page(page: CatalogFieldPage, *, offset: int, expected_total: int | None,
+                         identifiers: set[str]) -> None:
+    if page.offset != offset:
+        raise ValueError("catalog_refresh_field_page_gap")
+    if expected_total is not None and page.total_count != expected_total:
+        raise ValueError("catalog_refresh_field_total_changed")
+    if not page.fields:
+        raise ValueError("catalog_refresh_field_page_empty")
+    page_identifiers = {field.field_id for field in page.fields}
+    if len(page_identifiers) != len(page.fields) or identifiers.intersection(page_identifiers):
+        raise ValueError("catalog_refresh_field_duplicate")
+    if len(page.fields) > page.page_size or offset + len(page.fields) > page.total_count:
+        raise ValueError("catalog_refresh_field_count_exceeded")
 
 
 def _with_retry(

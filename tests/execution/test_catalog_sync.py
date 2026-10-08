@@ -43,6 +43,7 @@ from persistence.catalog import (
     replace_window_catalog,
 )
 from persistence.database import open_database
+from persistence.catalog_downloads import initialize_catalog_download_schema
 from persistence.runs import initialize_run_schema
 from persistence.submissions import initialize_submission_schema
 from worldquant.catalog import DataField, DataFieldPage, Operator
@@ -133,6 +134,7 @@ class CatalogRefreshTests(unittest.TestCase):
         )
         with open_database(self.database_path) as connection:
             initialize_catalog_schema(connection)
+            initialize_catalog_download_schema(connection)
             initialize_backtest_schema(connection)
             initialize_run_schema(connection)
             initialize_submission_schema(connection)

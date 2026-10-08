@@ -118,6 +118,10 @@ alpha-garden init
 
 Initialization prepares the local database and research definitions. If a complete matching data catalog is unavailable, it authenticates with WorldQuant BRAIN and synchronizes fields and operators. It does not start backtests or submit formulas. Keep existing configuration and research data when updating the project.
 
+Each downloaded field page is committed to SQLite staging. After a network failure, exhausted retries or interruption, rerun `alpha-garden init` with the same `--database`, `--settings` and `--env` options to resume. Recovery verifies the last saved page before requesting unsaved pages. Checkpoints are isolated by account, platform URL, instrument type, region, universe and delay. Only a complete, validated field and operator catalog atomically replaces the published catalog and clears its checkpoint; partial downloads leave the previous catalog intact. A changed total, changed checkpoint-page field order or duplicate pagination stops the sync and clears that download so the next attempt starts from the first page.
+
+For the immediately preceding database schema, run `alpha-garden init --upgrade-catalog-storage` to explicitly add the checkpoint table and continue initialization while preserving research history. Older databases need their existing schema upgrades first. New databases use `alpha-garden init` directly.
+
 ### 3. Build and open the console
 
 Before starting research, build the account's submitted-alpha and PnL baseline:

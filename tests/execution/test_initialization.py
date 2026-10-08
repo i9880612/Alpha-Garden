@@ -105,6 +105,22 @@ class FakeCatalogClient:
 
 
 class ProjectInitializationTests(unittest.TestCase):
+    def test_catalog_download_storage_upgrade_requires_explicit_option(self):
+        original = self._initialize(FakeCatalogClient())
+        with open_database(self.database_path) as connection:
+            connection.execute("DROP TABLE platform_field_download_pages")
+            saved = get_platform_catalog_sync(connection)
+        client = FakeCatalogClient(authentication_error=AssertionError("complete catalog should be reused"))
+        with self.assertRaisesRegex(ValueError, "database_schema_incompatible:platform_field_download_pages"):
+            self._initialize(client)
+        result = initialize_project(self.database_path, self.settings_path, self.environment_path,
+                                    upgrade_catalog_storage=True, client_factory=lambda _: client)
+        self.assertFalse(result.catalog_refreshed)
+        self.assertEqual(result.catalog, original.catalog)
+        with open_database(self.database_path) as connection:
+            self.assertEqual(get_platform_catalog_sync(connection), saved)
+            self.assertEqual(connection.execute("SELECT count(*) FROM platform_field_download_pages").fetchone()[0], 0)
+
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
