@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
@@ -11,6 +12,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from learning.evidence import build_learning_evidence
+from learning.action_effects import ExplicitSelfCorrelationEvidence
 from learning.parent_settings import build_parent_settings_evidence
 from persistence.backtests import (
     BacktestCheckRecord,
@@ -23,6 +25,57 @@ from worldquant.backtests import STANDARD_REGULAR_CHECK_NAMES
 
 
 class ParentSettingsEvidenceTests(unittest.TestCase):
+    def test_final_sc_results_replace_initial_pending_in_parent_risk(self):
+        parent = self._snapshot("parent", account_scope="group-account",
+            settings={"delay": 1}, checks={"SELF_CORRELATION": "PENDING"})
+        children = tuple(self._snapshot(f"child-{i}", account_scope="group-account",
+            settings={"delay": 1}, checks={"SELF_CORRELATION": "PENDING"}) for i in range(5))
+        snapshots = (parent, *children)
+        evidence = build_learning_evidence(snapshots)
+        checks = tuple(ExplicitSelfCorrelationEvidence(
+            snapshot.task.task_id, "FAIL" if i < 5 else "PASS",
+            "failed" if i < 5 else "passed", "2026-08-31T00:03:00+00:00",
+        ) for i, snapshot in enumerate(snapshots))
+        built = build_parent_settings_evidence(evidence,
+            tuple(self._mutation(parent, child) for child in children), (parent.task.task_id,),
+            explicit_self_correlations=checks).records[0]
+
+        self.assertEqual((built.sc_failed_count, built.sc_passed_count, built.sc_pending_count), (5, 1, 0))
+        self.assertTrue(built.sc_risk_available)
+        self.assertAlmostEqual(built.sc_smoothed_risk, 6 / 8)
+        self.assertTrue(all("SELF_CORRELATION" in record.pending_checks for record in evidence.records))
+
+    def test_latest_sc_observation_wins_and_older_checks_do_not_override_backtest(self):
+        parent = self._snapshot("parent", account_scope="group-account",
+            settings={"delay": 1}, checks={"SELF_CORRELATION": "FAIL"})
+        evidence = build_learning_evidence((parent,))
+        for status, state, observed, expected in (
+            ("PENDING", "pending", "2026-08-31T00:03:00+00:00", (0, 0, 1)),
+            ("PASS", "passed", "2026-08-31T00:03:00+00:00", (0, 1, 0)),
+            ("PASS", "passed", "2026-08-31T00:01:00+00:00", (1, 0, 0)),
+        ):
+            with self.subTest(status=status, observed=observed):
+                check = ExplicitSelfCorrelationEvidence(parent.task.task_id, status, state, observed)
+                record = build_parent_settings_evidence(evidence, (), (parent.task.task_id,),
+                    explicit_self_correlations=(check,)).records[0]
+                self.assertEqual((record.sc_failed_count, record.sc_passed_count, record.sc_pending_count), expected)
+                self.assertFalse(record.sc_risk_available)
+
+    def test_final_sc_risk_stays_within_parent_account_and_settings(self):
+        parent = self._snapshot("parent", account_scope="group-account",
+            settings={"delay": 1}, checks={"SELF_CORRELATION": "PENDING"})
+        child = self._snapshot("child", account_scope="group-account",
+            settings={"delay": 1}, checks={"SELF_CORRELATION": "PENDING"})
+        for changed_task in (replace(child.task, account_scope="other-account"),
+                             replace(child.task, settings_json='{"delay":0}')):
+            with self.subTest(task=changed_task.task_id, settings=changed_task.settings_json):
+                excluded = replace(child, task=changed_task)
+                record = build_parent_settings_evidence(build_learning_evidence((parent, excluded)),
+                    (self._mutation(parent, excluded),), (parent.task.task_id,),
+                    explicit_self_correlations=(ExplicitSelfCorrelationEvidence(
+                        child.task.task_id, "FAIL", "failed", "2026-08-31T00:03:00+00:00"),)).records[0]
+                self.assertEqual((record.child_count, record.sc_failed_count, record.sc_pending_count), (0, 0, 1))
+
     def test_counts_only_children_with_the_parent_account_and_complete_settings(
         self,
     ) -> None:

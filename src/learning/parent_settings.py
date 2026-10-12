@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterable
 
+from learning.action_effects import ExplicitSelfCorrelationEvidence
 from learning.evidence import LearningEvidenceRecord, LearningEvidenceSet
 from persistence.backtests import BacktestMutationRecord
 
@@ -50,6 +52,8 @@ def build_parent_settings_evidence(
     evidence: LearningEvidenceSet,
     mutations: Iterable[BacktestMutationRecord],
     parent_task_ids: Iterable[str],
+    *,
+    explicit_self_correlations: Iterable[ExplicitSelfCorrelationEvidence] = (),
 ) -> ParentSettingsEvidenceSet:
     if not isinstance(evidence, LearningEvidenceSet):
         raise ValueError("parent_settings_learning_evidence_invalid")
@@ -58,6 +62,13 @@ def build_parent_settings_evidence(
         raise ValueError("parent_settings_parent_id_invalid")
     if len(set(parent_ids)) != len(parent_ids):
         raise ValueError("parent_settings_parent_duplicated")
+    explicit_by_task = {}
+    for check in explicit_self_correlations:
+        if check.task_id in explicit_by_task:
+            raise ValueError("parent_settings_sc_task_duplicated")
+        if check.status not in {"PASS", "FAIL", "PENDING"}:
+            raise ValueError("parent_settings_sc_status_invalid")
+        explicit_by_task[check.task_id] = check
 
     records_by_task = {record.task_id: record for record in evidence.records}
     parents: dict[str, LearningEvidenceRecord] = {}
@@ -68,7 +79,7 @@ def build_parent_settings_evidence(
             raise ValueError("parent_settings_parent_result_missing")
         parents[parent_task_id] = parent
         counts = _EvidenceCounts()
-        _count_sc(counts, parent)
+        _count_sc(counts, parent, explicit_by_task.get(parent_task_id))
         counts_by_parent[parent_task_id] = counts
 
     child_ids: set[str] = set()
@@ -94,7 +105,7 @@ def build_parent_settings_evidence(
             counts.child_quality_failed_count += 1
         else:
             counts.child_quality_pending_count += 1
-        _count_sc(counts, child)
+        _count_sc(counts, child, explicit_by_task.get(child.task_id))
 
     built: list[ParentSettingsEvidence] = []
     for parent_task_id in sorted(parents):
@@ -134,8 +145,19 @@ def _child_quality(record: LearningEvidenceRecord) -> str:
 def _count_sc(
     counts: _EvidenceCounts,
     record: LearningEvidenceRecord,
+    explicit_sc: ExplicitSelfCorrelationEvidence | None,
 ) -> None:
-    if _SELF_CORRELATION in record.passed_checks:
+    # Current check observations supersede simulation checks, including pending
+    # observations and request errors. They do not rewrite the original result.
+    if (explicit_sc is not None
+            and datetime.fromisoformat(explicit_sc.observed_at) >= datetime.fromisoformat(record.finished_at)):
+        if explicit_sc.status == "PASS":
+            counts.sc_passed_count += 1
+        elif explicit_sc.status == "FAIL":
+            counts.sc_failed_count += 1
+        else:
+            counts.sc_pending_count += 1
+    elif _SELF_CORRELATION in record.passed_checks:
         counts.sc_passed_count += 1
     elif _SELF_CORRELATION in record.failed_checks:
         counts.sc_failed_count += 1

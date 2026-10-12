@@ -265,10 +265,14 @@ def plan_automated_cycle(
                 allocation_policy.direction_validation_percent,
             ),
         )
+        explicit_checks = load_action_check_evidence(
+            connection, account_scope=run.account_scope, evidence_cutoff=evidence_cutoff,
+        )
         parent_evidence = build_parent_settings_evidence(
             evidence,
             planning_mutations,
             parent_task_ids,
+            explicit_self_correlations=explicit_checks,
         )
         mutation_evidence = build_mutation_learning_evidence(
             evidence,
@@ -305,9 +309,6 @@ def plan_automated_cycle(
         )
         sc_by_parent = {item.parent_task_id: item.correlation for item in sc_references}
         optimization_targets = include_self_correlation_targets(optimization_targets, evidence, sc_references)
-        explicit_checks = load_action_check_evidence(
-            connection, account_scope=run.account_scope, evidence_cutoff=evidence_cutoff,
-        )
         explicit_by_task = {item.task_id: item for item in explicit_checks}
         optimization_targets = include_quality_targets(optimization_targets, frozenset(
             record.task_id for record in evidence.records if record.task_id in qualified_parent_task_ids

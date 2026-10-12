@@ -92,6 +92,43 @@ def _checks(statuses: dict[str, str]) -> tuple[BacktestCheck, ...]:
 
 
 class AutomatedCyclePlanningTests(unittest.TestCase):
+    def test_ordinary_cycle_risk_uses_final_checks_and_late_updates_preserve_frozen_plan(self):
+        from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
+
+        parent = self._signal_seed("rank(ts_rank(close,22)+ts_zscore(open,66))", sc_status="PENDING")
+        children = tuple(self._completed_backtest(f"rank(ts_rank(close,{window}))",
+            sharpe=0.9, fitness=0.5, sharpe_status="FAIL", fitness_status="FAIL", time_offset=i + 3)
+            for i, window in enumerate((5, 22, 66, 120)))
+        payload = canonical_submission_json({"is": {"checks": [
+            {"name": "SELF_CORRELATION", "result": "FAIL"}]}})
+        with open_database(self.database_path) as connection:
+            for child in children:
+                create_backtest_mutation(connection, BacktestMutationRecord(
+                    child, parent, "field_swap", "formula.arguments[0]", "open", "close"))
+            for child in (parent, *children):
+                save_submission_check(connection, SubmissionCheckRecord(
+                    child, "2026-08-30T00:08:00+08:00", payload, None))
+        run_id = self._start_run(generation_count=15, backtest_count=10, max_backtests=20)
+        plan = plan_automated_cycle(self.database_path, run_id=run_id,
+                                   created_at="2026-08-30T00:09:00+08:00")
+
+        allocation = plan.planned_source_allocation
+        self.assertTrue(all(item.parent_task_id == parent for item in allocation.signal_improvements))
+        self.assertEqual({item.sc_risk_state for item in allocation.signal_improvements}, {"high"})
+        self.assertEqual(allocation.minimum_exploration_count, 3)
+        self.assertGreaterEqual(plan.exploration_backtest_count, 3)
+        with open_database(self.database_path) as connection:
+            for child in children:
+                self.assertIn("PENDING", [check.status for check in get_backtest_task(connection, child).result.checks
+                                         if check.name == "SELF_CORRELATION"])
+                save_submission_check(connection, SubmissionCheckRecord(
+                    child, "2026-08-30T00:10:00+08:00", None, "request_error", 2))
+        recovered = plan_automated_cycle(self.database_path, run_id=run_id,
+                                        created_at="2026-08-30T00:11:00+08:00")
+        self.assertTrue(recovered.recovered)
+        self.assertEqual([item.task.task_id for item in recovered.backtests],
+                         [item.task.task_id for item in plan.backtests])
+
     def test_action_learning_uses_independent_checks_with_account_and_time_boundaries(self):
         from datetime import datetime
         from execution.self_correlation import load_action_check_evidence
