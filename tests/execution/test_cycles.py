@@ -263,8 +263,16 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         self.assertEqual(recovered.backtests, plan.backtests)
         self._complete_plan(plan, observed_at="2026-08-30T00:06:00+08:00")
         from execution.driver import advance_automated_run
-        result = advance_automated_run(self.database_path, Mock(), run_id,
-                                      observed_at="2026-08-30T00:07:00+08:00")
+        from tests.learning.test_seed_correlation import independent_series
+        from worldquant.pnl import PnlObservation
+        client = Mock()
+        client.fetch_pnl.side_effect = lambda *, platform_alpha_id: PnlObservation(
+            independent_series(platform_alpha_id).points)
+        for _ in range(len(plan.backtests) + 1):
+            result = advance_automated_run(self.database_path, client, run_id,
+                                          observed_at="2026-08-30T00:07:00+08:00")
+        self.assertEqual({call.kwargs["platform_alpha_id"] for call in client.fetch_pnl.call_args_list},
+                         {f"alpha-{item.task.task_id}" for item in plan.backtests})
         self.assertEqual(result.run.status, "completed")
         self.assertEqual(result.run.current_cycle, 1)
         with open_database(self.database_path) as connection:

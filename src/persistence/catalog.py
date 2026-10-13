@@ -4,6 +4,7 @@ import json
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 
@@ -292,6 +293,25 @@ def get_platform_catalog_sync(
     )
     _validate_sync(record)
     return record
+
+
+def replace_platform_operators(
+    connection: sqlite3.Connection, *, account_scope: str,
+    records: Sequence[OperatorCatalogRecord],
+) -> None:
+    """Replace one complete operator observation; retain field evidence and its age."""
+    if not connection.in_transaction:
+        raise ValueError("operator_refresh_requires_transaction")
+    sync = get_platform_catalog_sync(connection)
+    if sync is None or sync.account_scope != account_scope:
+        raise ValueError("operator_refresh_account_scope_mismatch")
+    timestamps = {record.synced_at for record in records}
+    if (len(timestamps) != 1
+            or datetime.fromisoformat(next(iter(timestamps))) < datetime.fromisoformat(sync.synced_at)):
+        raise ValueError("operator_refresh_observation_invalid")
+    replace_operator_catalog(connection, records)
+    connection.execute("UPDATE platform_catalog_syncs SET operator_count=? WHERE singleton_id=1",
+                       (len(records),))
 
 
 def replace_field_catalog(

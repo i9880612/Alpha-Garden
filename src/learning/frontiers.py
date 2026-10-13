@@ -36,6 +36,7 @@ class SignalFrontier:
     qualified_task_ids: tuple[str, ...]
     qualified_parent_attempt_count: int
     qualified_parent_task_id: str | None
+    comparable_task_ids: tuple[str, ...] = ()
 
     @property
     def qualified(self) -> bool:
@@ -198,6 +199,7 @@ def build_signal_frontiers(
                 qualified_task_ids=qualified_task_ids,
                 qualified_parent_attempt_count=qualified_parent_attempt_count,
                 qualified_parent_task_id=qualified_parent.task_id if qualified_records else None,
+                comparable_task_ids=tuple(record.task_id for record in lineage),
             )
         )
     return SignalFrontierSet(records=tuple(built))

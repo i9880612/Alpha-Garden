@@ -23,6 +23,7 @@ from execution.cycle_candidates import (
 )
 from execution.seeds import load_signal_frontiers
 from execution.quality_research import load_quality_budgets
+from execution.signal_duplicates import load_ordinary_signal_duplicates
 from execution.self_correlation import load_self_correlation_references, load_action_check_evidence
 from execution.cycle_schedule import scheduled_cycle_number
 from execution.runs import remaining_automated_run_backtests
@@ -54,6 +55,7 @@ from learning.quality_proximity import (
     build_parent_improvement_stages,
 )
 from learning.seed_correlation import submitted_seed
+from learning.signal_duplicates import SignalDuplicate
 from persistence.backtests import (
     backtest_was_cancelled_before_submission,
     BacktestSnapshot,
@@ -101,6 +103,7 @@ class AutomatedCyclePlan:
     local_polishing_backtest_count: int | None
     backtests: tuple[BacktestSnapshot, ...]
     recovered: bool
+    signal_duplicates: tuple[SignalDuplicate, ...] = ()
 
     @property
     def direction_validation_backtest_count(self) -> int | None:
@@ -290,6 +293,24 @@ def plan_automated_cycle(
             optimization_targets=optimization_targets,
             qualified_parent_task_ids=qualified_parent_task_ids,
         )
+        signal_duplicates = ()
+        if not run.optimization_only and eligible_parent_task_ids:
+            comparable_ids = {task for frontier in frontiers.records for task in frontier.comparable_task_ids}
+            active_settings = {completed_by_task_id[task].task.settings_json for task in eligible_parent_task_ids}
+            # Keep historical/exhausted representatives in the comparison pool;
+            # otherwise equivalent roots could restart their research allowance.
+            signal_duplicates = load_ordinary_signal_duplicates(
+                connection, tuple(snapshot for snapshot in completed
+                    if snapshot.task.task_id in comparable_ids and snapshot.task.settings_json in active_settings),
+                account_scope=run.account_scope, observed_at=evidence_cutoff,
+                explicit_checks=explicit_checks, submitted_alphas=submitted_alphas,
+            )
+            signal_duplicates = tuple(record for record in signal_duplicates
+                                      if record.task_id in eligible_parent_task_ids)
+        duplicate_task_ids = {record.task_id for record in signal_duplicates}
+        eligible_parent_task_ids = tuple(task for task in eligible_parent_task_ids if task not in duplicate_task_ids)
+        if signal_duplicates:
+            phase(cycle_number, 1, f"收益近重复：本批跳过 {len(signal_duplicates)} 个父代，保留原谱系与额度记录。")
         improvement_stages = build_parent_improvement_stages(
             evidence,
             optimization_targets,
@@ -338,6 +359,8 @@ def plan_automated_cycle(
         signal_source_items: list[SignalImprovementSource] = []
         for frontier in frontiers.records:
             for branch in frontier.branches:
+                if branch.task_id in duplicate_task_ids:
+                    continue
                 pool = pools_by_parent.get(branch.task_id)
                 stage = pool.stage if pool is not None else STRUCTURAL_EVOLUTION_STAGE
                 families = IMPROVEMENT_FAMILIES_BY_STAGE[stage]
@@ -513,6 +536,7 @@ def plan_automated_cycle(
             )
         ),
         recovered=False,
+        signal_duplicates=signal_duplicates,
     )
 
 

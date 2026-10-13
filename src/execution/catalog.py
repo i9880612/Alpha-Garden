@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections import defaultdict
 from collections.abc import Mapping
+from datetime import datetime
 
 from generation.catalog import (
     CatalogContext,
@@ -49,7 +50,9 @@ def load_generation_catalog(
         raise ValueError("generation_catalog_operator_count_mismatch")
     if any(record.synced_at != sync.synced_at for record in field_records):
         raise ValueError("generation_catalog_sync_identity_mismatch")
-    if any(record.synced_at != sync.synced_at for record in operator_records):
+    operator_times = {record.synced_at for record in operator_records}
+    if (len(operator_times) != 1
+            or datetime.fromisoformat(next(iter(operator_times))) < datetime.fromisoformat(sync.synced_at)):
         raise ValueError("generation_catalog_sync_identity_mismatch")
     roles_by_operator: dict[str, list[str]] = defaultdict(list)
     for record in operator_role_records:

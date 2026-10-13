@@ -87,6 +87,10 @@ def test_real_sc_launch_drains_old_pending_slots_under_their_original_deadline(r
         cycles=3, self_correlation_parent_task_id=research.parent_id), max_in_flight_backtests=2)
     time = FakeTime("2026-08-30T00:04:10+08:00")
     client = LaunchClient()
+    from persistence.catalog import list_operator_catalog
+    with open_database(f.database_path) as connection:
+        client.fetch_operators = Mock(return_value=tuple(SimpleNamespace(name=r.operator_name, scope=r.scope)
+            for r in list_operator_catalog(connection)))
     client.poll_backtest = Mock(return_value=BacktestPollObservation("pending", None, "PENDING", None))
     first_submission = client.submit_backtest
     def submit(**arguments):
@@ -101,6 +105,7 @@ def test_real_sc_launch_drains_old_pending_slots_under_their_original_deadline(r
         launch_automated_run(f.database_path, f.policy_path, environment, limits=limits,
                             clock=time.now, waiter=wait, client_factory=lambda _: client)
     assert client.poll_backtest.call_count >= 2
+    client.fetch_operators.assert_called_once()
     assert client.submit_backtest.call_count == 2
     with open_database(f.database_path) as connection:
         assert get_automated_run(connection, old_id).status == "failed"
@@ -161,6 +166,10 @@ def test_sc_deferred_checks_keep_owner_scope_and_stop_after_six_attempts(researc
     if response != "503":
         fetch = Mock(return_value=FormalCheckObservation(low_quality_check("PENDING"), None))
     client = SimpleNamespace(authenticated=True, fetch_formal_submission_check=fetch)
+    from persistence.catalog import list_operator_catalog
+    with open_database(database) as connection:
+        client.fetch_operators = Mock(return_value=tuple(SimpleNamespace(name=r.operator_name, scope=r.scope)
+            for r in list_operator_catalog(connection)))
     time = FakeTime("2026-08-30T00:07:00+08:00")
     for _ in range(3):
         assert check_completed_backtest(database, client, task_id, observed_at=time.now().isoformat())

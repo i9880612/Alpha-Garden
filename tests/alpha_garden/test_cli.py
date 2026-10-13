@@ -25,6 +25,17 @@ from worldquant.client import WorldQuantRequestError
 
 
 class CommandLineTests(unittest.TestCase):
+    def test_sync_operators_is_explicit_and_does_not_start_research(self):
+        from execution.catalog_sync import OperatorRefreshResult
+        output = io.StringIO()
+        with patch("execution.catalog_sync.refresh_operator_catalog",
+                   return_value=OperatorRefreshResult(66, (), ("vector_neut",), "2026-10-13T00:00:00+00:00")) as refresh, \
+             patch("alpha_garden.cli.launch_automated_run") as launch, redirect_stdout(output):
+            self.assertEqual(run(["sync-operators"]), 0)
+        refresh.assert_called_once_with(Path("data/alpha_garden.sqlite3"), Path(".env"))
+        launch.assert_not_called()
+        self.assertIn("vector_neut", output.getvalue())
+
     def test_storage_reads_without_credentials_and_refuses_real_pruning(self):
         from persistence.database import open_database
         from persistence.schema import initialize_database_schema

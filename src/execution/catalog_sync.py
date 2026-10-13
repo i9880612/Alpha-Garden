@@ -17,19 +17,25 @@ from persistence.catalog import (
     OperatorCatalogRecord,
     PlatformCatalogSyncRecord,
     initialize_catalog_schema,
+    get_platform_catalog_sync,
+    list_operator_catalog,
     list_operator_outputs,
     list_window_catalog,
     replace_platform_catalog,
+    replace_platform_operators,
 )
 from persistence.database import open_database
+from persistence.backtests import get_backtest_task
 from persistence.catalog_downloads import (
     CatalogDownloadScope, CatalogFieldPage, list_catalog_field_pages,
     save_catalog_field_page, clear_catalog_field_pages,
 )
 from persistence.runs import (
     list_active_automated_runs,
+    list_automated_run_backtests,
     list_submission_reconciliation_runs,
 )
+from persistence.submissions import automated_run_has_unresolved_formal_submission
 from selection.settings import load_backtest_settings_policy
 from worldquant.catalog import CatalogContext, DataField, Operator
 from worldquant.client import WorldQuantClient, WorldQuantRequestError
@@ -99,6 +105,52 @@ class CatalogRefreshResult:
     operator_count: int
     catalog_fingerprint: str
     synced_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorRefreshResult:
+    operator_count: int
+    added: tuple[str, ...]
+    removed: tuple[str, ...]
+    observed_at: str
+
+
+def refresh_operator_catalog(
+    database_path: str | Path, environment_path: str | Path, *,
+    refresh_policy: CatalogRefreshPolicy | None = None,
+    clock: Clock | None = None, waiter: Waiter | None = None,
+    client_factory: ClientFactory | None = None,
+) -> OperatorRefreshResult:
+    """Refresh operators atomically without downloading or redating stored fields."""
+    path = Path(database_path)
+    if not path.is_file():
+        raise ValueError("catalog_database_missing")
+    settings = load_worldquant_connection_settings(environment_path)
+    policy = refresh_policy or CatalogRefreshPolicy()
+    if not isinstance(policy, CatalogRefreshPolicy):
+        raise ValueError("catalog_refresh_policy_invalid")
+    with exclusive_run_process(path):
+        with open_database(path) as connection:
+            require_catalog_refresh_allowed(connection)
+            sync = get_platform_catalog_sync(connection)
+            if sync is None:
+                raise ValueError("generation_catalog_sync_missing")
+            load_generation_catalog(connection, sync.context, account_scope=settings.account_scope)
+            previous = {record.operator_name for record in list_operator_catalog(connection)}
+        client = (client_factory or _default_client_factory)(settings)
+        wait = waiter or time.sleep
+        _with_retry(client.authenticate, policy=policy, waiter=wait)
+        operators = _with_retry(client.fetch_operators, policy=policy, waiter=wait)
+        observed_at = _aware_time((clock or _utc_now)()).isoformat()
+        records = tuple(_operator_record(operator, synced_at=observed_at) for operator in operators)
+        with open_database(path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            require_catalog_refresh_allowed(connection)
+            replace_platform_operators(connection, account_scope=settings.account_scope, records=records)
+            load_generation_catalog(connection, sync.context, account_scope=settings.account_scope)
+    current = {record.operator_name for record in records}
+    return OperatorRefreshResult(len(records), tuple(sorted(current - previous)),
+                                 tuple(sorted(previous - current)), observed_at)
 
 
 def refresh_generation_catalog(
@@ -333,10 +385,15 @@ def _operator_record(
 
 
 def require_catalog_refresh_allowed(connection) -> None:
-    if list_active_automated_runs(connection) or list_submission_reconciliation_runs(
-        connection
-    ):
+    if list_active_automated_runs(connection):
         raise ValueError("catalog_refresh_bound_run_exists")
+    for run in list_submission_reconciliation_runs(connection):
+        if automated_run_has_unresolved_formal_submission(connection, run.run_id) or any(
+            get_backtest_task(connection, link.task_id).task.status
+            in {"created", "pending", "submission_unknown"}
+            for link in list_automated_run_backtests(connection, run.run_id)
+        ):
+            raise ValueError("catalog_refresh_bound_run_exists")
 
 
 def _require_local_generation_semantics(connection) -> None:

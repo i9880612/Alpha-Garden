@@ -4,6 +4,8 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
+from unittest.mock import Mock
 from datetime import datetime
 from pathlib import Path
 
@@ -12,9 +14,12 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from execution.catalog import load_generation_catalog
+from execution.backtest_batches import AutomatedCandidateBacktest, prepare_automated_candidate_backtest_batch
+from execution.backtests import record_submission_unknown, record_submission_accepted, fail_backtest_task
 from execution.catalog_sync import (
     CatalogRefreshPolicy,
     refresh_generation_catalog,
+    refresh_operator_catalog,
 )
 from execution.runs import (
     AutomatedRunLimits,
@@ -45,7 +50,11 @@ from persistence.catalog import (
 from persistence.database import open_database
 from persistence.catalog_downloads import initialize_catalog_download_schema
 from persistence.runs import initialize_run_schema
+from persistence.runs import get_automated_run
 from persistence.submissions import initialize_submission_schema
+from generation.candidate import exploration_candidate
+from generation.parser import parse_formula
+from worldquant.backtests import BacktestSettings
 from worldquant.catalog import DataField, DataFieldPage, Operator
 from worldquant.client import WorldQuantRequestError
 
@@ -154,6 +163,53 @@ class CatalogRefreshTests(unittest.TestCase):
                 (OperatorOutputRecord("rank", "signal"),),
             )
             self._write_old_catalog(connection)
+
+    def test_operator_refresh_preserves_fields_their_age_and_research_records(self):
+        with open_database(self.database_path) as connection:
+            fields = list_field_catalog(connection, self.context)
+            previous = load_generation_catalog(connection, self.context, account_scope="group-account")
+            table_counts = {r[0]: connection.execute('SELECT count(*) FROM "'+r[0]+'"').fetchone()[0]
+                            for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                            if r[0] not in {"platform_operators", "platform_catalog_syncs"}}
+        client = FakeCatalogClient({}, [(self._operator("zscore"), self._operator("new_operator"))])
+        result = refresh_operator_catalog(self.database_path, self.environment_path,
+            clock=lambda: datetime.fromisoformat("2026-09-02T10:00:00+08:00"),
+            client_factory=lambda _: client)
+        self.assertEqual(client.field_calls, [])
+        self.assertEqual((result.added, result.removed), (("new_operator", "zscore"), ("rank",)))
+        with open_database(self.database_path) as connection:
+            self.assertEqual(list_field_catalog(connection, self.context), fields)
+            self.assertEqual(get_platform_catalog_sync(connection).synced_at, fields[0].synced_at)
+            current = load_generation_catalog(connection, self.context, account_scope="group-account")
+            self.assertNotEqual(current.fingerprint, previous.fingerprint)
+            self.assertIsNone(current.operator("rank"))
+            self.assertEqual({r.synced_at for r in list_operator_catalog(connection)}, {result.observed_at})
+            for table, count in table_counts.items():
+                self.assertEqual(connection.execute('SELECT count(*) FROM "'+table+'"').fetchone()[0], count)
+
+    def test_operator_refresh_failure_keeps_previous_catalog_and_retry_is_bounded(self):
+        error = WorldQuantRequestError("temporary", status_code=503, retryable=True, outcome_unknown=False)
+        invalid = replace(self._operator("rank"), scope=("COMBO",))
+        for results, expected, calls in (([error, error], WorldQuantRequestError, 2),
+                                         ([(invalid,)], ValueError, 1)):
+            with self.subTest(results=expected):
+                client = FakeCatalogClient({}, results)
+                with self.assertRaises(expected):
+                    refresh_operator_catalog(self.database_path, self.environment_path,
+                        refresh_policy=CatalogRefreshPolicy(max_attempts=2), waiter=lambda _: None,
+                        client_factory=lambda _: client)
+                self.assertEqual(client.operator_calls, calls)
+                self.assertEqual(client.field_calls, [])
+                self._assert_old_catalog_preserved()
+
+    def test_operator_refresh_account_mismatch_stops_before_authentication(self):
+        self.environment_path.write_text("WQB_ACCOUNT_SCOPE=another-account\n"
+            "WQB_BASE_URL=https://api.worldquantbrain.com\nWQB_SESSION_TOKEN=synthetic\n", encoding="utf-8")
+        factory = Mock()
+        with self.assertRaisesRegex(ValueError, "account_scope_mismatch"):
+            refresh_operator_catalog(self.database_path, self.environment_path, client_factory=factory)
+        factory.assert_not_called()
+        self._assert_old_catalog_preserved()
 
     def test_refreshes_all_pages_then_atomically_switches_platform_catalog(self) -> None:
         client = FakeCatalogClient(
@@ -465,6 +521,17 @@ class CatalogRefreshTests(unittest.TestCase):
             prepared.run_id,
             started_at="2026-09-02T09:01:00+08:00",
         )
+        tasks = prepare_automated_candidate_backtest_batch(
+            self.database_path, run_id=prepared.run_id,
+            candidates=(AutomatedCandidateBacktest(
+                exploration_candidate(parse_formula("rank(old_field)").expression),
+                BacktestSettings("EQUITY", "USA", "TOP3000", 1, 4, "SECTOR", .08,
+                                 "ON", "VERIFY", "OFF", "FASTEXPR", False, "OFF", "OFF"),
+            ),), created_at="2026-09-02T09:01:10+08:00",
+        )
+        task_id = tasks[0].task.task_id
+        with open_database(self.database_path) as connection:
+            record_submission_unknown(connection, task_id, observed_at="2026-09-02T09:01:20+08:00")
         fail_automated_run(
             self.database_path,
             prepared.run_id,
@@ -483,6 +550,25 @@ class CatalogRefreshTests(unittest.TestCase):
             )
 
         self._assert_old_catalog_preserved()
+
+        with open_database(self.database_path) as connection:
+            record_submission_accepted(connection, task_id,
+                remote_id="https://api.worldquantbrain.com/simulations/synthetic",
+                observed_at="2026-09-02T09:03:00+08:00")
+        with self.assertRaisesRegex(ValueError, "catalog_refresh_bound_run_exists"):
+            refresh_operator_catalog(self.database_path, self.environment_path,
+                client_factory=lambda settings: self.fail("pending tasks must still block refresh"))
+
+        with open_database(self.database_path) as connection:
+            fail_backtest_task(connection, task_id, failure_code="platform_error",
+                failure_message="synthetic failure", observed_at="2026-09-02T09:04:00+08:00")
+            historical_run = get_automated_run(connection, prepared.run_id)
+        client = FakeCatalogClient({}, [(self._operator("rank"),)])
+        refresh_operator_catalog(self.database_path, self.environment_path,
+            client_factory=lambda settings: client)
+        self.assertEqual(client.operator_calls, 1)
+        with open_database(self.database_path) as connection:
+            self.assertEqual(get_automated_run(connection, prepared.run_id), historical_run)
 
     def _write_old_catalog(self, connection) -> None:
         synced_at = "2026-08-29T00:00:00+08:00"

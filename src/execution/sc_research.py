@@ -12,6 +12,7 @@ from execution.cycle_candidates import build_improvement_candidate_pools, suppor
 from execution.self_correlation import load_latest_submission_checks, load_self_correlation_references
 from generation.candidate import CandidateChange, FormulaCandidate, mutation_candidate
 from generation.parser import parse_formula
+from generation.formula import analyze_formula
 from generation.self_correlation import SELF_CORRELATION_RESEARCH_FAMILIES
 from learning.frontiers import PARENT_ATTEMPT_BUDGET
 from learning.quality_proximity import ParentImprovementStage, ParentImprovementStageSet, QUALIFIED_EVOLUTION_STAGE
@@ -20,6 +21,7 @@ from persistence.backtests import (
     BACKTEST_ACTIVE_STATUSES, backtest_was_cancelled_before_submission,
     get_backtest_task, list_backtest_mutations, list_backtest_tasks,
 )
+from persistence.runs import list_automated_run_backtests
 from persistence.catalog import FieldCatalogContext
 from persistence.seeds import list_signal_seeds
 from persistence.submissions import list_platform_submitted_alphas
@@ -134,6 +136,8 @@ def build_self_correlation_research_plan(
     # present SC target or manufacture old conflict bindings.
     catalog = load_generation_catalog(connection, FieldCatalogContext(
         policy.instrument_type, policy.region, policy.universe, policy.delay), account_scope=account_scope)
+    available_operators = frozenset(operator.name for operator in catalog.operators)
+    require_sc_operators((parent.task.formula,), available_operators)
     fields = tuple(f.field_id for f in catalog.fields if f.field_type == "MATRIX")
     research_fields = tuple(f.field_id for f in catalog.fields if f.field_type in {"MATRIX", "VECTOR"})
     groups = tuple(f.field_id for f in catalog.fields if f.field_type == "GROUP")
@@ -156,12 +160,40 @@ def build_self_correlation_research_plan(
             raise ValueError(f"sc_research_candidates_insufficient:{family}")
         chosen.append(available[:2])
     candidates = tuple(chosen[family][trial] for trial in range(2) for family in range(3))
+    require_sc_operators(tuple(candidate.formula for candidate in candidates), available_operators)
     return SelfCorrelationResearchPlan(
         parent_task_id, root_id, account_scope, parent.task.settings_json, catalog.fingerprint,
         check.observed_at, remaining, parent.result.sharpe, parent.result.fitness,
         reference.correlation, reference.required_sharpe,
         tuple(b.reference_id for b in reference.blockers), candidates,
     )
+
+
+def require_sc_operators(formulas: tuple[str, ...], available: frozenset[str]) -> None:
+    # Infix/prefix syntax is parsed locally; only named calls require a catalog entry.
+    required = {name for formula in formulas
+                for name in analyze_formula(parse_formula(formula).expression).operator_names
+                if name.isidentifier()}
+    missing = required - available
+    if missing:
+        raise ValueError("sc_research_operator_unavailable:" + ",".join(sorted(missing)))
+
+
+def remaining_sc_formulas(connection, run) -> tuple[str, ...]:
+    """Include the parent and every future trial; already sent work needs collection only."""
+    plan = SelfCorrelationResearchPlan.from_json(run.self_correlation_plan_json)
+    sent_or_terminal = set()
+    for link in list_automated_run_backtests(connection, run.run_id):
+        snapshot = get_backtest_task(connection, link.task_id)
+        if snapshot.task.submission_started_at is not None or snapshot.task.status in {"completed", "failed"}:
+            sent_or_terminal.add(snapshot.task.formula)
+    pending = tuple(candidate.formula for candidate in plan.candidates if candidate.formula not in sent_or_terminal)
+    if not pending:
+        return ()
+    parent = get_backtest_task(connection, plan.parent_task_id)
+    if parent is None:
+        raise ValueError("sc_research_parent_result_missing")
+    return (parent.task.formula, *pending)
 
 
 def preview_self_correlation_research_plan(

@@ -47,6 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
     sync = commands.add_parser("sync-submitted", help="全量读取已提交公式和 PnL，建立同账号 SC 基线；不导入种子。")
     sync.add_argument("--database", type=Path, default=Path("data/alpha_garden.sqlite3"))
     sync.add_argument("--env", type=Path, default=Path(".env"))
+    operators = commands.add_parser("sync-operators", help="更新当前账号算子目录，保留字段及其采集时间；不启动回测。")
+    operators.add_argument("--database", type=Path, default=Path("data/alpha_garden.sqlite3"))
+    operators.add_argument("--env", type=Path, default=Path(".env"))
     web = commands.add_parser("web", help="启动本机网页控制台和接口；不会自动运行或提交。")
     web.add_argument("--port", type=int, default=8787)
     web.add_argument("--read-only", action="store_true", help="仅查看本地数据，禁用运行和提交操作。")
@@ -228,6 +231,21 @@ def run(argv: Sequence[str] | None = None) -> int:
         return 0
     if arguments.command == "storage":
         return _storage(arguments)
+    if arguments.command == "sync-operators":
+        from execution.catalog_sync import refresh_operator_catalog
+        try:
+            result = refresh_operator_catalog(arguments.database, arguments.env)
+        except WorldQuantRequestError as exc:
+            print(f"算子同步未完成：{exc.code}；HTTP {exc.status_code}。原目录保留。", file=sys.stderr)
+            return 1
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            print(f"算子同步未完成：{exc}。原目录保留。", file=sys.stderr)
+            return 1
+        print(f"算子同步完成：{result.operator_count} 个，新增 {len(result.added)} 个，移除 {len(result.removed)} 个。")
+        if result.removed:
+            print("已移除：" + ", ".join(result.removed))
+        print("字段与历史研究记录保留，未启动回测。")
+        return 0
     if arguments.command == "sync-submitted":
         try:
             with run_progress_console():

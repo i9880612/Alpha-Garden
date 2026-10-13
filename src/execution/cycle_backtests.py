@@ -118,7 +118,8 @@ def advance_automated_cycle_backtests(
             database_path, client, account_scope=run.account_scope, observed_at=observed_at,
             candidate_task_ids=tuple(s.task.task_id for s in snapshots if s.task.status == "completed"),
             admit_seeds=not run.optimization_only,
-            research_task_ids=tuple(s.task.task_id for s in snapshots) if sc_research else None,
+            research_task_ids=(tuple(s.task.task_id for s in snapshots)
+                               if sc_research or run.optimization_only else None),
         )
         if seed_delay is not None:
             return _advance_result(

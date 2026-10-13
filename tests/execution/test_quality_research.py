@@ -92,3 +92,40 @@ def test_automatic_planning_and_resume_cannot_renew_the_lineage_allowance(resear
         # Historical optimization links identify quality attempts even without a purpose row.
         connection.execute("DELETE FROM quality_research_tasks WHERE task_id=?", (first.backtests[0].task.task_id,))
         assert load_quality_budgets(connection, (parent,))[parent.task.task_id] == budget
+
+
+def test_optimization_batch_collects_its_own_curves_including_failed_quality(researcher):
+    from unittest.mock import Mock
+    from execution.cycles import plan_automated_cycle
+    from execution.cycle_backtests import advance_automated_cycle_backtests
+    from persistence.submissions import list_platform_submitted_alphas
+    from tests.learning.test_seed_correlation import independent_series
+    from worldquant.pnl import PnlObservation
+
+    researcher._optimization_parent()
+    run_id = researcher._start_run(optimization_only=True)
+    plan = plan_automated_cycle(researcher.database_path, run_id=run_id,
+                               created_at="2026-08-30T00:04:00+08:00")
+    with open_database(researcher.database_path) as connection:
+        candidates = []
+        for index, item in enumerate(plan.backtests):
+            record_submission_accepted(connection, item.task.task_id,
+                remote_id="sim-" + item.task.task_id, observed_at="2026-09-01T00:01:00+00:00")
+            candidates.append(complete_candidate(connection, item, qualified=index == 0))
+        # The older qualified parent is deliberately uncaptured too.
+        connection.execute("DELETE FROM platform_pnl_series")
+        expected = {s.task.platform_alpha_id for s in candidates} | {
+            r.platform_alpha_id for r in list_platform_submitted_alphas(connection,
+                                                                       account_scope="group-account")}
+    client = Mock()
+    def fetch(*, platform_alpha_id):
+        assert platform_alpha_id in expected, "unrelated historical backfill"
+        return PnlObservation(independent_series(platform_alpha_id).points)
+    client.fetch_pnl.side_effect = fetch
+    for _ in range(len(expected) + 1):
+        result = advance_automated_cycle_backtests(researcher.database_path, client, run_id,
+            observed_at="2026-09-02T00:00:00+00:00")
+    assert result.action == "cycle_terminal"
+    assert {call.kwargs["platform_alpha_id"] for call in client.fetch_pnl.call_args_list} == expected
+    client.submit_backtest.assert_not_called()
+    client.submit_formal_alpha.assert_not_called()

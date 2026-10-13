@@ -31,6 +31,7 @@ from execution.runs import (
     automated_run_has_hard_stop_evidence,
     can_resume_independent_backtests,
     clear_automated_request_failures,
+    fail_automated_run,
     submission_rate_limited,
 )
 from execution.runs import resume_automated_run_after_submission_reconciliation
@@ -47,6 +48,7 @@ from persistence.submissions import (
     list_formal_submission_attempts,
 )
 from worldquant.client import WorldQuantClient, WorldQuantRequestError
+from worldquant.catalog import WorldQuantCatalogProtocolError
 
 
 Clock = Callable[[], datetime]
@@ -88,6 +90,8 @@ def run_automated_run(
     step_count = 0
     platform_request_count = 0
     allow_independent_resume = initial_run.status == "failed"
+    sc_operators_checked = False
+    sc_operator_rejection = False
     while True:
         observed = _aware_time(current_time())
         run = _load_run(database_path, run_id)
@@ -168,7 +172,7 @@ def run_automated_run(
             if backtest_reconciliation_required:
                 with open_database(database_path) as connection:
                     independent_work = can_resume_independent_backtests(connection, run)
-                if allow_independent_resume and independent_work:
+                if allow_independent_resume and independent_work and not sc_operator_rejection:
                     allow_independent_resume = False
                     resume_automated_run_after_submission_reconciliation(
                         database_path, run.run_id
@@ -200,14 +204,14 @@ def run_automated_run(
             ):
                 with open_database(database_path) as connection:
                     hard_stop = automated_run_has_hard_stop_evidence(connection, run)
-                if not hard_stop:
+                if not hard_stop and not sc_operator_rejection:
                     resume_automated_run_after_submission_reconciliation(
                         database_path,
                         run.run_id,
                     )
                     step_count += 1
                     continue
-            if initial_run.status != "failed":
+            if initial_run.status != "failed" and not sc_operator_rejection:
                 return _completion(database_path, run, step_count=step_count,
                                    platform_request_count=platform_request_count,
                                    authentication_performed=authentication_performed)
@@ -298,6 +302,38 @@ def run_automated_run(
             if not submission_rate_limited(run):
                 clear_automated_request_failures(database_path, run.run_id)
             continue
+
+        if run.status == "running" and run.self_correlation_plan_json is not None and not sc_operators_checked:
+            from execution.sc_research import remaining_sc_formulas, require_sc_operators
+            with open_database(database_path) as connection:
+                formulas = remaining_sc_formulas(connection, run)
+            try:
+                if formulas:
+                    platform_request_count += 1
+                    operators = client.fetch_operators()
+                    require_sc_operators(formulas, frozenset(
+                        operator.name for operator in operators if "REGULAR" in operator.scope))
+            except WorldQuantRequestError as exc:
+                handle_automated_request_failure(database_path, run, exc,
+                    observed_at=_aware_time(current_time()).isoformat(),
+                    non_retryable_reason="platform_request_not_retryable")
+                continue
+            except ValueError as exc:
+                if isinstance(exc, WorldQuantCatalogProtocolError):
+                    reason = "sc_research_operator_catalog_invalid"
+                elif str(exc).startswith("sc_research_operator_unavailable:"):
+                    reason = str(exc)
+                else:
+                    raise
+                fail_automated_run(database_path, run.run_id,
+                    failed_at=_aware_time(current_time()).isoformat(), reason=reason)
+                sc_operator_rejection = True
+                progress.notice(f"SC 计划停止发送：{reason}；已发任务继续收取，原计划和额度记录保留。")
+                continue
+            sc_operators_checked = True
+            if formulas:
+                clear_automated_request_failures(database_path, run.run_id)
+                progress.notice("SC 算子预检通过：父公式及全部待发候选均在当前账号的 REGULAR 算子目录中。")
 
         try:
             recovered = advance_stopped_run_backtest(
