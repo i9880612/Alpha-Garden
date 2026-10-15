@@ -33,6 +33,7 @@ from persistence.backtests import (
     list_started_backtest_task_ids,
     list_completed_backtests,
 )
+from persistence.runs import AutomatedRunBacktestRecord, attach_backtest_to_automated_run
 from persistence.seeds import (
     SignalSeedRecord,
     create_signal_seed,
@@ -48,29 +49,41 @@ def prepare_seed_mother_tasks(
     account_scope: str,
     settings: dict[str, object],
     created_at: str,
+    run_id: str | None = None,
 ) -> tuple[BacktestSnapshot, ...]:
     """Queue cold-start backtest tasks from the curated seed formula list.
 
     Invalid formulas are skipped without aborting the batch. Already-queued
-    formulas are deduplicated by prepare_backtest_task. Only local task records
-    are written; platform backtests run when the normal cycle picks them up.
+    formulas are deduplicated by prepare_backtest_task. If run_id is given,
+    tasks are attached to that automated run (cycle 1) so the normal cycle
+    picks them up; otherwise they remain orphaned until linked.
     """
     if not isinstance(account_scope, str) or not account_scope.strip():
         raise ValueError("seed_mother_account_scope_invalid")
+    if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
+        raise ValueError("seed_mother_run_id_invalid")
     prepared: list[BacktestSnapshot] = []
     for formula in SEED_FORMULAS:
         try:
-            prepared.append(
-                prepare_backtest_task(
-                    connection,
-                    account_scope=account_scope,
-                    formula=formula,
-                    settings=settings,
-                    created_at=created_at,
-                )
+            snapshot = prepare_backtest_task(
+                connection,
+                account_scope=account_scope,
+                formula=formula,
+                settings=settings,
+                created_at=created_at,
             )
         except ValueError:
             continue
+        if run_id is not None:
+            attach_backtest_to_automated_run(
+                connection,
+                AutomatedRunBacktestRecord(
+                    run_id=run_id,
+                    task_id=snapshot.task.task_id,
+                    cycle_number=1,
+                ),
+            )
+        prepared.append(snapshot)
     return tuple(prepared)
 
 

@@ -308,6 +308,62 @@ class SignalSeedExecutionTests(unittest.TestCase):
                 [s.task.task_id for s in first],
             )
 
+    def test_prepare_seed_mother_tasks_links_to_run(self):
+        import json
+        from hashlib import sha256
+        from execution.seeds import prepare_seed_mother_tasks
+        from persistence.runs import (
+            AutomatedRunRecord,
+            create_automated_run,
+            initialize_run_schema,
+            list_automated_run_backtests,
+        )
+        with open_database(self.database_path) as connection:
+            initialize_run_schema(connection)
+            policy = json.dumps({"delay": 1}, sort_keys=True, separators=(",", ":"))
+            run = create_automated_run(
+                connection,
+                AutomatedRunRecord(
+                    run_id="run_seed_mothers",
+                    account_scope="group-account",
+                    settings_policy_json=policy,
+                    settings_policy_key=sha256(policy.encode()).hexdigest(),
+                    generation_count=100, backtest_count=20,
+                    minimum_exploration_backtests=5,
+                    exploration_seed_attempt_multiplier=2,
+                    max_cycles=3, max_backtests=50,
+                    max_pending_seconds=3600, max_consecutive_failures=2,
+                    max_request_failures=3, max_in_flight_backtests=3,
+                    real_backtests_authorized=True,
+                    automatic_submissions_enabled=False,
+                    status="created", current_cycle=0,
+                    consecutive_failures=0, request_failure_count=0,
+                    last_request_failure_code=None,
+                    last_request_status_code=None,
+                    last_request_failure_at=None,
+                    last_request_retry_after_seconds=None,
+                    created_at="2026-10-15T00:00:00+00:00",
+                    started_at=None, retry_not_before=None,
+                    finished_at=None, stop_reason=None,
+                    candidate_planning_stop_diagnostic_json=None,
+                    optimization_only=False,
+                    self_correlation_plan_json=None,
+                ),
+            )
+            tasks = prepare_seed_mother_tasks(
+                connection,
+                account_scope="group-account",
+                settings={"delay": 1},
+                created_at="2026-10-15T00:00:00+00:00",
+                run_id=run.run_id,
+            )
+            links = list_automated_run_backtests(connection, run.run_id)
+            self.assertEqual(len(links), len(tasks))
+            self.assertEqual(
+                {link.task_id for link in links},
+                {s.task.task_id for s in tasks},
+            )
+
     def test_missing_pnl_blocks_new_roots_but_allows_existing_lineage_research(self):
         with open_database(self.database_path) as connection:
             root = self._completed(connection, "rank(close)", "1", 1.3, 0.9)

@@ -26,8 +26,8 @@ SEED_FORMULAS: tuple[str, ...] = (
     "rank(ts_delta(volume, 10))",
     # Price-volume correlation.
     "rank(ts_corr(close, volume, 20))",
-    # Breakout proximity: closeness to 20-day high.
-    "rank(close / ts_max(high, 20))",
+    # Breakout proximity: intraday position within the daily range.
+    "rank((high - close) / (high - low))",
     # Z-score reversal.
     "rank(-ts_zscore(close, 20))",
     # Bollinger-style deviation from the mean.
@@ -37,9 +37,9 @@ SEED_FORMULAS: tuple[str, ...] = (
     # Intraday range as volatility proxy.
     "rank((high - low) / close)",
     # Overnight gap return.
-    "rank((open - delay(close, 1)) / delay(close, 1))",
+    "rank((open - ts_delay(close, 1)) / ts_delay(close, 1))",
     # Trend consistency: share of up days.
     "rank(ts_mean(sign(ts_delta(close, 1)), 10))",
     # Lagged momentum.
-    "rank(ts_delta(delay(close, 5), 20))",
+    "rank(ts_delta(ts_delay(close, 5), 20))",
 )
