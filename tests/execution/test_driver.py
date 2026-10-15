@@ -1326,7 +1326,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
         self.assertEqual(child_attempt.cycle_number, 2)
         self.assertEqual(parent_attempt.cycle_number, 1)
 
-    def test_automatic_submission_processes_the_entire_family_low_to_high(
+    def test_automatic_submission_processes_only_the_family_peak(
         self,
     ) -> None:
         run_id = self._prepare_run(
@@ -1364,13 +1364,15 @@ class AutomatedRunDriverTests(unittest.TestCase):
                 break
 
         self.assertEqual(advanced.run.status, "completed")
+        # Only the lineage peak is ever submitted; weaker rungs stay suppressed
+        # after the peak is submitted instead of following it one by one.
         self.assertEqual(
             tuple(
                 client.formulas[alpha_id] for alpha_id in client.formal_submission_ids
             ),
-            ("rank(open)", "rank(volume)", "rank(close)"),
+            ("rank(close)",),
         )
-        self.assertEqual(client.calls.count("formal_submit"), 3)
+        self.assertEqual(client.calls.count("formal_submit"), 1)
 
     def test_candidate_planning_stop_finishes_formal_submissions_first(
         self,
@@ -1568,10 +1570,10 @@ class AutomatedRunDriverTests(unittest.TestCase):
         )
         self.assertEqual(confirmed.run.status, "failed")
         with open_database(self.database_path) as connection:
-            low_attempt = get_formal_submission_attempt(connection, low_task_id)
-        self.assertIsNotNone(low_attempt)
-        assert low_attempt is not None
-        self.assertEqual(low_attempt.status, "submitted")
+            high_attempt = get_formal_submission_attempt(connection, high_task_id)
+        self.assertIsNotNone(high_attempt)
+        assert high_attempt is not None
+        self.assertEqual(high_attempt.status, "submitted")
 
         completion = run_automated_run(
             self.database_path,
@@ -1582,13 +1584,15 @@ class AutomatedRunDriverTests(unittest.TestCase):
         )
 
         self.assertEqual(completion.run.status, "completed")
+        # The lineage peak was submitted before the timeout; its weaker rung
+        # stays suppressed after the resume instead of being submitted next.
         self.assertEqual(
             tuple(
                 client.formulas[alpha_id] for alpha_id in client.formal_submission_ids
             ),
-            ("rank(open)", "rank(close)"),
+            ("rank(close)",),
         )
-        self.assertEqual(client.calls.count("formal_submit"), 2)
+        self.assertEqual(client.calls.count("formal_submit"), 1)
 
     def test_stale_formal_check_is_refreshed_before_any_post(self) -> None:
         run_id = self._prepare_run(automatic_submissions_enabled=True)

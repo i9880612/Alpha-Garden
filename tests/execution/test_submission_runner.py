@@ -166,7 +166,7 @@ class SubmissionClient:
 
 
 class SubmissionQueueRunnerTests(unittest.TestCase):
-    def test_grade_and_exact_selection_cannot_skip_a_preserved_improvement_step(self):
+    def test_peak_only_selection_holds_weaker_rungs_while_peak_optimizes(self):
         import math
         from execution.qualified_archive import synchronize_qualified_alpha_archive
         from execution.submission_queue import list_submission_candidates
@@ -181,13 +181,20 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
                 connection.execute("DELETE FROM platform_pnl_series WHERE platform_alpha_id=?", (alpha,))
                 save_pnl_series(connection, series(alpha, [math.sin(i) for i in range(300)], "group-account"))
             synchronize_qualified_alpha_archive(connection, observed_at="2026-09-04T00:10:00+00:00")
+            # Only the lineage peak is ever submitted: weaker rungs wait in the archive
+            # while the peak is still being optimized instead of being banked first.
             self.assertEqual([r.task_id for r in list_submission_candidates(connection,
-                account_scope="group-account", source="qualified_archive")], [tasks[0]])
+                account_scope="group-account", source="qualified_archive")], [])
             self.assertEqual(list_submission_candidates(connection, account_scope="group-account",
                 source="qualified_archive", grade="GOOD"), ())
+            # The active peak stays manually submittable through the optimization source.
+            self.assertEqual([r.task_id for r in list_submission_candidates(connection,
+                account_scope="group-account", source="optimization")], [tasks[2]])
         client = SubmissionClient(formulas)
-        for source, task_id in (("qualified_archive", tasks[1]), ("optimization", tasks[2])):
-            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "candidate_unavailable"):
+        for source, task_id in (("qualified_archive", tasks[0]), ("qualified_archive", tasks[1]),
+                                ("qualified_archive", tasks[2]), ("optimization", tasks[0]),
+                                ("optimization", tasks[1])):
+            with self.subTest(source=source, task_id=task_id), self.assertRaisesRegex(ValueError, "candidate_unavailable"):
                 self._submit(client, FakeTime("2026-09-04T01:00:00+00:00"), source=source,
                     selected_task_id=task_id, max_submissions=1)
         self.assertEqual(client.calls, [])
@@ -879,7 +886,7 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
         with open_database(self.database_path) as connection:
             self.assertEqual(list_formal_submission_queue(connection), ())
 
-    def test_same_family_is_submitted_from_low_sharpe_to_high_sharpe(self) -> None:
+    def test_same_family_submits_only_the_peak(self) -> None:
         formulas = ("rank(close)", "rank(open)")
         task_ids, platform_formulas = self._completed_run(
             formulas,
@@ -899,15 +906,18 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
         self.assertTrue(completion.completed)
         self.assertEqual(
             tuple(platform_formulas[alpha_id] for alpha_id in client.posted_ids),
-            ("rank(open)", "rank(close)"),
+            ("rank(close)",),
         )
         with open_database(self.database_path) as connection:
             attempts = list_formal_submission_attempts(connection)
-        self.assertEqual({attempt.task_id for attempt in attempts}, set(task_ids))
+        self.assertEqual([attempt.task_id for attempt in attempts], [task_ids[0]])
         report = self.database_path.with_name("submitted-formulas.md").read_text(encoding="utf-8")
-        self.assertIn("共 **2** 条", report)
-        for alpha, formula in platform_formulas.items():
-            self.assertIn(f"| {alpha} |", report)
+        self.assertIn("共 **1** 条", report)
+        [submitted_alpha_id] = client.posted_ids
+        self.assertIn(f"| {submitted_alpha_id} |", report)
+        for alpha_id, formula in platform_formulas.items():
+            if alpha_id != submitted_alpha_id:
+                self.assertNotIn(f"| {alpha_id} |", report)
             self.assertNotIn(formula, report)
 
     def test_existing_active_alpha_is_imported_without_posting_again(self) -> None:
@@ -1134,7 +1144,7 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
             1,
         )
 
-    def test_existing_submitted_family_member_keeps_lower_candidate_eligible(
+    def test_submitted_family_peak_suppresses_weaker_rung(
         self,
     ) -> None:
         task_ids, platform_formulas = self._completed_run(
@@ -1161,34 +1171,17 @@ class SubmissionQueueRunnerTests(unittest.TestCase):
             waiter=lambda _seconds: None,
         )
 
+        # The lineage peak is already submitted: its weaker rung stays suppressed
+        # instead of being banked next through the queue.
         self.assertTrue(completion.completed)
-        self.assertEqual(completion.initial_queue_count, 1)
-        self.assertEqual(completion.submission_claimed_count, 1)
-        self.assertEqual(
-            tuple(platform_formulas[alpha_id] for alpha_id in client.posted_ids),
-            ("rank(open)",),
-        )
-        [lower_alpha_id] = [
-            alpha_id
-            for alpha_id, formula in platform_formulas.items()
-            if formula == "rank(open)"
-        ]
-        lower_candidate_stages = tuple(
-            name for name, alpha_id in client.calls if alpha_id == lower_alpha_id
-        )
-        self.assertLess(
-            lower_candidate_stages.index("detail"),
-            lower_candidate_stages.index("check"),
-        )
-        self.assertLess(
-            lower_candidate_stages.index("check"),
-            lower_candidate_stages.index("post"),
-        )
+        self.assertEqual(completion.initial_queue_count, 0)
+        self.assertEqual(completion.submission_claimed_count, 0)
+        self.assertEqual(tuple(client.posted_ids), ())
         with open_database(self.database_path) as connection:
             from execution.submission_queue import list_submission_candidates
             self.assertEqual(list_submission_candidates(connection, account_scope="group-account"), ())
             attempts = list_formal_submission_attempts(connection)
-        self.assertEqual({attempt.task_id for attempt in attempts}, {task_ids[1]})
+        self.assertEqual(tuple(attempts), ())
 
     def test_ambiguous_submitted_formula_does_not_block_another_candidate(
         self,

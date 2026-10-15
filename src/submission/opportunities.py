@@ -1,4 +1,4 @@
-"""Choose locally safe next submissions without discarding improvement steps."""
+"""Choose locally safe next submissions; each research lineage offers only its peak."""
 from evaluation.correlation import (
     CORRELATION_CALENDAR_YEARS, CORRELATION_CUTOFF, MIN_CORRELATION_INTERVALS, correlation_check,
 )
@@ -15,6 +15,8 @@ def select_submission_opportunities(
     references: tuple[PlatformSubmittedAlphaRecord, ...],
     series: tuple[PnlSeriesRecord, ...],
     *, correlations: PnlCorrelations | None = None,
+    lineage_roots: dict[str, str] | None = None,
+    submitted: tuple[BacktestSnapshot, ...] = (),
 ) -> tuple[str, ...]:
     """Return independent next steps; recompute after each confirmed submission.
 
@@ -22,6 +24,14 @@ def select_submission_opportunities(
     ties by quality. This is a deterministic local ordering, not a claim of global
     portfolio optimality. Correlation is pairwise, never a transitive family group.
     The caller must partition accounts and apply UI/source filters afterwards.
+
+    When lineage_roots maps task ids to their research lineage root, only the peak
+    formula of each lineage is ever submitted. Weaker rungs stay in the qualified
+    archive even while the peak is still being optimized, and stay suppressed
+    after the peak is submitted: research keeps climbing the ladder, but
+    submission no longer banks every rung, so weak submissions neither dilute
+    quality-weighted scores nor consume self-correlation headroom needed by
+    future peaks. A strictly better descendant still supersedes a submitted peak.
     """
     correlations = correlations or PnlCorrelations(series)
     by_id = {s.task.task_id: s for s in (*candidates, *protected)}
@@ -57,6 +67,29 @@ def select_submission_opportunities(
                 or correlation(s.task.task_id, other.task.task_id) is not None for other in eligible)]
     result = []
     grades = ("INFERIOR", "AVERAGE", "GOOD", "EXCELLENT", "SPECTACULAR")
+    if lineage_roots:
+        # Peak over candidates, protected, and already submitted: a weaker rung
+        # waits in the archive while a better formula of the same lineage is
+        # still being optimized, and stays suppressed after the peak is
+        # submitted, instead of being banked through the ten-percent rule.
+        # A strictly better descendant still supersedes a submitted peak.
+        pool = {snapshot.task.task_id: snapshot
+                for snapshot in (*eligible, *protected, *submitted)}
+        peaks: dict[str, tuple[tuple, tuple, BacktestSnapshot]] = {}
+        for task_id, snapshot in pool.items():
+            if snapshot.result is None or snapshot.result.grade not in grades:
+                continue  # Unknown quality never suppresses a qualified candidate.
+            root = lineage_roots.get(task_id, task_id)
+            quality = (grades.index(snapshot.result.grade), snapshot.result.sharpe,
+                       snapshot.result.fitness)
+            # Earlier finish wins ties, matching the standing order preference.
+            tiebreak = (snapshot.task.finished_at or "", task_id)
+            incumbent = peaks.get(root)
+            if (incumbent is None or quality > incumbent[0]
+                    or (quality == incumbent[0] and tiebreak < incumbent[1])):
+                peaks[root] = (quality, tiebreak, snapshot)
+        peak_ids = {snapshot.task.task_id for _, _, snapshot in peaks.values()}
+        eligible = [snapshot for snapshot in eligible if snapshot.task.task_id in peak_ids]
     while eligible:
         def order(s):
             blocked = sum(other.task.task_id != s.task.task_id and after(other, s) != "passed"

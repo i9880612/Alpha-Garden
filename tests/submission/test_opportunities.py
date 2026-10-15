@@ -55,3 +55,45 @@ def test_two_references_must_both_allow_the_candidate():
     a = formula("a", 1.65)
     assert select_submission_opportunities((a,), (),
         (reference("r1", sharpe=1.5), reference("r2", sharpe=1.6)), curves("a", "r1", "r2")) == ()
+
+
+def test_peak_only_submission_within_a_lineage():
+    a, b, c = formula("a", 1.5), formula("b", 1.6), formula("c", 1.7)
+    data = curves("a", "b", "c")
+    roots = {"a": "seed", "b": "seed", "c": "seed"}
+    # Research keeps the ladder, but submission banks only the peak: weaker
+    # rungs stay in the qualified archive instead of diluting quality-weighted
+    # scores or consuming self-correlation headroom for future peaks.
+    assert select_submission_opportunities((a, b, c), (), (), data, lineage_roots=roots) == ("c",)
+    assert select_submission_opportunities((a, b), (), (), data, lineage_roots=roots) == ("b",)
+
+
+def test_independent_lineages_each_offer_their_peak():
+    a, b = formula("a", 1.5), formula("b", 1.7)
+    data = (*curves("a"), series("b", [math.cos(i) for i in range(300)]))
+    roots = {"a": "seed-a", "b": "seed-b"}
+    assert set(select_submission_opportunities((a, b), (), (), data, lineage_roots=roots)) == {"a", "b"}
+
+
+def test_peak_prefers_grade_over_sharpe():
+    good = formula("good", 1.9, grade="GOOD")
+    excellent = formula("excellent", 1.4, grade="EXCELLENT")
+    data = curves("good", "excellent")
+    roots = {"good": "seed", "excellent": "seed"}
+    assert select_submission_opportunities(
+        (good, excellent), (), (), data, lineage_roots=roots) == ("excellent",)
+
+
+def test_tasks_without_recorded_lineage_are_their_own_root():
+    a, b = formula("a", 1.5), formula("b", 1.7)
+    data = (*curves("a"), series("b", [math.cos(i) for i in range(300)]))
+    assert set(select_submission_opportunities((a, b), (), (), data, lineage_roots={})) == {"a", "b"}
+
+
+def test_weaker_rung_waits_while_lineage_peak_is_still_optimizing():
+    a, b = formula("a", 1.5), formula("b", 1.7)
+    data = curves("a", "b")
+    roots = {"a": "seed", "b": "seed"}
+    # b is qualified but still being optimized (protected): a stays in the
+    # archive instead of being banked first through the ten-percent rule.
+    assert select_submission_opportunities((a,), (b,), (), data, lineage_roots=roots) == ()
