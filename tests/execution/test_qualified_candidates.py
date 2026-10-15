@@ -24,7 +24,7 @@ from tests.learning.test_seed_correlation import series
 
 
 class ExhaustedQualifiedCandidatesTests(unittest.TestCase):
-    def test_replaced_history_keeps_ten_percent_step_and_replans_after_submission(self):
+    def test_replaced_history_offers_lineage_peak_and_replans_after_submission(self):
         with open_database(self.database_path) as connection:
             a = complete_candidate(connection, prepare_candidate(connection), sharpe=1.5)
             b = complete_candidate(connection, prepare_candidate(connection, parent=a), sharpe=1.6)
@@ -35,8 +35,14 @@ class ExhaustedQualifiedCandidatesTests(unittest.TestCase):
                     [math.sin(i) for i in range(300)], account="group-account"))
             synchronize_qualified_alpha_archive(connection, observed_at=ARCHIVED)
             before = connection.total_changes
+            # c is still being optimized, so the weaker rungs wait in the archive
+            # instead of being banked one after another through the ten-percent
+            # rule; only the lineage peak is ever submitted.
             self.assertEqual([s.task.task_id for s in load_submittable_qualified_candidates(
-                connection, account_scope="group-account")], [a.task.task_id])
+                connection, account_scope="group-account")], [])
+            self.assertEqual(connection.total_changes, before)
+            self.assertEqual({r.task_id: r.remaining_attempts for r in load_qualified_evolution(connection)},
+                             {a.task.task_id: 19, b.task.task_id: 19, c.task.task_id: 20})
             self.assertEqual(connection.total_changes, before)
             self.assertEqual({r.task_id: r.remaining_attempts for r in load_qualified_evolution(connection)},
                              {a.task.task_id: 19, b.task.task_id: 19, c.task.task_id: 20})
@@ -85,13 +91,16 @@ class ExhaustedQualifiedCandidatesTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT * FROM backtest_results ORDER BY task_id").fetchall(), original_results)
             self.assertEqual(load_submittable_qualified_candidates(connection, account_scope="group-account"), ())
 
-    def test_archived_retired_known_lower_grades_with_settled_children_are_eligible(self):
+    def test_archived_retired_lineage_peaks_are_eligible_across_grades(self):
         with open_database(self.database_path) as connection:
             eligible = set()
             for grade in ("INFERIOR", "AVERAGE", "GOOD", "EXCELLENT", "SPECTACULAR", None):
                 parent = exhausted_parent(connection, grade=grade)
                 archive_qualified_alpha(connection, task_id=parent.task.task_id, archived_at=ARCHIVED)
-                if grade in {"INFERIOR", "AVERAGE", "GOOD", "EXCELLENT"}:
+                # INFERIOR/AVERAGE parents are superseded by their GOOD-graded
+                # children: a lineage submits only its peak, ranked by the
+                # standing (grade, sharpe, fitness) quality order.
+                if grade in {"GOOD", "EXCELLENT"}:
                     eligible.add(parent.task.task_id)
             nineteen = exhausted_parent(connection, attempts=19)
             cancelled = prepare_candidate(connection, parent=nineteen, start=False)
@@ -100,7 +109,8 @@ class ExhaustedQualifiedCandidatesTests(unittest.TestCase):
             prepare_candidate(connection, parent=pending)
             replaced = exhausted_parent(connection, attempts=0)
             complete_candidate(connection, prepare_candidate(connection, parent=replaced), sharpe=1.8)
-            eligible.add(replaced.task.task_id)  # Replacement ends research; unused budget is not a submission veto.
+            # The retired parent waits while its better child is still being optimized:
+            # a lineage submits only its peak, so the weaker rung stays archived.
             for parent in (nineteen, pending, replaced):
                 archive_qualified_alpha(connection, task_id=parent.task.task_id, archived_at=ARCHIVED)
             exhausted_parent(connection)  # Full budget and checks alone do not bypass archive membership.

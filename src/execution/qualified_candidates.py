@@ -8,14 +8,16 @@ from learning.qualified_evolution import QualifiedEvolutionRecord, assess_qualif
 from learning.pnl import PnlCorrelations
 from persistence.backtests import (
     BacktestMutationRecord, BacktestSnapshot, get_backtest_task,
-    list_active_backtest_tasks, list_backtest_mutations, list_completed_backtests, list_started_backtest_task_ids,
+    list_active_backtest_tasks, list_backtest_mutations, list_backtest_tasks_by_platform_alpha_id,
+    list_completed_backtests, list_started_backtest_task_ids,
 )
 from persistence.submission_checks import list_submission_checks
 from persistence.submission_queue import list_formal_submission_queue
 from persistence.pnl import list_pnl_series
 from persistence.qualified_archive import list_qualified_alpha_archive
 from persistence.submissions import (
-    list_formal_submission_formulas, list_platform_submitted_alphas, normalize_submitted_formula,
+    PlatformSubmittedAlphaRecord, list_formal_submission_formulas, list_platform_submitted_alphas,
+    normalize_submitted_formula,
 )
 from submission.formal import (
     BELOW_TARGET_GRADES, assess_formal_check_payload, local_formal_submission_eligible, qualified_archive_eligible,
@@ -74,6 +76,49 @@ def load_submittable_qualified_candidates(
                  if s.result.grade in BELOW_TARGET_GRADES)
 
 
+def _lineage_roots(
+    mutations: tuple[BacktestMutationRecord, ...],
+) -> dict[str, str]:
+    """Map every task seen in research to its lineage root for peak-only submission."""
+    parent = {}
+    for mutation in mutations:
+        parent.setdefault(mutation.child_task_id, mutation.parent_task_id)
+
+    def root(task_id: str) -> str:
+        seen = set()
+        while task_id in parent and task_id not in seen:
+            seen.add(task_id)
+            task_id = parent[task_id]
+        return task_id
+
+    return {task_id: root(task_id) for task_id in set(parent) | set(parent.values())}
+
+
+def _submitted_peak_snapshots(
+    connection: sqlite3.Connection, *, account_scope: str,
+    references: tuple[PlatformSubmittedAlphaRecord, ...],
+) -> tuple[BacktestSnapshot, ...]:
+    """Snapshots of locally submitted alphas for peak-only submission.
+
+    A lineage submits only its peak, ever: once the peak is submitted, weaker
+    rungs stay suppressed in later plannings instead of becoming the "new peak"
+    of what remains. A strictly better descendant still supersedes it.
+    """
+    snapshots = []
+    seen = set()
+    for reference in references:
+        for task in list_backtest_tasks_by_platform_alpha_id(
+            connection, account_scope=account_scope, platform_alpha_id=reference.platform_alpha_id,
+        ):
+            if task.task_id in seen:
+                continue
+            seen.add(task.task_id)
+            snapshot = get_backtest_task(connection, task.task_id)
+            if snapshot is not None and snapshot.result is not None:
+                snapshots.append(snapshot)
+    return tuple(snapshots)
+
+
 def load_submission_opportunity_ids(
     connection: sqlite3.Connection, *, account_scope: str,
     include_optimization: bool = False, reserved_task_id: str | None = None,
@@ -125,7 +170,13 @@ def load_submission_opportunity_ids(
         or include_optimization and not decisions[s.task.task_id].retired))
     protected = tuple(s for s in available if s.task.task_id != reserved_task_id
                       and not decisions[s.task.task_id].retired and s.task.task_id not in queued)
-    return select_submission_opportunities(candidates, protected, references, series, correlations=correlations)
+    return select_submission_opportunities(
+        candidates, protected, references, series,
+        correlations=correlations,
+        lineage_roots=_lineage_roots(mutations),
+        submitted=_submitted_peak_snapshots(
+            connection, account_scope=account_scope, references=references),
+    )
 
 
 def load_qualified_evolution(
