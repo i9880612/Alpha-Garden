@@ -205,7 +205,8 @@ def plan_automated_cycle(
             account_scope=run.account_scope,
         )
         evidence_cutoff = _timestamp(created_at, "action_effect_cutoff_invalid")
-        reserved_tasks = tuple(task for task in list_backtest_tasks(connection)
+        historical_tasks = list_backtest_tasks(connection)
+        reserved_tasks = tuple(task for task in historical_tasks
                                if not backtest_was_cancelled_before_submission(task))
         submitted_alphas = list_platform_submitted_alphas(
             connection,
@@ -496,6 +497,9 @@ def plan_automated_cycle(
             existing_formulas=existing_formulas,
             seed_start=_cycle_seed_start(run.run_id, cycle_number),
             direction_candidates=direction_candidates,
+            cold_start=(not run.optimization_only and cycle_number == 1
+                        and not submitted_alphas
+                        and not any(task.account_scope == run.account_scope for task in historical_tasks)),
         )
         selected_candidates = candidate_plan.candidates
     prepared = prepare_automated_candidate_backtest_batch(

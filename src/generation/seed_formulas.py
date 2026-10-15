@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+from generation.candidate import FormulaCandidate, exploration_candidate
+from generation.catalog import GenerationCatalog
+from generation.formula import analyze_formula
+from generation.logic import prepare_formula_logic
+from generation.parser import FormulaSyntaxError, parse_formula
+from generation.structure_limits import fits_formula_structure_limits
+from generation.unit_validation import find_coarse_unit_issues
+from generation.validation import validate_formula
+
 # Curated cold-start seed formulas ("mothers").
 #
 # Each encodes a distinct, economically motivated signal structure adapted from
 # public Alpha101-style patterns. They are starting points only: the normal
 # backtest -> checks -> seed admission pipeline decides which ones become
-# seeds. Unknown or invalid formulas are skipped at task creation, and the
+# seeds. Unknown or invalid formulas are skipped before task creation, and the
 # seed admission rules (including cross-seed decorrelation) apply unchanged.
 #
-# The list is static by design. After cold start the research loop evolves the
-# population on its own via exploration and mutation; mothers are not reused.
-# To refresh, edit this list and re-run the cold-start helper.
+# The first ordinary batch of an account without local backtest or submitted
+# history may use these mothers. Later batches use normal exploration/mutation;
+# recovery reuses the frozen tasks instead of generating another mother batch.
 SEED_FORMULAS: tuple[str, ...] = (
     # Momentum: 20-day price change persists.
     "rank(ts_delta(close, 20))",
@@ -43,3 +52,31 @@ SEED_FORMULAS: tuple[str, ...] = (
     # Lagged momentum.
     "rank(ts_delta(ts_delay(close, 5), 20))",
 )
+
+
+def seed_mother_candidates(catalog: GenerationCatalog) -> tuple[FormulaCandidate, ...]:
+    """Return locally legal mothers; no task writes or platform requests."""
+    candidates = []
+    seen = set()
+    for formula in SEED_FORMULAS:
+        try:
+            expression = parse_formula(formula).expression
+        except FormulaSyntaxError:
+            continue
+        logic = prepare_formula_logic(expression)
+        if logic.issue is not None:
+            continue
+        expression = logic.expression
+        if (not fits_formula_structure_limits(expression)
+                or not validate_formula(expression, catalog).is_valid
+                or find_coarse_unit_issues(expression, catalog)):
+            continue
+        fields = tuple(catalog.field(name) for name in analyze_formula(expression).referenced_names)
+        if not fields or any(field is None or field.coverage is None or field.coverage <= 0
+                             for field in fields):
+            continue
+        candidate = exploration_candidate(expression, strategy_label="cold_start_mother")
+        if candidate.fingerprint not in seen:
+            candidates.append(candidate)
+            seen.add(candidate.fingerprint)
+    return tuple(candidates)

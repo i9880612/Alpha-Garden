@@ -16,6 +16,7 @@ from generation.candidate import (
 )
 from generation.catalog import GenerationCatalog
 from generation.parser import FormulaSyntaxError, parse_formula
+from generation.seed_formulas import seed_mother_candidates
 from generation.polishing import POLISHING_FAMILIES, iter_window_mutation_leaves
 from generation.internal_edits import (
     iter_internal_edit_candidates,
@@ -471,6 +472,7 @@ def build_cycle_candidates(
     existing_formulas: tuple[str, ...],
     seed_start: int,
     direction_candidates: tuple[CycleCandidate, ...] = (),
+    cold_start: bool = False,
 ) -> CycleCandidatePlan:
     if (
         isinstance(cycle_number, bool)
@@ -531,19 +533,25 @@ def build_cycle_candidates(
         )
 
     exploration_backtest_count = source_allocation.exploration_count
-    if exploration_backtest_count == 0:
-        phase(cycle_number, 1, f"变异候选已选定，共 {len(improvement_candidates)} 条")
+    mothers = _cold_start_candidates(
+        catalog, policy, existing_formulas=existing_formulas,
+        limit=exploration_backtest_count,
+    ) if cold_start and exploration_backtest_count else ()
+    initial_candidates = tuple(improvement_candidates) + mothers
+    random_backtest_count = exploration_backtest_count - len(mothers)
+    if cold_start:
+        phase(cycle_number, 1, f"首次冷启动：选用 {len(mothers)} 条合法母体，随机探索补齐 {random_backtest_count} 个名额")
+    if random_backtest_count == 0:
+        phase(cycle_number, 1, f"候选已选定，共 {len(initial_candidates)} 条")
         phase(cycle_number, 2, "公式筛选与回测计划冻结中...")
         return CycleCandidatePlan(
-            candidates=tuple(improvement_candidates), exploration_backtest_count=0,
+            candidates=initial_candidates, exploration_backtest_count=exploration_backtest_count,
             structural_evolution_backtest_count=source_allocation.structural_evolution_count,
             local_polishing_backtest_count=source_allocation.local_polishing_count,
             direction_validation_backtest_count=len(direction_candidates),
         )
-    exploration_generation_count = requested_generation_count - len(
-        improvement_candidates
-    )
-    if exploration_generation_count < exploration_backtest_count:
+    exploration_generation_count = requested_generation_count - len(initial_candidates)
+    if exploration_generation_count < random_backtest_count:
         raise ValueError("automated_cycle_generation_capacity_invalid")
     seed_count = exploration_generation_count * exploration_seed_attempt_multiplier
     exploration_batch = generate_exploration_batch(
@@ -554,7 +562,7 @@ def build_cycle_candidates(
         group_candidates=group_candidates,
         existing_formulas=(
             existing_formulas
-            + tuple(item.candidate.formula for item in improvement_candidates)
+            + tuple(item.candidate.formula for item in initial_candidates)
         ),
     )
     if exploration_batch.shortfall is not None:
@@ -564,7 +572,7 @@ def build_cycle_candidates(
             diagnostic=CandidatePlanningDiagnostic(
                 cycle_number=cycle_number,
                 exploration_generation_target_count=(exploration_generation_count),
-                exploration_backtest_target_count=exploration_backtest_count,
+                exploration_backtest_target_count=random_backtest_count,
                 seed_attempt_limit=seed_count,
                 attempted_seed_count=exploration_batch.attempted_seed_count,
                 generated_candidate_count=len(exploration_batch.candidates),
@@ -576,7 +584,7 @@ def build_cycle_candidates(
             ),
         )
 
-    phase(cycle_number, 1, f"公式生成完成，共 {len(exploration_batch.candidates) + len(improvement_candidates)} 条候选")
+    phase(cycle_number, 1, f"公式生成完成，共 {len(exploration_batch.candidates) + len(initial_candidates)} 条候选")
     phase(cycle_number, 2, "公式筛选与回测计划冻结中...")
     exploration_by_id: dict[str, CycleCandidate] = {}
     selection_inputs = []
@@ -598,7 +606,7 @@ def build_cycle_candidates(
         selection_inputs.append(selection_candidate)
     selection = select_candidates(
         tuple(selection_inputs),
-        requested_count=exploration_backtest_count,
+        requested_count=random_backtest_count,
     )
     if selection.missing_count:
         rejection_counts = Counter(
@@ -609,7 +617,7 @@ def build_cycle_candidates(
             diagnostic=CandidatePlanningDiagnostic(
                 cycle_number=cycle_number,
                 exploration_generation_target_count=(exploration_generation_count),
-                exploration_backtest_target_count=exploration_backtest_count,
+                exploration_backtest_target_count=random_backtest_count,
                 seed_attempt_limit=seed_count,
                 attempted_seed_count=exploration_batch.attempted_seed_count,
                 generated_candidate_count=len(exploration_batch.candidates),
@@ -626,7 +634,7 @@ def build_cycle_candidates(
     exploration_candidates = tuple(
         exploration_by_id[item.candidate_id] for item in selection.selected
     )
-    selected_candidates = tuple(improvement_candidates) + exploration_candidates
+    selected_candidates = initial_candidates + exploration_candidates
     if len(selected_candidates) != requested_backtest_count:
         raise ValueError("automated_cycle_source_allocation_incomplete")
     return CycleCandidatePlan(
@@ -638,6 +646,24 @@ def build_cycle_candidates(
         local_polishing_backtest_count=source_allocation.local_polishing_count,
         direction_validation_backtest_count=len(direction_candidates),
     )
+
+
+def _cold_start_candidates(
+    catalog: GenerationCatalog, policy: BacktestSettingsPolicy, *,
+    existing_formulas: tuple[str, ...], limit: int,
+) -> tuple[CycleCandidate, ...]:
+    excluded = supported_formula_identities(existing_formulas).formula_fingerprints
+    by_id = {}
+    selection_inputs = []
+    for candidate in seed_mother_candidates(catalog):
+        if candidate.fingerprint in excluded:
+            continue
+        settings = choose_backtest_settings(candidate.expression, catalog, policy)
+        selection = formula_selection_candidate(candidate.expression, catalog, settings)
+        by_id[selection.candidate_id] = CycleCandidate(candidate, settings)
+        selection_inputs.append(selection)
+    selected = select_candidates(tuple(selection_inputs), requested_count=limit)
+    return tuple(by_id[item.candidate_id] for item in selected.selected)
 
 
 def _planning_exclusion_counts(

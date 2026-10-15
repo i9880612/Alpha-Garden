@@ -1076,7 +1076,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
             )
         )
 
-        with patch(
+        with patch("generation.seed_formulas.SEED_FORMULAS", ()), patch(
             "execution.cycle_candidates.generate_exploration_batch",
             return_value=ExplorationBatch(
                 candidates=rejected,
