@@ -4,11 +4,9 @@ import sqlite3
 from datetime import datetime
 from execution.self_correlation import load_self_correlation_references
 from execution.qualified_candidates import load_qualified_evolution
-from execution.backtests import prepare_backtest_task
 from evaluation.correlation import CORRELATION_CALENDAR_YEARS, correlation_check
 from generation.direction import DIRECTION_REVERSAL, reverse_direction_candidate
 from generation.parser import parse_formula
-from generation.seed_formulas import SEED_FORMULAS
 from learning.direction import negative_direction_is_testable
 from learning.evidence import build_learning_evidence
 from learning.frontiers import (
@@ -40,38 +38,6 @@ from persistence.seeds import (
     list_signal_seeds,
 )
 from submission.formal import BELOW_TARGET_GRADES
-
-
-def prepare_seed_mother_tasks(
-    connection: sqlite3.Connection,
-    *,
-    account_scope: str,
-    settings: dict[str, object],
-    created_at: str,
-) -> tuple[BacktestSnapshot, ...]:
-    """Queue cold-start backtest tasks from the curated seed formula list.
-
-    Invalid formulas are skipped without aborting the batch. Already-queued
-    formulas are deduplicated by prepare_backtest_task. Only local task records
-    are written; platform backtests run when the normal cycle picks them up.
-    """
-    if not isinstance(account_scope, str) or not account_scope.strip():
-        raise ValueError("seed_mother_account_scope_invalid")
-    prepared: list[BacktestSnapshot] = []
-    for formula in SEED_FORMULAS:
-        try:
-            prepared.append(
-                prepare_backtest_task(
-                    connection,
-                    account_scope=account_scope,
-                    formula=formula,
-                    settings=settings,
-                    created_at=created_at,
-                )
-            )
-        except ValueError:
-            continue
-    return tuple(prepared)
 
 
 def synchronize_signal_seeds(
