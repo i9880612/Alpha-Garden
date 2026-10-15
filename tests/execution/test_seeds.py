@@ -277,6 +277,37 @@ class SignalSeedExecutionTests(unittest.TestCase):
             # A later sync does not admit the duplicate either.
             self.assertEqual(synchronize_signal_seeds(connection), ())
 
+    def test_seed_mother_formulas_are_all_valid(self):
+        from generation.parser import parse_formula
+        from generation.logic import prepare_formula_logic
+        from generation.seed_formulas import SEED_FORMULAS
+        self.assertGreaterEqual(len(SEED_FORMULAS), 12)
+        for formula in SEED_FORMULAS:
+            logic = prepare_formula_logic(parse_formula(formula).expression)
+            self.assertIsNone(logic.issue, f"seed formula invalid: {formula}")
+
+    def test_prepare_seed_mother_tasks_is_idempotent(self):
+        from execution.seeds import prepare_seed_mother_tasks
+        from generation.seed_formulas import SEED_FORMULAS
+        with open_database(self.database_path) as connection:
+            first = prepare_seed_mother_tasks(
+                connection,
+                account_scope="group-account",
+                settings={"delay": 1},
+                created_at="2026-10-15T00:00:00+00:00",
+            )
+            self.assertEqual(len(first), len(SEED_FORMULAS))
+            second = prepare_seed_mother_tasks(
+                connection,
+                account_scope="group-account",
+                settings={"delay": 1},
+                created_at="2026-10-15T00:01:00+00:00",
+            )
+            self.assertEqual(
+                [s.task.task_id for s in second],
+                [s.task.task_id for s in first],
+            )
+
     def test_missing_pnl_blocks_new_roots_but_allows_existing_lineage_research(self):
         with open_database(self.database_path) as connection:
             root = self._completed(connection, "rank(close)", "1", 1.3, 0.9)
