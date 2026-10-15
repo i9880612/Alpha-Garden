@@ -196,7 +196,12 @@ def test_backfill_resumes_after_cooldown_without_blocking_other_candidates(pendi
         attempts[platform_alpha_id] = attempts.get(platform_alpha_id, 0) + 1
         if platform_alpha_id == first.task.platform_alpha_id and attempts[platform_alpha_id] == 1:
             raise WorldQuantRequestError("pnl_network_error", retryable=True, outcome_unknown=False)
-        increments = [math.sin(i) if platform_alpha_id == "reference" else math.cos(i) for i in range(300)]
+        if platform_alpha_id == "reference":
+            increments = [math.sin(i) for i in range(300)]
+        elif platform_alpha_id == first.task.platform_alpha_id:
+            increments = [math.sin(3 * i) for i in range(300)]
+        else:
+            increments = [math.cos(i) for i in range(300)]
         return PnlObservation(series(platform_alpha_id, increments).points)
 
     client = Mock()

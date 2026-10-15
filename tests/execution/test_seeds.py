@@ -239,6 +239,29 @@ class SignalSeedExecutionTests(unittest.TestCase):
             self.assertEqual(load_signal_frontiers(connection), before)
             self.assertEqual(list_backtest_mutations(connection), mutations)
 
+    def test_highly_correlated_candidate_does_not_create_redundant_seed_root(self):
+        import math
+        from tests.learning.test_seed_correlation import series
+        with open_database(self.database_path) as connection:
+            seed = self._completed(connection, "rank(close)", "1", 2.0, 1.1)
+            self.assertEqual(len(synchronize_signal_seeds(connection)), 1)
+            # Same signal as the seed without a ten percent improvement: redundant.
+            duplicate = self._completed(connection, "rank(open)", "2", 2.0, 1.1)
+            # Same signal as the seed with a fifteen percent improvement: a new root.
+            improved = self._completed(connection, "rank(volume)", "3", 2.3, 1.1)
+            pnl = [math.sin(i) for i in range(300)]
+            for alpha in ("alpha_1", "alpha_2", "alpha_3"):
+                save_pnl_series(connection, series(alpha, pnl, "group-account"))
+            created = synchronize_signal_seeds(connection)
+            self.assertEqual(
+                [record.root_task_id for record in created],
+                [improved.task.task_id],
+            )
+            self.assertEqual(
+                sorted(record.root_task_id for record in list_signal_seeds(connection)),
+                sorted((seed.task.task_id, improved.task.task_id)),
+            )
+
     def test_missing_pnl_blocks_new_roots_but_allows_existing_lineage_research(self):
         with open_database(self.database_path) as connection:
             root = self._completed(connection, "rank(close)", "1", 1.3, 0.9)
