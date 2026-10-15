@@ -79,6 +79,9 @@ def synchronize_signal_seeds(
         )
         if reference.correlation is not None and reference.required_sharpe is not None
     }
+    # Newly admitted seeds block later candidates in the same batch, so batch
+    # admission matches sequential admission.
+    admitted_snapshots = list(seed_snapshots)
     for snapshot in candidates:
         mutation = mutation_children.get(snapshot.task.task_id)
         if mutation is not None:
@@ -112,7 +115,7 @@ def synchronize_signal_seeds(
                 and snapshot.task.task_id not in repair_roots):
             continue
         if (snapshot.task.task_id not in repair_roots
-                and _redundant_with_existing_seed(snapshot, seed_snapshots, correlations)):
+                and _redundant_with_existing_seed(snapshot, tuple(admitted_snapshots), correlations)):
             continue
         assert snapshot.task.finished_at is not None
         created.append(
@@ -124,6 +127,7 @@ def synchronize_signal_seeds(
                 ),
             )
         )
+        admitted_snapshots.append(snapshot)
     return tuple(created)
 
 
