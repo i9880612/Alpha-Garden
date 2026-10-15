@@ -262,6 +262,21 @@ class SignalSeedExecutionTests(unittest.TestCase):
                 sorted((seed.task.task_id, improved.task.task_id)),
             )
 
+    def test_same_batch_redundant_candidates_admit_only_one_seed(self):
+        import math
+        from tests.learning.test_seed_correlation import series
+        with open_database(self.database_path) as connection:
+            first = self._completed(connection, "rank(close)", "1", 2.0, 1.1)
+            second = self._completed(connection, "rank(open)", "2", 2.0, 1.1)
+            pnl = [math.sin(i) for i in range(300)]
+            for alpha in ("alpha_1", "alpha_2"):
+                save_pnl_series(connection, series(alpha, pnl, "group-account"))
+            created = synchronize_signal_seeds(connection)
+            self.assertEqual(len(created), 1)
+            self.assertEqual(len(list_signal_seeds(connection)), 1)
+            # A later sync does not admit the duplicate either.
+            self.assertEqual(synchronize_signal_seeds(connection), ())
+
     def test_missing_pnl_blocks_new_roots_but_allows_existing_lineage_research(self):
         with open_database(self.database_path) as connection:
             root = self._completed(connection, "rank(close)", "1", 1.3, 0.9)
