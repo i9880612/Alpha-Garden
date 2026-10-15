@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime
 from execution.self_correlation import load_self_correlation_references
 from execution.qualified_candidates import load_qualified_evolution
+from evaluation.correlation import CORRELATION_CALENDAR_YEARS, correlation_check
 from generation.direction import DIRECTION_REVERSAL, reverse_direction_candidate
 from generation.parser import parse_formula
 from learning.direction import negative_direction_is_testable
@@ -17,7 +18,7 @@ from learning.frontiers import (
 )
 from learning.seeds import assess_signal_seed
 from learning.pnl import PnlCorrelations
-from learning.seed_correlation import assess_seed_correlation
+from learning.seed_correlation import MIN_SEED_CORRELATION_INTERVALS, assess_seed_correlation
 from learning.recovery import recovery_task_ids
 from execution.recovery import load_recovery_comparisons
 from persistence.pnl import list_pnl_series
@@ -52,17 +53,20 @@ def synchronize_signal_seeds(
         mutation.child_task_id: mutation
         for mutation in list_backtest_mutations(connection)
     }
+    seed_ids = {seed.root_task_id for seed in list_signal_seeds(connection)}
     required = None if requested is None else requested | {
         mutation.parent_task_id for child, mutation in mutation_children.items() if child in requested
-    }
+    } | seed_ids
     snapshots = list_completed_backtests(connection, task_ids=frozenset(required) if required is not None else None)
     candidates = _candidate_snapshots(snapshots, candidate_task_ids)
     snapshots_by_id = {snapshot.task.task_id: snapshot for snapshot in snapshots}
     created: list[SignalSeedRecord] = []
     references = _seed_references(connection, snapshots)
+    seed_snapshots = tuple(snapshots_by_id[root_id] for root_id in sorted(seed_ids) if root_id in snapshots_by_id)
     series = list_pnl_series(connection, platform_alpha_ids=frozenset(
         [ref.platform_alpha_id for ref in references]
         + [s.task.platform_alpha_id for s in candidates if s.task.platform_alpha_id is not None]
+        + [s.task.platform_alpha_id for s in seed_snapshots if s.task.platform_alpha_id is not None]
     ))
     correlations = PnlCorrelations(series)
     cutoff = datetime.fromisoformat(observed_at) if observed_at is not None else datetime.now().astimezone()
@@ -106,6 +110,9 @@ def synchronize_signal_seeds(
             continue
         if (assess_seed_correlation(snapshot, references, series, correlations=correlations).state not in {"passed", "submitted"}
                 and snapshot.task.task_id not in repair_roots):
+            continue
+        if (snapshot.task.task_id not in repair_roots
+                and _redundant_with_existing_seed(snapshot, seed_snapshots, correlations)):
             continue
         assert snapshot.task.finished_at is not None
         created.append(
@@ -223,6 +230,37 @@ def signal_seed_evidence_task_ids(connection: sqlite3.Connection) -> tuple[str, 
 def _seed_references(connection, snapshots):
     return tuple(ref for account in sorted({s.task.account_scope for s in snapshots})
                  for ref in list_platform_submitted_alphas(connection, account_scope=account))
+
+
+def _redundant_with_existing_seed(
+    snapshot: BacktestSnapshot,
+    seed_snapshots: tuple[BacktestSnapshot, ...],
+    correlations: PnlCorrelations,
+) -> bool:
+    """Whether a candidate duplicates an existing seed without improving it.
+
+    A new root must open a distinct signal region. A candidate highly correlated
+    with an existing seed is redundant unless it improves sharpe by the same ten
+    percent the submission check requires. Unknown correlation never establishes
+    redundancy.
+    """
+    if snapshot.task.platform_alpha_id is None or snapshot.result is None:
+        return False
+    for seed in seed_snapshots:
+        if (seed.task.task_id == snapshot.task.task_id
+                or seed.task.account_scope != snapshot.task.account_scope
+                or seed.task.platform_alpha_id is None
+                or seed.result is None):
+            continue
+        value = correlations.correlation(
+            (snapshot.task.account_scope, snapshot.task.platform_alpha_id),
+            (seed.task.account_scope, seed.task.platform_alpha_id),
+            minimum_intervals=MIN_SEED_CORRELATION_INTERVALS,
+            calendar_years=CORRELATION_CALENDAR_YEARS,
+        )
+        if correlation_check(value, snapshot.result.sharpe, seed.result.sharpe) == "failed":
+            return True
+    return False
 
 
 def batch_advances_signal_frontier(
