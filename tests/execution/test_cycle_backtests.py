@@ -35,7 +35,6 @@ from generation.candidate import FormulaCandidate, exploration_candidate
 from generation.parser import parse_formula
 from persistence.backtests import get_backtest_task, initialize_backtest_schema
 from persistence.database import open_database
-from persistence.pnl import save_pnl_series
 from tests.learning.test_seed_correlation import series
 from worldquant.pnl import PnlObservation
 from persistence.seeds import list_signal_seeds
@@ -274,7 +273,7 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
         fourth = self._advance(client, minute=5)
         fifth = self._advance(client, minute=6)
         sixth = self._advance(client, minute=7)
-        self.assertEqual(self._advance(client, minute=8).action, "seed_evidence_captured")
+        seventh = self._advance(client, minute=8)
         terminal = self._advance(client, minute=9)
         settled = settle_automated_cycle(
             self.database_path,
@@ -293,8 +292,8 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
         self.assertEqual(second.counts.pending, 2)
         self.assertEqual(third.action, "detail_ready")
         self.assertCountEqual(
-            (fourth.action, fifth.action, sixth.action),
-            ("detail_captured", "completed", "failed"),
+            (fourth.action, fifth.action, sixth.action, seventh.action),
+            ("detail_captured", "pnl_captured", "completed", "failed"),
         )
         self.assertEqual(terminal.action, "cycle_terminal")
         self.assertFalse(terminal.platform_request_performed)
@@ -305,6 +304,26 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
         self.assertEqual(settled.run.status, "completed")
         self.assertFalse(settled.already_settled)
         self.assertTrue(repeated.already_settled)
+
+    def test_pnl_is_saved_while_peer_is_still_waiting_for_score(self):
+        from persistence.pnl import list_pnl_series
+        self._prepare_run(("rank(close)", "rank(open)"), max_in_flight_backtests=2)
+        client = ScriptedClient()
+        client.submissions.extend((self._accepted("ready"), self._accepted("waiting")))
+        client.polls[self._remote("ready")] = BacktestPollObservation("completed", "alpha-ready", "COMPLETE", None)
+        client.polls[self._remote("waiting")] = BacktestPollObservation("pending", None, "PENDING", None)
+        client.details["alpha-ready"] = self._detail("alpha-ready")
+        for minute in range(2, 14):
+            result = self._advance(client, minute=minute)
+            if result.action == "pnl_captured":
+                break
+        self.assertEqual(result.action, "pnl_captured")
+        self.assertEqual(result.counts.pending, 2)
+        self.assertEqual(result.counts.completed, 0)
+        with open_database(self.database_path) as connection:
+            self.assertEqual([p.platform_alpha_id for p in list_pnl_series(connection)], ["alpha-ready"])
+        self.assertEqual([c for c in client.calls if c[0] == "pnl"], [("pnl", "alpha-ready")])
+        self.assertFalse(any(c[0] == "yearly_stats" for c in client.calls))
 
     def test_invalid_response_fails_one_task_and_frees_slot_for_peer(self):
         run_id = self._prepare_run(
@@ -329,7 +348,8 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
             self.assertEqual(self._advance(client, minute=4).action, "submitted")
             self.assertEqual(self._advance(client, minute=5).action, "detail_ready")
             self.assertEqual(self._advance(client, minute=6).action, "detail_captured")
-            self.assertEqual(self._advance(client, minute=7).action, "completed")
+            self.assertEqual(self._advance(client, minute=7).action, "pnl_captured")
+            self.assertEqual(self._advance(client, minute=8).action, "completed")
         settled = settle_automated_cycle(
             self.database_path, run_id, cycle_number=1,
             observed_at="2026-08-30T00:08:00+08:00",
@@ -863,7 +883,8 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
         self.assertEqual(self._advance(client, minute=2).action, "submitted")
         self.assertEqual(self._advance(client, minute=30).action, "detail_ready")
         self.assertEqual(self._advance(client, minute=31).action, "detail_captured")
-        self.assertEqual(self._advance(client, minute=32).action, "completed")
+        self.assertEqual(self._advance(client, minute=32).action, "pnl_captured")
+        self.assertEqual(self._advance(client, minute=33).action, "completed")
         self.assertEqual(len([call for call in client.calls if call[0] == "submit"]), 1)
 
     def test_completed_and_timed_out_tasks_settle_one_mixed_cycle(self) -> None:
@@ -923,10 +944,7 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
         self._advance(client, minute=3)
         self._advance(client, minute=4)
         self._advance(client, minute=5)
-        with open_database(self.database_path) as connection:
-            from persistence.pnl import PnlSeriesRecord
-            save_pnl_series(connection, PnlSeriesRecord("group-account", "alpha-1",
-                "2026-08-30T00:05:00+08:00", client.fetch_pnl(platform_alpha_id="alpha-1").points))
+        self._advance(client, minute=5)
         return run_id
 
     def test_all_slow_slots_expire_and_unsent_peer_completes(self) -> None:

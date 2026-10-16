@@ -18,6 +18,7 @@ from execution.backtest_reconciliation import (
 )
 from execution.driver import advance_automated_run
 from execution.progress import RunProgress
+from execution.pnl import PNL_CAPTURE_ACTIONS
 from execution.run_recovery import advance_stopped_run_backtest, advance_stopped_run_check, remaining_stopped_run_seconds
 from execution.submission_checks import (
     advance_deferred_submission_check, check_completed_backtest, next_deferred_submission_check,
@@ -53,6 +54,11 @@ from worldquant.catalog import WorldQuantCatalogProtocolError
 
 Clock = Callable[[], datetime]
 Waiter = Callable[[float], None]
+
+_PNL_REQUEST_PAUSE_SECONDS = 2.0
+_PNL_REQUEST_ACTIONS = PNL_CAPTURE_ACTIONS | {
+    "seed_evidence_captured", "recovery_evidence_captured", "recovery_evidence_pending",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +264,9 @@ def run_automated_run(
                     return _completion(database_path, run, step_count=step_count,
                                        platform_request_count=platform_request_count,
                                        authentication_performed=authentication_performed)
+                if recovered.action in PNL_CAPTURE_ACTIONS:
+                    wait(max(_PNL_REQUEST_PAUSE_SECONDS, poll_interval_seconds, recovered.retry_after_seconds or 0.0))
+                    continue
             wait(poll_interval_seconds)
             continue
         retry_after = remaining_automated_request_retry_seconds(run, observed)
@@ -340,6 +349,14 @@ def run_automated_run(
                 database_path, client, account_scope=run.account_scope,
                 observed_at=observed.isoformat(),
             ) if run.status == "running" else None
+            if recovered is not None:
+                progress.backtest(recovered.snapshot.task.task_id, action=recovered.action,
+                                  snapshot=recovered.snapshot)
+                step_count += 1
+                platform_request_count += int(recovered.platform_request_performed)
+                if recovered.action in PNL_CAPTURE_ACTIONS:
+                    wait(max(_PNL_REQUEST_PAUSE_SECONDS, poll_interval_seconds, recovered.retry_after_seconds or 0.0))
+                    continue
             observed = _aware_time(current_time())
             if run.status == "running" and advance_deferred_submission_check(
                 database_path, client, account_scope=run.account_scope, observed_at=observed.isoformat(),
@@ -353,11 +370,6 @@ def run_automated_run(
                 non_retryable_reason="platform_request_not_retryable",
             )
             continue
-        if recovered is not None:
-            progress.backtest(recovered.snapshot.task.task_id, action=recovered.action,
-                              snapshot=recovered.snapshot)
-            step_count += 1
-            platform_request_count += int(recovered.platform_request_performed)
         observed = _aware_time(current_time())
         advance = advance_automated_run(
             database_path,
@@ -400,7 +412,12 @@ def run_automated_run(
                     clear_automated_request_failures(database_path, run.run_id)
                 if reconciliation.reconciled_task_count:
                     continue
-        if advance.retry_after_seconds is not None:
+        if (advance.backtest_action or advance.action) in _PNL_REQUEST_ACTIONS:
+            # Account request pacing must not be shortened by a ready peer or
+            # its pending deadline. Deadlines remain unchanged and are checked
+            # again after the pause; no HTTP request is made during this wait.
+            wait(max(_PNL_REQUEST_PAUSE_SECONDS, poll_interval_seconds, advance.retry_after_seconds or 0.0))
+        elif advance.retry_after_seconds is not None:
             _wait_until_next_step(
                 database_path,
                 run.run_id,

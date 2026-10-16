@@ -384,16 +384,17 @@ class AutomatedRunDriverTests(unittest.TestCase):
                 "BEGIN SELECT RAISE(ABORT, 'test_queue_write_failure'); END"
             )
         self._advance(client, minute=6)
+        self._advance(client, minute=7)
         with open_database(self.database_path) as connection:
             before = get_backtest_task(connection, task_id)
             self.assertEqual(before.task.status, "completed")
         with self.assertRaisesRegex(sqlite3.IntegrityError, "test_queue_write_failure"):
-            self._advance(client, minute=7)
+            self._advance(client, minute=8)
         with open_database(self.database_path) as connection:
             self.assertEqual(get_backtest_task(connection, task_id), before)
             self.assertEqual(list_formal_submission_queue(connection), ())
             connection.execute("DROP TRIGGER reject_queue")
-        completed = self._advance(client, minute=8)
+        completed = self._advance(client, minute=9)
         self.assertEqual(completed.backtest_action, "submission_check_observed")
         with open_database(self.database_path) as connection:
             self.assertEqual(get_backtest_task(connection, task_id).task.status, "completed")
@@ -671,13 +672,13 @@ class AutomatedRunDriverTests(unittest.TestCase):
                 "submitted",
                 "detail_ready",
                 "detail_captured",
+                "pnl_captured",
                 "completed",
                 "submission_check_observed",
-                "seed_evidence_captured",
                 "cycle_terminal",
             ),
         )
-        self.assertEqual(client.calls, ["submit", "poll", "detail", "yearly_stats", "formal_check", "pnl"])
+        self.assertEqual(client.calls, ["submit", "poll", "detail", "pnl", "yearly_stats", "formal_check"])
         self.assertEqual(advances[-1].run.status, "completed")
         self.assertEqual(advances[-1].run.current_cycle, 1)
 
@@ -749,12 +750,12 @@ class AutomatedRunDriverTests(unittest.TestCase):
         self.assertEqual(deferred.backtest_action, "poll_retry_scheduled")
         self.assertEqual(deferred.run.request_failure_count, 1)
         self.assertEqual(deferred.run.retry_not_before, "2026-08-30T00:05:00+08:00")
-        for second in (10, 20, 30):
+        for second in (10, 20, 30, 40):
             drained = advance_automated_run(self.database_path, client, run_id,
                 observed_at=f"2026-08-30T00:03:{second}+08:00")
             self.assertEqual(drained.run.request_failure_count, 1)
             self.assertEqual(drained.run.status, "running")
-        self.assertEqual(client.calls, ["submit", "submit", "poll", "detail", "yearly_stats"])
+        self.assertEqual(client.calls, ["submit", "submit", "poll", "detail", "pnl", "yearly_stats"])
         for minute in (5, 7):
             retry = self._advance(client, minute=minute)
             self.assertEqual(retry.task_id, target)
@@ -1238,9 +1239,9 @@ class AutomatedRunDriverTests(unittest.TestCase):
                 "submit",
                 "poll",
                 "detail",
+                "pnl",
                 "yearly_stats",
                 "formal_check",
-                "pnl",
                 "formal_confirmation",
                 "formal_check",
                 "formal_submit",

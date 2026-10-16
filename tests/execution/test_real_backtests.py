@@ -249,6 +249,7 @@ class RealBacktestExecutionTests(unittest.TestCase):
             observed_at="2026-08-29T00:04:30+00:00",
         )
 
+        self._capture_pnl(prepared.task.task_id, "2026-08-29T00:04:31+00:00")
         yearly_client, _ = self._authenticated_client(
             self._response(200, self._yearly_payload())
         )
@@ -617,6 +618,7 @@ class RealBacktestExecutionTests(unittest.TestCase):
             observed_at="2026-08-29T00:05:00+00:00",
         )
 
+        self._capture_pnl(prepared.task.task_id, "2026-08-29T00:05:01+00:00")
         yearly_client, _ = self._authenticated_client(
             self._response(200, self._yearly_payload())
         )
@@ -661,6 +663,7 @@ class RealBacktestExecutionTests(unittest.TestCase):
             ).action,
             "detail_captured",
         )
+        self._capture_pnl(prepared.task.task_id, "2026-08-29T00:03:31+00:00")
         client, _ = self._authenticated_client(
             self._response(200, self._yearly_payload())
         )
@@ -955,6 +958,7 @@ class RealBacktestExecutionTests(unittest.TestCase):
             observed_at="2026-08-29T00:03:30+00:00",
         )
         self.assertEqual(detail_captured.action, "detail_captured")
+        self._capture_pnl(prepared.task.task_id, "2026-08-29T00:03:31+00:00")
         empty_client, empty_executor = self._authenticated_client(
             self._empty_response(200, headers={"Retry-After": "7"})
         )
@@ -1015,6 +1019,7 @@ class RealBacktestExecutionTests(unittest.TestCase):
             max_pending_seconds=125,
         )
         self.assertEqual(detail.action, "detail_captured")
+        self._capture_pnl(prepared.task.task_id, "2026-08-29T00:03:31+00:00")
         yearly_client, _ = self._authenticated_client(
             self._empty_response(200, headers={"Retry-After": "7"})
         )
@@ -1047,6 +1052,17 @@ class RealBacktestExecutionTests(unittest.TestCase):
             self.assertEqual(list_completed_backtests(connection), ())
             terminal = list_terminal_backtests(connection)
         self.assertEqual(terminal, (timed_out.snapshot,))
+
+    def _capture_pnl(self, task_id, observed_at):
+        from tests.learning.test_seed_correlation import independent_series
+        client, executor = self._authenticated_client(self._response(200, {
+            "schema": {"properties": [{"name": "date"}, {"name": "pnl"}]},
+            "records": [list(point) for point in independent_series("alpha-1").points],
+        }))
+        result = advance_real_backtest(self.database_path, client, task_id, observed_at=observed_at)
+        self.assertEqual(result.action, "pnl_captured")
+        self.assertEqual(executor.requests[-1].full_url,
+            "https://api.worldquantbrain.com/alphas/alpha-1/recordsets/pnl")
 
     def _prepare(self):
         return prepare_real_backtest(

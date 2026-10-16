@@ -44,6 +44,7 @@ from persistence.runs import (
 from worldquant.client import WorldQuantClient, WorldQuantRequestError
 from execution.submission_checks import check_completed_backtest, remaining_submission_check_seconds
 from execution.seed_evidence import capture_next_seed_series
+from execution.pnl import PNL_CAPTURE_ACTIONS, PnlAccountRequestError
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +384,8 @@ def _advance_task(
             max_pending_seconds=run.max_pending_seconds,
         )
     except WorldQuantRequestError as exc:
+        if isinstance(exc, PnlAccountRequestError):
+            raise
         if exc.code == "worldquant_authentication_expired" and not exc.outcome_unknown:
             with open_database(database_path) as connection:
                 unclaimed = get_backtest_task(connection, snapshot.task.task_id)
@@ -500,14 +503,17 @@ def _advance_task(
         )
         current_counts = _counts(current)
         run_status = run.status
-    retry_after_seconds = _bounded_pending_wait(
-        current,
-        observed_at=observed_at,
-        max_pending_seconds=run.max_pending_seconds,
-        requested_seconds=(60.0 if advanced.action == "reconciliation_required"
-                           and uses_continuous_recovery(run) else advanced.retry_after_seconds),
+    retry_after_seconds = (
+        advanced.retry_after_seconds if advanced.action in PNL_CAPTURE_ACTIONS
+        else _bounded_pending_wait(
+            current,
+            observed_at=observed_at,
+            max_pending_seconds=run.max_pending_seconds,
+            requested_seconds=(60.0 if advanced.action == "reconciliation_required"
+                               and uses_continuous_recovery(run) else advanced.retry_after_seconds),
+        )
     )
-    if retry_after_seconds is not None:
+    if retry_after_seconds is not None and advanced.action not in PNL_CAPTURE_ACTIONS:
         current = _load_run_active_snapshots(database_path, run)
         with open_database(database_path) as connection:
             account_in_flight = account_in_flight_backtest_count(connection, run.account_scope)

@@ -15,6 +15,7 @@ from execution.cycle_candidates import CycleCandidatePlanningStopped, Optimizati
 from execution.cycles import plan_automated_cycle
 from execution.recovery import capture_next_recovery_series
 from execution.seed_evidence import capture_next_seed_series
+from execution.pnl import PNL_CAPTURE_ACTIONS
 from execution.run_recovery import advance_stopped_run_check
 from execution.progress import phase
 from execution.cycle_schedule import scheduled_cycle_number
@@ -352,11 +353,14 @@ def _finish_backtest_advance(database_path, client, run, backtest, observed_at):
         ),
         backtest_action=backtest.action,
         platform_request_performed=backtest.platform_request_performed,
-        retry_after_seconds=_bounded_wait(
-            database_path,
-            run.run_id,
-            observed_at=observed_at,
-            requested_seconds=backtest.retry_after_seconds,
+        retry_after_seconds=(
+            backtest.retry_after_seconds if backtest.action in PNL_CAPTURE_ACTIONS
+            else _bounded_wait(
+                database_path,
+                run.run_id,
+                observed_at=observed_at,
+                requested_seconds=backtest.retry_after_seconds,
+            )
         ),
     )
 

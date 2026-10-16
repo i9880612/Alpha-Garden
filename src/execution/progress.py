@@ -202,6 +202,12 @@ def _backtest_message(snapshot: BacktestSnapshot, action: str) -> tuple[str, str
     if task.status == "pending":
         if action == "recovery_deferred":
             return "", "旧请求收取暂未成功，保留名额，稍后重查"
+        if action == "detail_captured":
+            return "", "指标已收到，准备采集每日 PnL"
+        if action == "pnl_pending":
+            return "", "每日 PnL 待补采，继续读取年度数据"
+        if action == "pnl_captured":
+            return "", "每日 PnL 已保存，继续读取年度数据"
         if snapshot.result is not None:
             return "", "指标已收到，等待年度数据；尚未完整完成"
         if task.platform_alpha_id is not None:

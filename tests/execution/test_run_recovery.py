@@ -111,7 +111,7 @@ class RunRecoveryTests(unittest.TestCase):
         if mixed:
             client = RecoveryClient()
             client.authenticated = True
-            for _ in range(3):
+            for _ in range(4):
                 advance_real_backtest(self.db, client, tasks[3].task.task_id,
                     observed_at=self.time.now().isoformat(), allow_submission=False)
         if failed:
@@ -284,7 +284,7 @@ class RunRecoveryTests(unittest.TestCase):
         old, tasks = self._old()
         client = RecoveryClient()
         client.authenticated = True
-        for _ in range(3):
+        for _ in range(4):
             advance_real_backtest(self.db, client, tasks[0].task.task_id,
                 observed_at=self.time.now().isoformat(), allow_submission=False)
         with open_database(self.db) as c:
@@ -365,7 +365,7 @@ class RunRecoveryTests(unittest.TestCase):
 
         client = PhasedClient()
         client.authenticated = True
-        for _ in range(3):
+        for _ in range(4):
             advance_real_backtest(self.db, client, tasks[0].task.task_id,
                 observed_at=self.time.now().isoformat(), allow_submission=False)
         result = launch_automated_run(self.db, self.fixture.settings_path, self.fixture.environment_path,

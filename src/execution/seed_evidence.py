@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from execution.seeds import signal_seed_evidence_task_ids, synchronize_signal_seeds
-from execution.progress import LOGGER_NAME
+from execution.pnl import capture_pnl_series
 from generation.direction import DIRECTION_REVERSAL
 from learning.seeds import assess_signal_seed
 from persistence.backtests import list_backtest_mutations, list_completed_backtests
 from persistence.database import open_database
-from persistence.pnl import PnlSeriesRecord, pnl_capture_states, save_pnl_series
+from persistence.pnl import pnl_capture_states
 from persistence.submissions import list_platform_submitted_alphas
-from worldquant.client import WorldQuantRequestError
-from worldquant.backtests import WorldQuantProtocolError
 
 
 def capture_next_seed_series(
@@ -21,7 +18,7 @@ def capture_next_seed_series(
     admit_seeds: bool = True,
     research_task_ids: tuple[str, ...] | None = None,
 ) -> float | None:
-    """One due PnL read at a batch boundary; missing evidence never admits seeds.
+    """Backfill one due historical/deferred curve; missing evidence never admits seeds.
 
     Retry metadata uses the existing PnL fact store. A deferred seed does not
     block other research or make a failed request into a correlation failure.
@@ -70,28 +67,11 @@ def capture_next_seed_series(
                 synchronize_signal_seeds(connection, observed_at=observed_at, candidate_task_ids=tuple(s.task.task_id for s in candidates))
     if alpha is None:
         return None
-    ready_count = sum(captured for key, (captured, _) in states.items() if key in required)
-    logger = logging.getLogger(LOGGER_NAME)
-    logger.info("种子相关性：正在获取时序数据 %s（已获取 %s/%s）", alpha, ready_count, len(required))
-    error_code = None
-    try:
-        observation = client.fetch_pnl(platform_alpha_id=alpha)
-        points, retry_after = observation.points, observation.retry_after_seconds
-    except (WorldQuantRequestError, WorldQuantProtocolError) as exc:
-        if isinstance(exc, WorldQuantRequestError) and (
-            exc.status_code in {401, 403, 429} or exc.code.startswith("worldquant_authentication_")
-        ):
-            raise
-        points, retry_after = None, getattr(exc, "retry_after_seconds", None)
-        error_code = exc.code
-    retry_at = (now + timedelta(seconds=max(600, retry_after or 0))).isoformat() if points is None else None
-    with open_database(database_path) as connection:
-        save_pnl_series(connection, PnlSeriesRecord(account_scope, alpha, observed_at, points, retry_at))
-        if points is not None and candidates:
+    observation = capture_pnl_series(database_path, client, account_scope=account_scope,
+        platform_alpha_id=alpha, observed_at=observed_at)
+    if observation is None:
+        return None
+    if observation.points is not None and candidates:
+        with open_database(database_path) as connection:
             synchronize_signal_seeds(connection, observed_at=observed_at, candidate_task_ids=tuple(s.task.task_id for s in candidates))
-    if points is None:
-        logger.warning("种子相关性：时序数据 %s %s，证据待定，%g 秒后可重试", alpha,
-                       f"读取失败（{error_code}）" if error_code else "暂未就绪", max(600, retry_after or 0))
-    else:
-        logger.info("种子相关性：时序数据 %s 获取完成（已获取 %s/%s）", alpha, ready_count + 1, len(required))
-    return retry_after or 0.0
+    return observation.retry_after_seconds or 0.0

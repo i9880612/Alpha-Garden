@@ -22,6 +22,7 @@ from execution.backtests import (
     remaining_backtest_pending_seconds,
 )
 from execution.submission_queue import synchronize_submission_queue
+from execution.pnl import PnlAccountRequestError, capture_pnl_series
 from execution.backtest_reconciliation import expire_unknown_backtest_submissions
 from execution.runs import submission_rate_limited
 from persistence.backtests import BacktestSnapshot, get_backtest_task, list_active_backtest_tasks
@@ -125,6 +126,8 @@ def advance_real_backtest(
                     return RealBacktestAdvance("pending_timeout", expired, True)
             return advanced
         except WorldQuantRequestError as exc:
+            if isinstance(exc, PnlAccountRequestError):
+                raise
             if (max_pending_seconds is not None and not exc.outcome_unknown
                     and (exc.retryable or exc.status_code in {404, 410})
                     and exc.status_code not in {401, 403}
@@ -355,6 +358,17 @@ def _advance_real_backtest_once(
 
     if context.snapshot.yearly_stats is not None:
         raise ValueError("real_backtest_pending_facts_conflict")
+    # The score is safely stored. Capture this formula's curve before advancing
+    # its remaining result reads, rather than accumulating a batch-end backlog.
+    # A saved cooldown lets yearly stats and peer tasks continue independently.
+    pnl = capture_pnl_series(database_path, client, account_scope=task.account_scope,
+        platform_alpha_id=task.platform_alpha_id, observed_at=observed_at)
+    if pnl is not None:
+        return RealBacktestAdvance(
+            action="pnl_captured" if pnl.points is not None else "pnl_pending",
+            snapshot=context.snapshot, platform_request_performed=True,
+            retry_after_seconds=pnl.retry_after_seconds or 0.0,
+        )
     yearly_observation = client.fetch_backtest_yearly_stats(
         platform_alpha_id=task.platform_alpha_id,
     )

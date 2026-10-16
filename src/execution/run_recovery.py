@@ -118,7 +118,8 @@ def advance_stopped_run_backtest(
         return RealBacktestAdvance("recovery_deferred", deferred, True)
     if result.snapshot.task.status == "pending":
         progressed = (result.snapshot.task.platform_alpha_id != selected.task.platform_alpha_id
-                      or result.snapshot.result != selected.result)
+                      or result.snapshot.result != selected.result
+                      or result.action in {"pnl_captured", "pnl_pending"})
         if progressed:
             return result
         with open_database(database_path) as connection:

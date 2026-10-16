@@ -644,9 +644,9 @@ class AutomatedRunnerTests(unittest.TestCase):
         self.assertTrue(completion.authentication_performed)
         self.assertEqual(
             client.calls,
-            ["authenticate", "submit", "poll", "detail", "yearly_stats", "formal_check", "pnl"],
+            ["authenticate", "submit", "poll", "detail", "pnl", "yearly_stats", "formal_check"],
         )
-        self.assertEqual(fake_time.waits, [1.0, 1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(fake_time.waits, [1.0, 1.0, 1.0, 2.0, 1.0, 1.0])
 
         repeated_client = RunnerClient()
         repeated = run_automated_run(
@@ -1253,7 +1253,7 @@ class AutomatedRunnerTests(unittest.TestCase):
         self.assertTrue(completion.authentication_performed)
         self.assertEqual(client.calls.count("authenticate"), 2)
         self.assertEqual(client.calls.count("submit"), 1)
-        self.assertEqual(fake_time.waits, [2, 1.0, 1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(fake_time.waits, [2, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0])
 
     def test_authentication_failure_limit_stops_without_submitting(self) -> None:
         run_id = self._prepare_running_task(max_pending_seconds=60)

@@ -51,16 +51,16 @@ def test_pnl_collection_admits_only_after_all_pairs_and_reuses_captured_data(pen
     ])
     def fetch_pnl(*, platform_alpha_id):
         record = caplog.records[-1]
-        assert f"正在获取时序数据 {platform_alpha_id}" in record.getMessage()
+        assert f"[PnL采集] {platform_alpha_id} 开始获取每日曲线" in record.getMessage()
         assert not getattr(record, "transient", False)  # Must reach the web log handler before the request finishes.
         return next(observations)
     client.fetch_pnl.side_effect = fetch_pnl
     assert advance(case, snapshot, client) == 0
-    assert "获取完成（已获取 1/2）" in caplog.messages[-1]
+    assert "每日曲线已保存" in caplog.messages[-1]
     with open_database(case.database_path) as connection:
         assert list_signal_seeds(connection) == ()
     assert advance(case, snapshot, client) == 0
-    assert "获取完成（已获取 2/2）" in caplog.messages[-1]
+    assert "每日曲线已保存" in caplog.messages[-1]
     with open_database(case.database_path) as connection:
         assert tuple(s.root_task_id for s in list_signal_seeds(connection)) == (snapshot.task.task_id,)
         assert load_signal_frontiers(connection).active_branch_task_ids == (snapshot.task.task_id,)

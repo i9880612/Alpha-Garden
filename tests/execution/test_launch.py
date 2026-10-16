@@ -283,9 +283,9 @@ class AutomatedRunLaunchTests(unittest.TestCase):
         self.assertEqual(completion.platform_request_count, 5)
         self.assertEqual(
             client.calls,
-            ["authenticate", "submit", "poll", "detail", "yearly_stats", "pnl"],
+            ["authenticate", "submit", "poll", "detail", "pnl", "yearly_stats"],
         )
-        self.assertEqual(fake_time.waits, [1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(fake_time.waits, [1.0, 1.0, 1.0, 2.0, 1.0])
         self.assertEqual(
             received_connections[0].base_url,
             "https://api.worldquantbrain.com",
@@ -613,7 +613,7 @@ class AutomatedRunLaunchTests(unittest.TestCase):
         self.assertEqual(initial_client.calls, ["submit"])
         self.assertEqual(
             client.calls,
-            ["authenticate", "poll", "detail", "yearly_stats", "pnl"],
+            ["authenticate", "poll", "detail", "pnl", "yearly_stats"],
         )
         with open_database(self.database_path) as connection:
             run_count = connection.execute(
@@ -864,7 +864,7 @@ class AutomatedRunLaunchTests(unittest.TestCase):
         self.assertEqual(completion.run.max_backtests, stopped.run.max_backtests)
         self.assertEqual(completion.run.max_cycles, stopped.run.max_cycles)
         self.assertFalse(completion.run.automatic_submissions_enabled)
-        self.assertEqual(client.calls, ["authenticate", "submit", "poll", "detail", "yearly_stats", "pnl"])
+        self.assertEqual(client.calls, ["authenticate", "submit", "poll", "detail", "pnl", "yearly_stats"])
         with open_database(self.database_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM automated_runs").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM automated_run_backtests").fetchone()[0], 1)
@@ -984,9 +984,9 @@ class AutomatedRunLaunchTests(unittest.TestCase):
             "platform_request_not_retryable:test",
         )
         self.assertGreaterEqual(completion.step_count, 3)
-        self.assertEqual(completion.platform_request_count, 3)
+        self.assertEqual(completion.platform_request_count, 4)
         self.assertTrue(completion.authentication_performed)
-        self.assertEqual(client.calls, ["authenticate", "poll", "detail", "yearly_stats"])
+        self.assertEqual(client.calls, ["authenticate", "poll", "detail", "pnl", "yearly_stats"])
         with open_database(self.database_path) as connection:
             self.assertEqual(get_backtest_task(connection, prepared.task.task_id).task.status, "completed")
         self.assertEqual(completion.run.current_cycle, 1)

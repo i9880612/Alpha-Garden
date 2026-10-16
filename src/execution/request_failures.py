@@ -10,6 +10,7 @@ from execution.runs import (
     uses_continuous_recovery,
 )
 from persistence.runs import AutomatedRunRecord
+from execution.pnl import PnlAccountRequestError
 from worldquant.client import WorldQuantRequestError
 
 
@@ -52,6 +53,9 @@ def handle_automated_request_failure(
     )
     if uses_continuous_recovery(run):
         local_retry_delay = min(120.0, 3.0 * local_retry_delay)
+    if (isinstance(error, PnlAccountRequestError) and error.status_code == 429
+            and error.retry_after_seconds is None):
+        local_retry_delay = max(60.0, local_retry_delay)
     retry_delay = max(
         local_retry_delay,
         error.retry_after_seconds or 0.0,
