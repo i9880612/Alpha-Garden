@@ -270,9 +270,11 @@ class SelfCorrelationResearchTests(unittest.TestCase):
 
     def test_batch_records_sc_and_curves_even_when_quality_fails_without_backfill_or_submission(self):
         run = self.start()
+        with open_database(self.fixture.database_path) as connection:
+            cached_ids = {s.platform_alpha_id for s in list_pnl_series(connection)}
         plan = plan_automated_cycle(self.fixture.database_path, run_id=run.run_id,
             created_at="2026-08-30T00:05:00+08:00")
-        self.fixture._complete_plan(plan, observed_at="2026-08-30T00:06:00+08:00")
+        self.fixture._complete_plan(plan, observed_at="2026-08-30T00:06:00+08:00", capture_pnl=False)
         payload = {"is": {"checks": [
             {"name": name, "result": "FAIL" if name in {"LOW_SHARPE", "LOW_FITNESS"} else "PASS"}
             for name in STANDARD_REGULAR_CHECK_NAMES]}}
@@ -295,7 +297,7 @@ class SelfCorrelationResearchTests(unittest.TestCase):
                 self.assertEqual(dict(assessment.statuses)["SELF_CORRELATION"], "PASS")
                 self.assertEqual(assessment.state, "failed")
             self.assertEqual({s.platform_alpha_id for s in list_pnl_series(connection)},
-                             ids | {"submitted-alpha"})
+                             cached_ids | ids | {"submitted-alpha"})
             self.assertEqual(list_formal_submission_queue(connection), ())
         self.assertEqual({c.kwargs["platform_alpha_id"] for c in client.fetch_formal_submission_check.call_args_list}, ids)
         self.assertEqual({c.kwargs["platform_alpha_id"] for c in client.fetch_pnl.call_args_list}, ids | {"submitted-alpha"})

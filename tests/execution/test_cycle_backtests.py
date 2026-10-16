@@ -35,6 +35,9 @@ from generation.candidate import FormulaCandidate, exploration_candidate
 from generation.parser import parse_formula
 from persistence.backtests import get_backtest_task, initialize_backtest_schema
 from persistence.database import open_database
+from persistence.pnl import save_pnl_series
+from tests.learning.test_seed_correlation import series
+from worldquant.pnl import PnlObservation
 from persistence.seeds import list_signal_seeds
 from persistence.runs import (
     get_automated_cycle_settlement,
@@ -104,6 +107,11 @@ class ScriptedClient:
             stats=(),
             retry_after_seconds=None,
         )
+
+    def fetch_pnl(self, *, platform_alpha_id):
+        import math
+        self.calls.append(("pnl", platform_alpha_id))
+        return PnlObservation(series(platform_alpha_id, [math.sin(i) for i in range(300)], "group-account").points)
 
 
 class ConcurrentSubmissionClient(ScriptedClient):
@@ -266,7 +274,8 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
         fourth = self._advance(client, minute=5)
         fifth = self._advance(client, minute=6)
         sixth = self._advance(client, minute=7)
-        terminal = self._advance(client, minute=8)
+        self.assertEqual(self._advance(client, minute=8).action, "seed_evidence_captured")
+        terminal = self._advance(client, minute=9)
         settled = settle_automated_cycle(
             self.database_path,
             run_id,
@@ -289,7 +298,7 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
         )
         self.assertEqual(terminal.action, "cycle_terminal")
         self.assertFalse(terminal.platform_request_performed)
-        self.assertEqual(len(client.calls), 6)
+        self.assertEqual(len(client.calls), 7)
         self.assertEqual(settled.outcome, "qualified")
         self.assertEqual(settled.passed_evaluations, 1)
         self.assertEqual(settled.failed_backtests, 1)
@@ -686,12 +695,13 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
         self._advance(client, minute=3)
         self._advance(client, minute=4)
         self._advance(client, minute=5)
+        self._advance(client, minute=6)
 
         settled = settle_automated_cycle(
             self.database_path,
             run_id,
             cycle_number=1,
-            observed_at="2026-08-30T00:05:00+08:00",
+            observed_at="2026-08-30T00:06:00+08:00",
         )
 
         self.assertEqual(settled.outcome, "frontier_advanced")
@@ -913,6 +923,10 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
         self._advance(client, minute=3)
         self._advance(client, minute=4)
         self._advance(client, minute=5)
+        with open_database(self.database_path) as connection:
+            from persistence.pnl import PnlSeriesRecord
+            save_pnl_series(connection, PnlSeriesRecord("group-account", "alpha-1",
+                "2026-08-30T00:05:00+08:00", client.fetch_pnl(platform_alpha_id="alpha-1").points))
         return run_id
 
     def test_all_slow_slots_expire_and_unsent_peer_completes(self) -> None:

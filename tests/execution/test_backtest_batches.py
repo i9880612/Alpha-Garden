@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -36,6 +37,8 @@ from generation.parser import parse_formula
 from generation.direction import reverse_direction_candidate
 from persistence.backtests import get_backtest_mutation, initialize_backtest_schema
 from persistence.database import open_database
+from persistence.pnl import save_pnl_series
+from tests.learning.test_seed_correlation import series
 from persistence.runs import initialize_run_schema, get_automated_run_backtest_by_task
 from persistence.submissions import initialize_submission_schema
 from worldquant.backtests import BacktestCheck, BacktestDetail, BacktestSettings
@@ -636,6 +639,7 @@ class AutomatedBacktestBatchPreparationTests(unittest.TestCase):
                 (),
                 observed_at="2026-08-30T00:02:00+08:00",
             )
+            save_pnl_series(connection, series("alpha-parent", [math.sin(i) for i in range(300)], account_scope))
             synchronize_signal_seeds(
                 connection,
                 candidate_task_ids=(parent.task.task_id,),

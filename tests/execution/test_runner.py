@@ -639,12 +639,12 @@ class AutomatedRunnerTests(unittest.TestCase):
 
         self.assertEqual(completion.run.status, "completed")
         self.assertEqual(completion.run.current_cycle, 1)
-        self.assertEqual(completion.step_count, 6)
-        self.assertEqual(completion.platform_request_count, 5)
+        self.assertEqual(completion.step_count, 7)
+        self.assertEqual(completion.platform_request_count, 6)
         self.assertTrue(completion.authentication_performed)
         self.assertEqual(
             client.calls,
-            ["authenticate", "submit", "poll", "detail", "yearly_stats", "formal_check"],
+            ["authenticate", "submit", "poll", "detail", "yearly_stats", "formal_check", "pnl"],
         )
         self.assertEqual(fake_time.waits, [1.0, 1.0, 1.0, 1.0, 1.0])
 
@@ -992,7 +992,7 @@ class AutomatedRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(completion.run.status, "completed")
-        self.assertEqual(completion.platform_request_count, 9)
+        self.assertEqual(completion.platform_request_count, 10)
         self.assertEqual(completion.formal_submission_claimed_count, 1)
         self.assertEqual(completion.formal_submission_confirmed_count, 1)
         self.assertEqual(completion.formal_submission_unresolved_count, 0)
@@ -1054,7 +1054,7 @@ class AutomatedRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(completion.run.status, "completed")
-        self.assertEqual(completion.platform_request_count, 6)
+        self.assertEqual(completion.platform_request_count, 7)
         self.assertEqual(completion.run.request_failure_count, 0)
         self.assertEqual(fake_time.waits[0], 1.0)
         self.assertEqual(client.calls.count("authenticate"), 1)

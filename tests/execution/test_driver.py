@@ -649,13 +649,14 @@ class AutomatedRunDriverTests(unittest.TestCase):
         self._prepare_run()
         client = DriverClient(self._accepted())
 
-        advances = tuple(self._advance(client, minute=minute) for minute in range(1, 9))
+        advances = tuple(self._advance(client, minute=minute) for minute in range(1, 10))
 
         self.assertEqual(
             tuple(item.action for item in advances),
             (
                 "run_started",
                 "cycle_planned",
+                "backtest_advanced",
                 "backtest_advanced",
                 "backtest_advanced",
                 "backtest_advanced",
@@ -672,10 +673,11 @@ class AutomatedRunDriverTests(unittest.TestCase):
                 "detail_captured",
                 "completed",
                 "submission_check_observed",
+                "seed_evidence_captured",
                 "cycle_terminal",
             ),
         )
-        self.assertEqual(client.calls, ["submit", "poll", "detail", "yearly_stats", "formal_check"])
+        self.assertEqual(client.calls, ["submit", "poll", "detail", "yearly_stats", "formal_check", "pnl"])
         self.assertEqual(advances[-1].run.status, "completed")
         self.assertEqual(advances[-1].run.current_cycle, 1)
 
@@ -818,9 +820,9 @@ class AutomatedRunDriverTests(unittest.TestCase):
             if advances[-1].action == "run_stopped":
                 break
 
-        self.assertEqual(advances[7].action, "cycle_settled")
-        self.assertEqual(advances[7].run.current_cycle, 1)
-        self.assertEqual(advances[8].action, "cycle_planned")
+        self.assertEqual(advances[8].action, "cycle_settled")
+        self.assertEqual(advances[8].run.current_cycle, 1)
+        self.assertEqual(advances[9].action, "cycle_planned")
         self.assertEqual(advances[-1].action, "run_stopped")
         self.assertEqual(advances[-1].run.current_cycle, 2)
         self.assertEqual(advances[-1].run.status, "completed")
@@ -1238,6 +1240,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
                 "detail",
                 "yearly_stats",
                 "formal_check",
+                "pnl",
                 "formal_confirmation",
                 "formal_check",
                 "formal_submit",
@@ -1454,7 +1457,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
             created_at="2026-08-30T00:01:30+08:00",
         )
 
-        for minute in range(2, 11):
+        for minute in range(2, 12):
             self._advance(client, minute=minute)
 
         self.assertEqual(client.calls.count("formal_submit"), 1)
@@ -1486,13 +1489,13 @@ class AutomatedRunDriverTests(unittest.TestCase):
             ("rank(close)",),
             created_at="2026-08-30T00:01:30+08:00",
         )
-        for minute in range(2, 10):
+        for minute in range(2, 11):
             self._advance(client, minute=minute)
 
         with ThreadPoolExecutor(max_workers=1) as executor:
-            posting = executor.submit(self._advance, client, minute=10)
+            posting = executor.submit(self._advance, client, minute=11)
             self.assertTrue(request_started.wait(timeout=5))
-            concurrent = self._advance(client, minute=10)
+            concurrent = self._advance(client, minute=11)
             release_response.set()
             posted = posting.result(timeout=5)
 
@@ -1603,11 +1606,11 @@ class AutomatedRunDriverTests(unittest.TestCase):
             ("rank(close)",),
             created_at="2026-08-30T00:01:30+08:00",
         )
-        for minute in range(2, 10):
+        for minute in range(2, 11):
             self._advance(client, minute=minute)
 
-        stale = self._advance(client, minute=15)
-        refreshed = self._advance(client, minute=14)
+        stale = self._advance(client, minute=16)
+        refreshed = self._advance(client, minute=17)
 
         self.assertEqual(
             stale.formal_submission_action,
@@ -1643,7 +1646,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
             ("rank(close)",),
             created_at="2026-08-30T00:01:30+08:00",
         )
-        for minute in range(2, 11):
+        for minute in range(2, 12):
             self._advance(client, minute=minute)
         stopped = advance_automated_run(
             self.database_path,

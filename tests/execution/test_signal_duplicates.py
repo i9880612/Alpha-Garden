@@ -10,6 +10,7 @@ from learning.action_effects import ExplicitSelfCorrelationEvidence
 from persistence.backtests import BacktestCheckRecord, BacktestMutationRecord, create_backtest_mutation
 from persistence.database import open_database
 from persistence.pnl import save_pnl_series
+from persistence.seeds import SignalSeedRecord, create_signal_seed
 from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
 from persistence.submissions import PlatformSubmittedAlphaRecord
 from tests.execution import test_cycles as fixtures
@@ -25,15 +26,23 @@ class OrdinarySignalDuplicateTests(unittest.TestCase):
         self.database_path = self.fixture.database_path
 
     def _parents(self):
-        first = self.fixture._signal_seed("rank(ts_rank(close,22)+ts_zscore(open,66))")
-        second = self.fixture._signal_seed("rank(ts_rank(open,22)+ts_zscore(close,66))")
-        distinct = self.fixture._signal_seed("rank(ts_rank(volume,22)+ts_zscore(returns,66))")
+        first = self._historical_seed("rank(ts_rank(close,22)+ts_zscore(open,66))")
+        second = self._historical_seed("rank(ts_rank(open,22)+ts_zscore(close,66))")
+        distinct = self._historical_seed("rank(ts_rank(volume,22)+ts_zscore(returns,66))")
         with open_database(self.database_path) as connection:
             for task, phase in ((first, 0), (second, 0), (distinct, 1)):
                 curve = series(f"alpha-{task}", [math.sin(i + phase) for i in range(300)], "group-account")
                 save_pnl_series(connection, replace(curve, observed_at="2026-08-30T00:03:00+08:00"))
         representative, duplicate = sorted((first, second))
         return representative, duplicate, distinct
+
+    def _historical_seed(self, formula):
+        # Reproduce roots admitted before daily-curve evidence was required.
+        task = self.fixture._completed_backtest(formula, sharpe=1.1, fitness=0.9,
+            sharpe_status="FAIL", fitness_status="FAIL", time_offset=2, capture_pnl=False)
+        with open_database(self.database_path) as connection:
+            create_signal_seed(connection, SignalSeedRecord(task, "2026-08-30T00:03:00+08:00"))
+        return task
 
     def test_ordinary_batch_uses_one_representative_across_roots_and_keeps_frozen_choice(self):
         representative, duplicate, distinct = self._parents()
@@ -76,7 +85,7 @@ class OrdinarySignalDuplicateTests(unittest.TestCase):
         self.assertEqual([s.task.task_id for s in restored.backtests], [s.task.task_id for s in plan.backtests])
 
     def test_missing_pnl_keeps_both_roots_without_fetching_or_writing_evidence(self):
-        parents = {self.fixture._signal_seed(formula) for formula in (
+        parents = {self._historical_seed(formula) for formula in (
             "rank(ts_rank(close,22)+ts_zscore(open,66))", "rank(ts_rank(open,22)+ts_zscore(close,66))")}
         run = self.fixture._start_run(generation_count=20, backtest_count=10, max_backtests=20)
         plan = plan_automated_cycle(self.database_path, run_id=run, created_at="2026-08-30T00:04:00+08:00")

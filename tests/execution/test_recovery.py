@@ -28,6 +28,7 @@ from persistence.backtests import BacktestMutationRecord, create_backtest_mutati
 from learning.recovery import RecoveryComparison, recovery_comparisons, recovery_task_ids
 from learning.self_correlation import SelfCorrelationReference
 from persistence.database import open_database
+from persistence.seeds import SignalSeedRecord, create_signal_seed
 from persistence.pnl import initialize_pnl_schema, list_pnl_series, save_pnl_series
 from persistence.submissions import list_platform_submitted_alphas, record_platform_submitted_alphas
 from learning.seed_correlation import assess_seed_correlation
@@ -73,7 +74,9 @@ def test_frontier_curve_decoding_is_bounded_by_comparisons_not_database_history(
     case.setUp()
     try:
         with open_database(case.database_path) as connection:
-            snapshot = case._completed(connection, "rank(close)", "1", 1.2, 0.8)
+            snapshot = case._completed(connection, "rank(close)", "1", 1.2, 0.8, capture_pnl=False)
+            save_pnl_series(connection, series(snapshot.task.platform_alpha_id,
+                [math.cos(i) for i in range(300)], account="group-account"))
             synchronize_signal_seeds(connection)
             comparison = RecoveryComparison(snapshot.task.task_id, snapshot.task.task_id,
                 snapshot.task.task_id, "group-account", snapshot.task.platform_alpha_id, "parent", "reference")
@@ -237,13 +240,17 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
             observed_at="2026-08-30T00:05:00+08:00",
             qualified_task_id=parent.task.task_id,
             qualified_sharpe=1.5,
+            capture_pnl=False,
         )
         with open_database(fixture.database_path) as connection:
             connection.execute(
                 "INSERT INTO backtest_yearly_stats(task_id,stage,year,sharpe) VALUES (?, 'IS', 2023, 1.5)",
                 (parent.task.task_id,),
             )
-            synchronize_signal_seeds(connection)
+            # Historical membership predates the PnL admission gate; recovery must
+            # still collect its missing evidence without granting a new budget.
+            create_signal_seed(connection, SignalSeedRecord(parent.task.task_id,
+                "2026-08-30T00:05:00+08:00"))
             record_automated_cycle_settlement(
                 connection,
                 run_id,
@@ -311,6 +318,7 @@ def test_measured_repair_gets_existing_research_budget_without_new_seed_or_submi
             sharpe_status="PASS" if base_passed else "FAIL",
             fitness_status="PASS" if base_passed else "FAIL",
             time_offset=8,
+            capture_pnl=False,
         )
         with open_database(fixture.database_path) as connection:
             create_backtest_mutation(
@@ -497,7 +505,8 @@ def test_sc_bound_ordinary_edits_keep_measured_recovery_in_the_original_lineage(
                 ("rank", "cross_sectional_normalization"), ("zscore", "cross_sectional_normalization"),
                 ("ts_rank", "time_series_normalization"), ("ts_mean", "time_series_smoothing"),
                 ("ts_decay_linear", "time_series_smoothing"))))
-        parent_id = fixture._signal_seed("rank(ts_rank(close,22))", sharpe_status="PASS", fitness_status="PASS")
+        parent_id = fixture._signal_seed("rank(ts_rank(close,22))", sharpe_status="PASS", fitness_status="PASS",
+            pnl_increments=[math.sin(i) for i in range(300)])
         with open_database(fixture.database_path) as connection:
             parent = get_backtest_task(connection, parent_id)
             catalog = load_generation_catalog(connection, FieldCatalogContext("EQUITY", "USA", "TOP3000", 1), account_scope="group-account")
@@ -511,7 +520,7 @@ def test_sc_bound_ordinary_edits_keep_measured_recovery_in_the_original_lineage(
             leaf = next(iter_transformation_leaves(expression, catalog, families=(action,)))
         formula = render_formula(leaf.expression)
         child_id = fixture._completed_backtest(formula, sharpe=1.05, fitness=.75,
-            sharpe_status="FAIL", fitness_status="FAIL", time_offset=3)
+            sharpe_status="FAIL", fitness_status="FAIL", time_offset=3, capture_pnl=False)
         mutation = BacktestMutationRecord(child_id, parent_id, action, leaf.change.location,
             leaf.change.before, leaf.change.after, "original-conflict", parent.task.formula)
         with open_database(fixture.database_path) as connection:

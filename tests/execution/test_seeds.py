@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +35,7 @@ from persistence.runs import initialize_run_schema
 from persistence.submissions import initialize_submission_schema
 from persistence.seeds import list_signal_seeds
 from persistence.pnl import save_pnl_series
+from tests.learning.test_seed_correlation import series
 from persistence.submissions import PlatformSubmittedAlphaRecord, record_platform_submitted_alphas
 from worldquant.backtests import BacktestCheck, BacktestDetail
 
@@ -246,9 +248,9 @@ class SignalSeedExecutionTests(unittest.TestCase):
             seed = self._completed(connection, "rank(close)", "1", 2.0, 1.1)
             self.assertEqual(len(synchronize_signal_seeds(connection)), 1)
             # Same signal as the seed without a ten percent improvement: redundant.
-            duplicate = self._completed(connection, "rank(open)", "2", 2.0, 1.1)
+            duplicate = self._completed(connection, "rank(open)", "2", 2.0, 1.1, capture_pnl=False)
             # Same signal as the seed with a fifteen percent improvement: a new root.
-            improved = self._completed(connection, "rank(volume)", "3", 2.3, 1.1)
+            improved = self._completed(connection, "rank(volume)", "3", 2.3, 1.1, capture_pnl=False)
             pnl = [math.sin(i) for i in range(300)]
             for alpha in ("alpha_1", "alpha_2", "alpha_3"):
                 save_pnl_series(connection, series(alpha, pnl, "group-account"))
@@ -267,7 +269,7 @@ class SignalSeedExecutionTests(unittest.TestCase):
         from tests.learning.test_seed_correlation import series
         with open_database(self.database_path) as connection:
             first = self._completed(connection, "rank(close)", "1", 2.0, 1.1)
-            second = self._completed(connection, "rank(open)", "2", 2.0, 1.1)
+            second = self._completed(connection, "rank(open)", "2", 2.0, 1.1, capture_pnl=False)
             pnl = [math.sin(i) for i in range(300)]
             for alpha in ("alpha_1", "alpha_2"):
                 save_pnl_series(connection, series(alpha, pnl, "group-account"))
@@ -777,6 +779,7 @@ class SignalSeedExecutionTests(unittest.TestCase):
         complete: bool = True,
         checks: dict[str, str] | None = None,
         grade: str | None = None,
+        capture_pnl: bool = True,
     ):
         task = prepare_backtest_task(
             connection,
@@ -793,7 +796,7 @@ class SignalSeedExecutionTests(unittest.TestCase):
         )
         if not complete:
             return pending
-        return self._finish(
+        completed = self._finish(
             connection,
             task.task.task_id,
             identity,
@@ -802,6 +805,10 @@ class SignalSeedExecutionTests(unittest.TestCase):
             checks=checks,
             grade=grade,
         )
+        if capture_pnl:
+            save_pnl_series(connection, series(completed.task.platform_alpha_id,
+                [math.sin(i) for i in range(300)], completed.task.account_scope))
+        return completed
 
     @staticmethod
     def _finish(

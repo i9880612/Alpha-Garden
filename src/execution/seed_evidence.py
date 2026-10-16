@@ -6,14 +6,11 @@ from datetime import datetime, timedelta
 from execution.seeds import signal_seed_evidence_task_ids, synchronize_signal_seeds
 from execution.progress import LOGGER_NAME
 from generation.direction import DIRECTION_REVERSAL
-from learning.pnl import PnlCorrelations
-from learning.seed_correlation import assess_seed_correlation
 from learning.seeds import assess_signal_seed
 from persistence.backtests import list_backtest_mutations, list_completed_backtests
 from persistence.database import open_database
-from persistence.pnl import PnlSeriesRecord, list_pnl_series, pnl_capture_states, save_pnl_series
+from persistence.pnl import PnlSeriesRecord, pnl_capture_states, save_pnl_series
 from persistence.submissions import list_platform_submitted_alphas
-from submission.formal import local_formal_submission_eligible
 from worldquant.client import WorldQuantRequestError
 from worldquant.backtests import WorldQuantProtocolError
 
@@ -41,17 +38,14 @@ def capture_next_seed_series(
                                         + [s.task.platform_alpha_id for s in completed if s.task.platform_alpha_id]))
         existing = {alpha for alpha, (captured, retry_at) in states.items()
                     if captured or (retry_at is not None and datetime.fromisoformat(retry_at) > now)}
-        # Qualified history needs PnL regardless of seed admission. Drain that
-        # backlog without rebuilding frontiers and rechecking every seed per read.
+        # Every completed result needs a curve, including failed-quality signals.
+        # Eligibility decides research admission, never whether to collect evidence.
         submitted_ids = {r.platform_alpha_id for r in references}
-        checked = tuple(s for s in completed if s.task.platform_alpha_id not in submitted_ids
-                        and (research_task_ids is not None or local_formal_submission_eligible(s)))
-        if not references and len(checked) < 2:
-            checked = ()  # No pair to compare yet.
+        checked = tuple(s for s in completed if s.task.platform_alpha_id not in submitted_ids)
         required = tuple(dict.fromkeys((
             *(r.platform_alpha_id for r in references),
             *(s.task.platform_alpha_id for s in checked),
-        ))) if checked else ()
+        )))
         alpha = next((a for a in required if a and a not in existing), None)
         if alpha is not None:
             # A candidate curve can affect only its own admission. A newly read
@@ -74,25 +68,6 @@ def capture_next_seed_series(
                                and assess_signal_seed(s).eligible)
             if admit_seeds:
                 synchronize_signal_seeds(connection, observed_at=observed_at, candidate_task_ids=tuple(s.task.task_id for s in candidates))
-            series = list_pnl_series(connection, account_scope=account_scope,
-                                     platform_alpha_ids=frozenset(
-                                         [r.platform_alpha_id for r in references]
-                                         + [s.task.platform_alpha_id for s in candidates if s.task.platform_alpha_id]
-                                     )) if candidates else ()
-            correlations = PnlCorrelations(series)
-            required_candidates = tuple(s for s in candidates
-                                        if assess_seed_correlation(s, references, series,
-                                            correlations=correlations).state == "pending")
-            if not required_candidates and not checked:
-                return None
-            required = tuple(dict.fromkeys((
-                *(r.platform_alpha_id for r in references),
-                *(s.task.platform_alpha_id for s in required_candidates),
-                *(s.task.platform_alpha_id for s in checked),
-            )))
-            alpha = next((a for a in required if a and a not in existing), None)
-            if alpha not in submitted_ids:
-                candidates = tuple(s for s in candidates if s.task.platform_alpha_id == alpha)
     if alpha is None:
         return None
     ready_count = sum(captured for key, (captured, _) in states.items() if key in required)

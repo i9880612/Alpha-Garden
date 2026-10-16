@@ -19,6 +19,32 @@ MAX_SEED_CORRELATION = CORRELATION_CUTOFF
 MIN_SEED_CORRELATION_INTERVALS = MIN_CORRELATION_INTERVALS
 
 
+def assess_seed_redundancy(
+    snapshot: BacktestSnapshot,
+    seeds: tuple[BacktestSnapshot, ...],
+    *, correlations: PnlCorrelations,
+) -> str:
+    """Require usable daily evidence before granting an independent seed root."""
+    task = snapshot.task
+    key = (task.account_scope, task.platform_alpha_id)
+    if correlations.correlation(key, key, minimum_intervals=MIN_SEED_CORRELATION_INTERVALS,
+                                calendar_years=CORRELATION_CALENDAR_YEARS) is None:
+        return "pending"
+    states = []
+    for seed in seeds:
+        if seed.task.task_id == task.task_id or seed.task.account_scope != task.account_scope:
+            continue
+        value = correlations.correlation(
+            key, (seed.task.account_scope, seed.task.platform_alpha_id),
+            minimum_intervals=MIN_SEED_CORRELATION_INTERVALS,
+            calendar_years=CORRELATION_CALENDAR_YEARS,
+        )
+        states.append(correlation_check(value, snapshot.result.sharpe, seed.result.sharpe))
+    if "failed" in states:
+        return "failed"
+    return "pending" if "pending" in states else "passed"
+
+
 @dataclass(frozen=True, slots=True)
 class SeedCorrelationAssessment:
     state: str

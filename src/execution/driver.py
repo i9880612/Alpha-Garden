@@ -100,6 +100,10 @@ def advance_automated_run(
     with open_database(database_path) as connection:
         cycle_number = scheduled_cycle_number(connection, run)
     if not _cycle_has_tasks(database_path, run.run_id, cycle_number):
+        research_task_ids = None
+        if run.optimization_only:
+            with open_database(database_path) as connection:
+                research_task_ids = tuple(link.task_id for link in list_automated_run_backtests(connection, run.run_id))
         old_check = None if run.self_correlation_plan_json is not None else advance_stopped_run_check(
             database_path, client, account_scope=run.account_scope, observed_at=observed_at,
         )
@@ -114,6 +118,7 @@ def advance_automated_run(
             seed_delay = None if run.self_correlation_plan_json is not None else capture_next_seed_series(
                 database_path, client, account_scope=run.account_scope, observed_at=observed_at,
                 admit_seeds=not run.optimization_only,
+                research_task_ids=research_task_ids,
             )
             if seed_delay is not None:
                 if seed_delay == 0:

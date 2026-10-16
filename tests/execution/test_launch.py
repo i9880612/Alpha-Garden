@@ -268,7 +268,7 @@ class AutomatedRunLaunchTests(unittest.TestCase):
                 client_factory=make_client,
             )
         rendered = output.getvalue()
-        for expected in ("阶段[1] 公式生成中", "阶段[1] 公式生成完成", "阶段[2] 筛选完成",
+        for expected in ("阶段[1] 公式生成中", "阶段[1] 候选已选定", "阶段[2] 筛选完成",
                          "[通过]   [未知]        第1轮 01/1 [探索]   alpha-1    S  1.30 F  1.10 T 12.0%",
                          "阶段[5] 结算与学习反馈完成"):
             self.assertIn(expected, rendered)
@@ -280,10 +280,10 @@ class AutomatedRunLaunchTests(unittest.TestCase):
         self.assertEqual(completion.run.max_backtests, 1)
         self.assertTrue(completion.run.real_backtests_authorized)
         self.assertFalse(completion.run.automatic_submissions_enabled)
-        self.assertEqual(completion.platform_request_count, 4)
+        self.assertEqual(completion.platform_request_count, 5)
         self.assertEqual(
             client.calls,
-            ["authenticate", "submit", "poll", "detail", "yearly_stats"],
+            ["authenticate", "submit", "poll", "detail", "yearly_stats", "pnl"],
         )
         self.assertEqual(fake_time.waits, [1.0, 1.0, 1.0, 1.0])
         self.assertEqual(
@@ -613,7 +613,7 @@ class AutomatedRunLaunchTests(unittest.TestCase):
         self.assertEqual(initial_client.calls, ["submit"])
         self.assertEqual(
             client.calls,
-            ["authenticate", "poll", "detail", "yearly_stats"],
+            ["authenticate", "poll", "detail", "yearly_stats", "pnl"],
         )
         with open_database(self.database_path) as connection:
             run_count = connection.execute(
@@ -864,7 +864,7 @@ class AutomatedRunLaunchTests(unittest.TestCase):
         self.assertEqual(completion.run.max_backtests, stopped.run.max_backtests)
         self.assertEqual(completion.run.max_cycles, stopped.run.max_cycles)
         self.assertFalse(completion.run.automatic_submissions_enabled)
-        self.assertEqual(client.calls, ["authenticate", "submit", "poll", "detail", "yearly_stats"])
+        self.assertEqual(client.calls, ["authenticate", "submit", "poll", "detail", "yearly_stats", "pnl"])
         with open_database(self.database_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM automated_runs").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM automated_run_backtests").fetchone()[0], 1)

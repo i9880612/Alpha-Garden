@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from random import Random
 from unittest.mock import Mock, patch
 
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
@@ -61,6 +62,8 @@ from persistence.catalog import (
     replace_window_catalog,
 )
 from persistence.database import open_database
+from persistence.pnl import save_pnl_series
+from tests.learning.test_seed_correlation import series
 from persistence.schema import initialize_database_schema
 from persistence.submissions import (
     FormalSubmissionAttemptRecord,
@@ -365,6 +368,24 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             grades = connection.execute("SELECT r.grade FROM submission_queue q JOIN backtest_results r USING(task_id)").fetchall()
             self.assertEqual([row[0] for row in grades], ["SPECTACULAR", "SPECTACULAR"])
 
+    def test_optimization_planning_does_not_collect_unrelated_history(self):
+        from execution.driver import advance_automated_run
+        self._optimization_parent()
+        unrelated = self._completed_backtest("rank(volume)", sharpe=0.8, fitness=0.4,
+            sharpe_status="FAIL", fitness_status="FAIL", time_offset=3, capture_pnl=False)
+        run_id = self._start_run(generation_count=6, backtest_count=4, max_cycles=1,
+            max_backtests=4, optimization_only=True)
+        client = Mock()
+        client.fetch_pnl.side_effect = AssertionError("unrelated historical curve")
+        result = advance_automated_run(self.database_path, client, run_id,
+            observed_at="2026-08-30T00:04:00+08:00")
+        self.assertEqual(result.action, "cycle_planned")
+        self.assertFalse(result.platform_request_performed)
+        with open_database(self.database_path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM platform_pnl_series WHERE platform_alpha_id = ?",
+                (f"alpha-{unrelated}",)).fetchone()[0], 0)
+
     def test_optimization_partial_batch_recovers_and_settles_without_exploration(self):
         parent_id = self._optimization_parent()
         run_id = self._start_run(generation_count=6, backtest_count=4, max_cycles=1,
@@ -383,7 +404,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
                                          created_at="2026-08-30T00:05:00+08:00")
         self.assertTrue(recovered.recovered)
         self.assertEqual(recovered.backtests, plan.backtests)
-        self._complete_plan(plan, observed_at="2026-08-30T00:06:00+08:00")
+        self._complete_plan(plan, observed_at="2026-08-30T00:06:00+08:00", capture_pnl=False)
         from execution.driver import advance_automated_run
         from tests.learning.test_seed_correlation import independent_series
         from worldquant.pnl import PnlObservation
@@ -1130,7 +1151,8 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
 
         submitted_formula = "rank(ts_rank(close,22)+ts_zscore(open,66))"
         submitted_id = self._signal_seed(submitted_formula)
-        unsubmitted_id = self._signal_seed("rank(ts_rank(open,22)+ts_zscore(close,66))")
+        unsubmitted_id = self._signal_seed("rank(ts_rank(open,22)+ts_zscore(close,66))",
+            pnl_increments=[math.cos(i) for i in range(300)])
         # A different remote ID with the same formula is still already submitted.
         self._record_submitted_alpha(submitted_formula,
             observed_at="2026-08-30T00:03:00+08:00", settings=self.settings)
@@ -1985,6 +2007,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         qualified_task_id: str | None = None,
         qualified_sharpe: float = 1.3,
         cancel_mutations: bool = False,
+        capture_pnl: bool = True,
     ) -> None:
         with open_database(self.database_path) as connection:
             for snapshot in plan.backtests:
@@ -2009,6 +2032,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
                 self._complete_with_empty_yearly_stats(
                     connection,
                     task_id,
+                    capture_pnl=capture_pnl,
                     platform_alpha_id=f"alpha-{task_id}",
                     observed_at=observed_at,
                     sharpe=qualified_sharpe if qualified else 0.5,
@@ -2040,6 +2064,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         fitness_status: str = "FAIL",
         low_sub_status: str = "PASS",
         settings: dict[str, object] | None = None,
+        pnl_increments: list[float] | None = None,
     ) -> str:
         with open_database(self.database_path) as connection:
             parent = prepare_backtest_task(
@@ -2058,6 +2083,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             completed = self._complete_with_empty_yearly_stats(
                 connection,
                 parent.task.task_id,
+                pnl_increments=pnl_increments,
                 platform_alpha_id=f"alpha-{parent.task.task_id}",
                 observed_at="2026-08-30T00:02:00+08:00",
                 sharpe=1.1,
@@ -2094,6 +2120,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         sharpe_status: str,
         fitness_status: str,
         time_offset: int,
+        capture_pnl: bool = True,
     ) -> str:
         with open_database(self.database_path) as connection:
             prepared = prepare_backtest_task(
@@ -2112,6 +2139,7 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             completed = self._complete_with_empty_yearly_stats(
                 connection,
                 prepared.task.task_id,
+                capture_pnl=capture_pnl,
                 platform_alpha_id=f"alpha-{prepared.task.task_id}",
                 observed_at=f"2026-08-30T00:{time_offset:02d}:20+08:00",
                 sharpe=sharpe,
@@ -2149,6 +2177,8 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         drawdown: float,
         margin: float,
         checks: tuple[BacktestCheck, ...],
+        capture_pnl: bool = True,
+        pnl_increments: list[float] | None = None,
     ):
         apply_backtest_detail(
             connection,
@@ -2167,12 +2197,17 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             ),
             observed_at=observed_at,
         )
-        return record_backtest_yearly_stats(
+        completed = record_backtest_yearly_stats(
             connection,
             task_id,
             (),
             observed_at=observed_at,
         )
+        if capture_pnl:
+            rng = Random("synthetic:" + platform_alpha_id)
+            increments = pnl_increments if pnl_increments is not None else [rng.uniform(-1, 1) for _ in range(300)]
+            save_pnl_series(connection, series(platform_alpha_id, increments, "group-account"))
+        return completed
 
     def _mutation(self, task_id: str):
         with open_database(self.database_path) as connection:

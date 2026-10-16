@@ -7,7 +7,7 @@ from execution.backtests import (
     apply_backtest_detail, prepare_backtest_task, record_backtest_yearly_stats, record_submission_accepted,
 )
 from execution.seed_evidence import capture_next_seed_series
-from execution.seeds import load_signal_frontiers
+from execution.seeds import load_signal_frontiers, synchronize_signal_seeds
 from persistence.database import open_database
 from persistence.pnl import list_pnl_series, save_pnl_series
 from persistence.seeds import list_signal_seeds
@@ -26,7 +26,7 @@ def pending_seed():
     case = seed_tests.SignalSeedExecutionTests()
     case.setUp()
     with open_database(case.database_path) as connection:
-        snapshot = case._completed(connection, "rank(close)", "1", 1.2, 0.8)
+        snapshot = case._completed(connection, "rank(close)", "1", 1.2, 0.8, capture_pnl=False)
         payload = {"id": "reference", "status": "ACTIVE", "hidden": False,
                    "dateSubmitted": "2026-09-01T00:00:00+00:00", "regular": {"code": "rank(reference)"}}
         record_platform_submitted_alphas(connection, (PlatformSubmittedAlphaRecord(
@@ -131,20 +131,20 @@ def checked_result(connection, identity, *, failed_check=None):
     ), observed_at=finished)
 
 
-def test_unchecked_result_passing_non_sc_checks_collects_local_sc_evidence(pending_seed):
-    case, _ = pending_seed
+def test_every_completed_result_collects_pnl_including_failed_quality(pending_seed):
+    case, root = pending_seed
     with open_database(case.database_path) as connection:
         eligible = checked_result(connection, "7")
-        checked_result(connection, "8", failed_check="LOW_FITNESS")
+        failed = checked_result(connection, "8", failed_check="LOW_FITNESS")
     client = Mock()
     client.fetch_pnl.side_effect = lambda *, platform_alpha_id: PnlObservation(
         series(platform_alpha_id, [math.sin(i) for i in range(300)]).points)
     results = [capture_next_seed_series(case.database_path, client, account_scope="group-account",
                                         observed_at="2026-09-09T00:00:00+00:00", candidate_task_ids=())
-               for _ in range(3)]
-    assert results == [0.0, 0.0, None]
+               for _ in range(5)]
+    assert results == [0.0, 0.0, 0.0, 0.0, None]
     assert [call.kwargs["platform_alpha_id"] for call in client.fetch_pnl.call_args_list] == [
-        "reference", eligible.task.platform_alpha_id]
+        "reference", root.task.platform_alpha_id, eligible.task.platform_alpha_id, failed.task.platform_alpha_id]
     client.fetch_formal_submission_check.assert_not_called()
     client.submit_formal_alpha.assert_not_called()
 
@@ -156,7 +156,7 @@ def test_backfill_selection_does_not_decode_unrelated_curves(pending_seed, monke
         save_pnl_series(connection, series("unrelated", [math.sin(i) for i in range(300)]))
     def forbid_curve_load(*args, **kwargs):
         pytest.fail("choosing the next missing curve only requires capture states")
-    monkeypatch.setattr("execution.seed_evidence.list_pnl_series", forbid_curve_load)
+    monkeypatch.setattr("execution.seeds.list_pnl_series", forbid_curve_load)
     client = Mock()
     client.fetch_pnl.return_value = PnlObservation(None, 0)
     assert capture_next_seed_series(case.database_path, client, account_scope="group-account",
@@ -210,7 +210,7 @@ def test_backfill_resumes_after_cooldown_without_blocking_other_candidates(pendi
         return capture_next_seed_series(case.database_path, client, account_scope="group-account",
             observed_at=observed, candidate_task_ids=(first.task.task_id, second.task.task_id), admit_seeds=admit_seeds)
 
-    assert [capture() for _ in range(4)] == [0.0, 0.0, 0.0, None]
+    assert [capture() for _ in range(5)] == [0.0, 0.0, 0.0, 0.0, None]
     with open_database(case.database_path) as connection:
         assert {s.root_task_id for s in list_signal_seeds(connection)} == (
             {second.task.task_id} if admit_seeds else set())
@@ -221,7 +221,7 @@ def test_backfill_resumes_after_cooldown_without_blocking_other_candidates(pendi
     with open_database(case.database_path) as connection:
         assert {s.root_task_id for s in list_signal_seeds(connection)} == (
             {first.task.task_id, second.task.task_id} if admit_seeds else set())
-    assert attempts == {"reference": 1, first.task.platform_alpha_id: 2, second.task.platform_alpha_id: 1}
+    assert attempts == {"reference": 1, "alpha_1": 1, first.task.platform_alpha_id: 2, second.task.platform_alpha_id: 1}
     client.submit_backtest.assert_not_called()
     client.submit_formal_alpha.assert_not_called()
 
@@ -248,12 +248,12 @@ def test_final_seed_pass_uses_current_references_for_cached_candidate(pending_se
                  "dateSubmitted": "2026-09-08T00:00:00+00:00", "regular": {"code": "rank(blocking)"},
                  "is": {"sharpe": 1.5}}, "2026-09-09T00:00:00+00:00"),))
         assert capture() == 0.0
-    assert [capture() for _ in range(2)] == [0.0, None]
+    assert [capture() for _ in range(3)] == [0.0, 0.0, None]
     with open_database(case.database_path) as connection:
         assert {s.root_task_id for s in list_signal_seeds(connection)} == (
             set() if add_blocking_reference else {cached.task.task_id})
     assert {call.kwargs["platform_alpha_id"] for call in client.fetch_pnl.call_args_list} == {
-        "reference", missing.task.platform_alpha_id} | ({"blocking"} if add_blocking_reference else set())
+        "reference", "alpha_1", missing.task.platform_alpha_id} | ({"blocking"} if add_blocking_reference else set())
 
 
 def test_protocol_error_is_deferred_but_unrelated_program_error_is_not_swallowed(pending_seed):
@@ -267,3 +267,82 @@ def test_protocol_error_is_deferred_but_unrelated_program_error_is_not_swallowed
     client.fetch_pnl.side_effect = ValueError("program_invariant_broken")
     with pytest.raises(ValueError, match="program_invariant_broken"):
         advance(case, snapshot, client, "2026-09-09T00:00:01+00:00")
+
+
+def test_empty_submitted_baseline_still_collects_single_failed_quality_curve():
+    case = seed_tests.SignalSeedExecutionTests()
+    case.setUp()
+    try:
+        with open_database(case.database_path) as connection:
+            first = case._completed(connection, "rank(close)", "1", 1.3, 0.8, capture_pnl=False)
+            assert synchronize_signal_seeds(connection) == ()
+        client = Mock()
+        client.fetch_pnl.return_value = PnlObservation(series("alpha_1", [math.sin(i) for i in range(300)]).points)
+        assert capture_next_seed_series(case.database_path, client, account_scope="group-account",
+            observed_at="2026-09-09T00:00:00+00:00") == 0.0
+        client.fetch_pnl.assert_called_once_with(platform_alpha_id="alpha_1")
+        with open_database(case.database_path) as connection:
+            assert [s.root_task_id for s in list_signal_seeds(connection)] == [first.task.task_id]
+            second = case._completed(connection, "rank(open)", "2", 1.3, 0.8, capture_pnl=False)
+            assert synchronize_signal_seeds(connection, candidate_task_ids=(second.task.task_id,)) == ()
+        assert capture_next_seed_series(case.database_path, client, account_scope="group-account",
+            observed_at="2026-09-09T00:00:01+00:00") == 0.0
+        assert capture_next_seed_series(case.database_path, client, account_scope="group-account",
+            observed_at="2026-09-09T00:00:02+00:00") is None
+        with open_database(case.database_path) as connection:
+            assert len(list_pnl_series(connection)) == 2
+            assert [s.root_task_id for s in list_signal_seeds(connection)] == [first.task.task_id]
+        client.submit_backtest.assert_not_called()
+        client.submit_formal_alpha.assert_not_called()
+    finally:
+        case.doCleanups()
+
+
+@pytest.mark.parametrize("increments", ([1.0] * 300, [math.sin(i) for i in range(100)]))
+def test_unusable_curve_does_not_admit_seed_without_submitted_references(increments):
+    case = seed_tests.SignalSeedExecutionTests()
+    case.setUp()
+    try:
+        with open_database(case.database_path) as connection:
+            first = case._completed(connection, "rank(close)", "1", 1.3, 0.8, capture_pnl=False)
+            save_pnl_series(connection, series(first.task.platform_alpha_id, increments, "group-account"))
+            assert synchronize_signal_seeds(connection) == ()
+    finally:
+        case.doCleanups()
+
+
+def test_missing_existing_seed_curve_keeps_new_root_pending_until_comparable():
+    from persistence.seeds import SignalSeedRecord, create_signal_seed
+    case = seed_tests.SignalSeedExecutionTests()
+    case.setUp()
+    try:
+        with open_database(case.database_path) as connection:
+            old = case._completed(connection, "rank(close)", "1", 1.3, 0.8, capture_pnl=False)
+            create_signal_seed(connection, SignalSeedRecord(old.task.task_id, old.task.finished_at))
+            new = case._completed(connection, "rank(open)", "2", 1.3, 0.8)
+            assert synchronize_signal_seeds(connection) == ()
+            save_pnl_series(connection, series(old.task.platform_alpha_id,
+                [math.cos(i) for i in range(300)], "group-account"))
+            assert [s.root_task_id for s in synchronize_signal_seeds(connection)] == [new.task.task_id]
+    finally:
+        case.doCleanups()
+
+
+def test_admission_compares_current_parent_even_when_original_root_is_uncorrelated():
+    case = seed_tests.SignalSeedExecutionTests()
+    case.setUp()
+    try:
+        with open_database(case.database_path) as connection:
+            root = case._completed(connection, "rank(close)", "1", 1.3, 0.8, capture_pnl=False)
+            save_pnl_series(connection, series(root.task.platform_alpha_id,
+                [math.cos(i) for i in range(300)], "group-account"))
+            assert len(synchronize_signal_seeds(connection)) == 1
+            parent = case._child(connection, root.task.task_id, "rank(open)", "2",
+                sharpe=1.5, fitness=1.1, base_passed=True)
+            save_pnl_series(connection, series(parent.task.platform_alpha_id,
+                [math.sin(i) for i in range(300)], "group-account"))
+            candidate = case._completed(connection, "rank(volume)", "3", 1.4, 0.8)
+            assert synchronize_signal_seeds(connection, candidate_task_ids=(candidate.task.task_id,)) == ()
+            assert [s.root_task_id for s in list_signal_seeds(connection)] == [root.task.task_id]
+    finally:
+        case.doCleanups()
