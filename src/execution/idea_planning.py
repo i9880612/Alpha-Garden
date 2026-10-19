@@ -1,6 +1,7 @@
 """Load the idea variant pool for one cycle without letting profile problems stop a run."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -11,8 +12,18 @@ from generation.field_profiles import (
     load_field_profiles,
     reconcile_field_profiles,
 )
-from generation.ideas import IdeaVariantPool, build_idea_variant_pool
+from generation.ideas import (
+    COMBO_MIN_ABS_SHARPE,
+    COMBO_TEMPLATE_ID,
+    ComboParent,
+    IdeaVariant,
+    IdeaVariantPool,
+    build_idea_variant_pool,
+    plan_combo_variants,
+)
+from generation.parser import FormulaSyntaxError, parse_formula
 from persistence.catalog import FieldCatalogContext, list_field_catalog
+from persistence.pnl import list_pnl_series
 
 FIELD_PROFILE_FILE_NAME = "field-profiles.json"
 # Hand-reviewed and rule-profiled fields both feed templates; within each template the
@@ -53,3 +64,57 @@ def load_idea_pool(
         if profile.tier in ENABLED_TIERS
     )
     return build_idea_variant_pool(catalog, reconciled.profiles, enabled_field_ids=enabled)
+
+
+def load_combo_variants(
+    connection: sqlite3.Connection,
+    catalog: GenerationCatalog,
+    *,
+    account_scope: str,
+) -> tuple[IdeaVariant, ...]:
+    """Combos from this account's completed single-template backtests with daily PnL."""
+    rows = connection.execute(
+        """SELECT i.template_id, i.family, i.field_ids_json, i.hypothesis,
+                  t.formula, t.platform_alpha_id, r.sharpe
+           FROM formula_ideas i
+           JOIN backtest_tasks t ON t.task_id = i.task_id
+           JOIN backtest_results r ON r.task_id = i.task_id
+           WHERE t.account_scope = ? AND t.status = 'completed'
+             AND t.platform_alpha_id IS NOT NULL AND i.template_id != ?
+             AND abs(r.sharpe) >= ?""",
+        (account_scope, COMBO_TEMPLATE_ID, COMBO_MIN_ABS_SHARPE),
+    ).fetchall()
+    if len(rows) < 2:
+        return ()
+    series = {
+        record.platform_alpha_id: _daily_changes(record.points)
+        for record in list_pnl_series(
+            connection,
+            platform_alpha_ids=frozenset(row[5] for row in rows),
+            account_scope=account_scope,
+        )
+        if record.points
+    }
+    parents = []
+    for template_id, family, field_ids_json, hypothesis, formula, alpha_id, sharpe in rows:
+        daily = series.get(alpha_id)
+        if not daily:
+            continue
+        try:
+            expression = parse_formula(formula).expression
+        except FormulaSyntaxError:
+            continue
+        parents.append(ComboParent(
+            variant=IdeaVariant(
+                template_id=template_id, family=family, hypothesis=hypothesis,
+                field_ids=tuple(json.loads(field_ids_json)), window=None, expression=expression,
+            ),
+            sharpe=float(sharpe),
+            daily_pnl=daily,
+        ))
+    return plan_combo_variants(parents, catalog)
+
+
+def _daily_changes(points: tuple[tuple[str, float], ...]) -> dict[str, float]:
+    """Platform PnL points are cumulative; correlation needs day-to-day changes."""
+    return {points[i][0]: points[i][1] - points[i - 1][1] for i in range(1, len(points))}

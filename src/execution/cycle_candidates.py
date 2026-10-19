@@ -15,7 +15,12 @@ from generation.candidate import (
     mutation_candidate,
 )
 from generation.catalog import GenerationCatalog
-from generation.ideas import IdeaVariant, IdeaVariantPool, plan_idea_batch
+from generation.ideas import (
+    STRATEGY_LABEL_PREFIX,
+    IdeaVariant,
+    IdeaVariantPool,
+    plan_idea_batch,
+)
 from generation.parser import FormulaSyntaxError, parse_formula
 from generation.seed_formulas import seed_mother_candidates
 from generation.polishing import POLISHING_FAMILIES, iter_window_mutation_leaves
@@ -477,6 +482,7 @@ def build_cycle_candidates(
     cold_start: bool = False,
     idea_pool: IdeaVariantPool | None = None,
     idea_percent: int = 0,
+    combo_variants: tuple[IdeaVariant, ...] = (),
 ) -> CycleCandidatePlan:
     if (
         isinstance(idea_percent, bool) or not isinstance(idea_percent, int)
@@ -555,9 +561,11 @@ def build_cycle_candidates(
         ideas = _idea_candidates(
             catalog, policy, idea_pool, target_count=idea_target, seed=seed_start,
             existing_formulas=existing_formulas + tuple(item.candidate.formula for item in initial_candidates),
+            combo_variants=combo_variants,
         )
         missing = idea_target - len(ideas)
-        phase(cycle_number, 1, f"想法模板选用 {len(ideas)}/{idea_target} 条"
+        combo_count = sum(1 for item in ideas if item.idea is not None and item.idea.family == "combo")
+        phase(cycle_number, 1, f"想法模板选用 {len(ideas)}/{idea_target} 条（其中组合 {combo_count} 条）"
               + (f"；模板库接近饱和，缺口 {missing} 条由随机探索补齐" if missing else ""))
         initial_candidates += ideas
         random_backtest_count -= len(ideas)
@@ -668,6 +676,10 @@ def build_cycle_candidates(
     )
 
 
+# Share of the template slots offered to combos of already-tested signals; singles fill the rest.
+COMBO_SHARE_PERCENT = 30
+
+
 def _idea_candidates(
     catalog: GenerationCatalog,
     policy: BacktestSettingsPolicy,
@@ -676,10 +688,26 @@ def _idea_candidates(
     target_count: int,
     seed: int,
     existing_formulas: tuple[str, ...],
+    combo_variants: tuple[IdeaVariant, ...] = (),
 ) -> tuple[CycleCandidate, ...]:
-    """Draw untested template variants; selection-rejected ones are skipped, never retried."""
+    """Draw untested combos first, then template variants; rejected ones are skipped, never retried."""
     excluded = set(supported_formula_identities(existing_formulas).formula_fingerprints)
     chosen: list[CycleCandidate] = []
+
+    def take(variant: IdeaVariant, candidate: FormulaCandidate) -> None:
+        excluded.add(variant.fingerprint)
+        settings = choose_backtest_settings(candidate.expression, catalog, policy)
+        selection = formula_selection_candidate(candidate.expression, catalog, settings)
+        if not selection.rejection_reasons:
+            chosen.append(CycleCandidate(candidate, settings, idea=variant))
+
+    combo_target = target_count * COMBO_SHARE_PERCENT // 100
+    for variant in combo_variants:
+        if len(chosen) >= combo_target:
+            break
+        if variant.fingerprint not in excluded:
+            take(variant, exploration_candidate(
+                variant.expression, strategy_label=STRATEGY_LABEL_PREFIX + variant.template_id))
     attempt = 0
     while len(chosen) < target_count:
         batch = plan_idea_batch(
@@ -689,11 +717,7 @@ def _idea_candidates(
         if not batch.candidates:
             break
         for item in batch.candidates:
-            excluded.add(item.variant.fingerprint)
-            settings = choose_backtest_settings(item.candidate.expression, catalog, policy)
-            selection = formula_selection_candidate(item.candidate.expression, catalog, settings)
-            if not selection.rejection_reasons:
-                chosen.append(CycleCandidate(item.candidate, settings, idea=item.variant))
+            take(item.variant, item.candidate)
         attempt += 1
     return tuple(chosen)
 

@@ -22,11 +22,14 @@ from generation.catalog import (
 from generation.field_profiles import FieldProfile, FieldProfileSet
 from generation.formula import Call, analyze_formula
 from generation.ideas import (
+    COMBO_MAX_USES_PER_PARENT,
     FAMILIES,
     FORBIDDEN_OPERATORS,
     TEMPLATES,
+    ComboParent,
     build_combo_variant,
     build_idea_variant_pool,
+    plan_combo_variants,
     plan_idea_batch,
 )
 from generation.unit_validation import find_coarse_unit_issues
@@ -217,6 +220,62 @@ def test_batch_rejects_bad_requests_and_allows_zero():
     for bad in (-1, True, 1.5):
         with pytest.raises(ValueError):
             plan_idea_batch(pool, target_count=bad, seed=1)
+
+
+def _parent(variant, sharpe, wave, noise=0.0):
+    import math
+    days = [f"2020-{1 + i // 28:02d}-{1 + i % 28:02d}" for i in range(300)]
+    return ComboParent(variant, sharpe, {d: math.sin(i * wave) + noise * math.cos(i * 7.3)
+                                         for i, d in enumerate(days)})
+
+
+def test_combo_flips_negative_parents_and_keeps_formula_valid():
+    catalog = _catalog()
+    by_template = _pool(catalog=catalog).by_template()
+    combo = build_combo_variant(by_template["reversal"][0], by_template["value"][0], catalog,
+                                signs=(-1, 1))
+    assert validate_formula(combo.expression, catalog).is_valid
+    assert "+-" not in combo.formula and combo.formula.count("rank(") == 2
+    assert combo.formula.count("-rank(") == 1
+    with pytest.raises(ValueError):
+        build_combo_variant(by_template["reversal"][0], by_template["value"][0], catalog,
+                            signs=(2, 1))
+
+
+def test_combo_planning_pairs_independent_strong_parents_across_families():
+    catalog = _catalog()
+    t = _pool(catalog=catalog).by_template()
+    reversal, momentum, value, quality = (t["reversal"][0], t["momentum"][0], t["value"][0],
+                                          t["quality"][0])
+    parents = [
+        _parent(reversal, 1.4, 0.11),
+        _parent(momentum, 1.3, 0.11),           # same family as reversal: never paired with it
+        _parent(value, -1.1, 0.53),             # negative: enters flipped
+        _parent(quality, 1.2, 0.11, noise=0.1),  # moves with reversal: too correlated to pair
+        _parent(t["low_vol"][0], 0.3, 0.97),    # too weak to be a parent
+    ]
+    combos = plan_combo_variants(parents, catalog)
+    pairs = {frozenset(v.hypothesis.split("：")[1].split(" + ")) for v in combos}
+    assert frozenset({"reversal", "momentum"}) not in pairs
+    assert frozenset({"reversal", "quality"}) not in pairs
+    assert all("low_vol" not in pair for pair in pairs)
+    assert frozenset({"reversal", "value"}) in pairs
+    flipped = [v for v in combos if "value" in v.hypothesis]
+    assert flipped and all(v.formula.startswith("-rank(") or "-rank(" in v.formula for v in flipped)
+    assert all(v.family == "combo" and v.reviewed for v in combos)
+    assert plan_combo_variants(parents, catalog) == combos
+
+
+def test_combo_planning_spreads_parents_and_needs_enough_shared_days():
+    catalog = _catalog()
+    t = _pool(catalog=catalog).by_template()
+    star = _parent(t["reversal"][0], 2.0, 0.11)
+    others = [_parent(v, 1.0, 0.37 + k * 0.29) for k, v in
+              enumerate(t["value"] + t["forward_value"] + t["quality"])]
+    combos = plan_combo_variants([star, *others], catalog)
+    assert sum("reversal" in v.hypothesis for v in combos) == COMBO_MAX_USES_PER_PARENT
+    short = ComboParent(t["momentum"][0], 1.5, dict(list(star.daily_pnl.items())[:100]))
+    assert plan_combo_variants([short, others[0]], catalog) == ()
 
 
 def test_combo_needs_two_families_and_stays_valid():

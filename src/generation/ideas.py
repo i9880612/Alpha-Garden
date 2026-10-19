@@ -8,7 +8,7 @@ family, then by template. Nothing here touches the database or the platform.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from random import Random
 
@@ -453,20 +453,111 @@ def plan_idea_batch(
 
 
 def build_combo_variant(
-    first: IdeaVariant, second: IdeaVariant, catalog: GenerationCatalog,
+    first: IdeaVariant,
+    second: IdeaVariant,
+    catalog: GenerationCatalog,
+    *,
+    signs: tuple[int, int] = (1, 1),
 ) -> IdeaVariant | None:
-    """Add two single-template signals from different families; None if not combinable."""
+    """Add two single-template signals from different families; None if not combinable.
+
+    A sign of -1 flips a parent whose backtest showed the opposite direction.
+    """
     if first.family == second.family or COMBO_TEMPLATE_ID in {first.template_id, second.template_id}:
         return None
-    left, right = sorted((first, second), key=lambda item: item.fingerprint)
-    outcome = _prepare_expression(f"{left.formula}+{right.formula}", catalog)
+    if any(sign not in (1, -1) for sign in signs):
+        raise ValueError("idea_combo_sign_invalid")
+    left, right = sorted(zip((first, second), signs), key=lambda item: item[0].fingerprint)
+    (left_variant, left_sign), (right_variant, right_sign) = left, right
+    formula = (("-" if left_sign < 0 else "") + left_variant.formula
+               + ("-" if right_sign < 0 else "+") + right_variant.formula)
+    outcome = _prepare_expression(formula, catalog)
     if isinstance(outcome, str):
         return None
     return IdeaVariant(
-        template_id=COMBO_TEMPLATE_ID, family="combo", hypothesis=COMBO_HYPOTHESIS,
-        field_ids=tuple(dict.fromkeys(left.field_ids + right.field_ids)), window=None,
+        template_id=COMBO_TEMPLATE_ID, family="combo",
+        hypothesis=f"{COMBO_HYPOTHESIS}：{left[0].template_id} + {right[0].template_id}",
+        field_ids=tuple(dict.fromkeys(left[0].field_ids + right[0].field_ids)), window=None,
         expression=outcome,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ComboParent:
+    """A backtested single-template formula and its daily PnL changes."""
+    variant: IdeaVariant
+    sharpe: float
+    daily_pnl: Mapping[str, float]
+
+
+COMBO_MIN_ABS_SHARPE = 0.7
+COMBO_MAX_CORRELATION = 0.5
+COMBO_MAX_PARENTS = 60
+COMBO_MAX_USES_PER_PARENT = 3
+_COMBO_MIN_OVERLAP_DAYS = 250
+
+
+def plan_combo_variants(
+    parents: Iterable[ComboParent],
+    catalog: GenerationCatalog,
+) -> tuple[IdeaVariant, ...]:
+    """Pair strong parents from different families whose PnL moves independently.
+
+    Parents with a negative Sharpe enter flipped. Pairs are ordered by the Sharpe two
+    equally weighted signals would reach given their correlation; each parent joins at
+    most a few pairs so one strong idea does not crowd out the rest. All limits are fixed,
+    so the work per cycle stays bounded however much history accumulates.
+    """
+    strong = sorted(
+        (parent for parent in parents
+         if abs(parent.sharpe) >= COMBO_MIN_ABS_SHARPE
+         and parent.variant.template_id != COMBO_TEMPLATE_ID),
+        key=lambda parent: (-abs(parent.sharpe), parent.variant.fingerprint),
+    )[:COMBO_MAX_PARENTS]
+    scored: list[tuple[float, int, int]] = []
+    for i, first in enumerate(strong):
+        for j in range(i + 1, len(strong)):
+            second = strong[j]
+            if first.variant.family == second.variant.family:
+                continue
+            correlation = _signed_correlation(first, second)
+            if correlation is None or correlation > COMBO_MAX_CORRELATION:
+                continue
+            expected = (abs(first.sharpe) + abs(second.sharpe)) / (2.0 + 2.0 * correlation) ** 0.5
+            scored.append((expected, i, j))
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    uses: Counter[int] = Counter()
+    combos: list[IdeaVariant] = []
+    for _, i, j in scored:
+        if uses[i] >= COMBO_MAX_USES_PER_PARENT or uses[j] >= COMBO_MAX_USES_PER_PARENT:
+            continue
+        first, second = strong[i], strong[j]
+        combo = build_combo_variant(
+            first.variant, second.variant, catalog,
+            signs=(1 if first.sharpe > 0 else -1, 1 if second.sharpe > 0 else -1),
+        )
+        if combo is None:
+            continue
+        uses[i] += 1
+        uses[j] += 1
+        combos.append(combo)
+    return tuple(combos)
+
+
+def _signed_correlation(first: ComboParent, second: ComboParent) -> float | None:
+    days = sorted(set(first.daily_pnl) & set(second.daily_pnl))
+    if len(days) < _COMBO_MIN_OVERLAP_DAYS:
+        return None
+    x = [first.daily_pnl[day] for day in days]
+    y = [second.daily_pnl[day] for day in days]
+    mean_x, mean_y = sum(x) / len(x), sum(y) / len(y)
+    sxx = sum((value - mean_x) ** 2 for value in x)
+    syy = sum((value - mean_y) ** 2 for value in y)
+    if sxx == 0 or syy == 0:
+        return None
+    sxy = sum((a - mean_x) * (b - mean_y) for a, b in zip(x, y))
+    sign = (1 if first.sharpe > 0 else -1) * (1 if second.sharpe > 0 else -1)
+    return sign * sxy / (sxx * syy) ** 0.5
 
 
 def _is_reviewed(profiles: FieldProfileSet, field_id: str) -> bool:

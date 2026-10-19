@@ -14,7 +14,7 @@ from execution.backtest_batches import (
 )
 from execution.backtests import backtest_request_fingerprint
 from execution.catalog import load_generation_catalog
-from execution.idea_planning import load_idea_pool
+from execution.idea_planning import load_combo_variants, load_idea_pool
 from execution.direction import build_direction_candidates
 from execution.cycle_candidates import (
     OptimizationCandidatesExhausted,
@@ -212,6 +212,9 @@ def plan_automated_cycle(
         idea_pool = load_idea_pool(
             connection, database_path, catalog, catalog_context, cycle_number=cycle_number,
         ) if idea_percent else None
+        combo_variants = load_combo_variants(
+            connection, catalog, account_scope=run.account_scope,
+        ) if idea_pool is not None else ()
         evidence_cutoff = _timestamp(created_at, "action_effect_cutoff_invalid")
         historical_tasks = list_backtest_tasks(connection)
         reserved_tasks = tuple(task for task in historical_tasks
@@ -507,6 +510,7 @@ def plan_automated_cycle(
             direction_candidates=direction_candidates,
             idea_pool=idea_pool,
             idea_percent=idea_percent,
+            combo_variants=combo_variants,
             cold_start=(not run.optimization_only and cycle_number == 1
                         and not submitted_alphas
                         and not any(task.account_scope == run.account_scope for task in historical_tasks)),

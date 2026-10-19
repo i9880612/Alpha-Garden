@@ -1046,6 +1046,35 @@ class IdeaExplorationShareTests(unittest.TestCase):
                                  random_formulas=("rank(open)", "rank(-open)"))
             self.assertTrue(all(item.idea is None for item in plan.candidates))
 
+    def test_combos_take_their_share_first_and_are_recorded_as_combos(self):
+        from generation.ideas import build_combo_variant
+        by_template = self.pool.by_template()
+        other_family = replace(by_template["low_vol"][0], family="valuation")
+        combos = tuple(
+            build_combo_variant(by_template["reversal"][i], other_family, self.catalog)
+            for i in range(len(by_template["reversal"])))
+        combos = tuple(c for c in combos if c is not None)
+        self.assertTrue(combos)
+        allocation = BacktestSourceAllocation(
+            requested_count=10, minimum_exploration_count=10, exploration_count=10,
+            structural_evolution_count=0, local_polishing_count=0, signal_improvements=(),
+            reason="exploration_reserve_uses_full_batch",
+        )
+        plan = build_cycle_candidates(
+            self.catalog, self.policy, cycle_number=1, requested_generation_count=20,
+            requested_backtest_count=10, exploration_seed_attempt_multiplier=2,
+            source_allocation=allocation, improvement_pools=(),
+            exploration_field_candidates=("close", "open"), group_candidates=(),
+            existing_formulas=(combos[0].formula,), seed_start=1,
+            idea_pool=self.pool, idea_percent=100, combo_variants=combos,
+        )
+        drawn = [item.idea for item in plan.candidates if item.idea is not None]
+        self.assertEqual(len(drawn), 10)
+        combo_drawn = [idea for idea in drawn if idea.family == "combo"]
+        self.assertEqual(len(combo_drawn), min(3, len(combos) - 1))  # 30% of 10, tested one skipped
+        self.assertNotIn(combos[0].fingerprint, {idea.fingerprint for idea in combo_drawn})
+        self.assertEqual(drawn[:len(combo_drawn)], combo_drawn)
+
     def test_invalid_share_is_rejected(self):
         for bad in (-1, 101, True):
             with self.assertRaisesRegex(ValueError, "automated_cycle_idea_percent_invalid"):
