@@ -74,6 +74,8 @@ def _p(field_id, kind, cadence, scale, direction="unknown", role=None, metric=No
 _PROFILES = (
     _p("close", "price", "daily", "price", dataset="pv1"),
     _p("vwap", "price", "daily", "price", dataset="pv1"),
+    _p("high", "price", "daily", "price", dataset="pv1"),
+    _p("low", "price", "daily", "price", dataset="pv1"),
     _p("returns", "price", "daily", "ratio", dataset="pv1"),
     _p("volume", "volume", "daily", "count", dataset="pv1"),
     _p("cap", "price", "daily", "amount", "-", dataset="pv1"),

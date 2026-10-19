@@ -268,7 +268,7 @@ class AutomatedRunLaunchTests(unittest.TestCase):
                 client_factory=make_client,
             )
         rendered = output.getvalue()
-        for expected in ("阶段[1] 公式生成中", "阶段[1] 候选已选定", "阶段[2] 筛选完成",
+        for expected in ("阶段[1] 公式生成中", "阶段[1] 公式生成完成", "阶段[2] 筛选完成",
                          "[通过]   [未知]        第1轮 01/1 [探索]   alpha-1    S  1.30 F  1.10 T 12.0%",
                          "阶段[5] 结算与学习反馈完成"):
             self.assertIn(expected, rendered)

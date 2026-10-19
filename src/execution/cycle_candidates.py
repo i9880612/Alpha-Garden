@@ -22,7 +22,6 @@ from generation.ideas import (
     plan_idea_batch,
 )
 from generation.parser import FormulaSyntaxError, parse_formula
-from generation.seed_formulas import seed_mother_candidates
 from generation.polishing import POLISHING_FAMILIES, iter_window_mutation_leaves
 from generation.internal_edits import (
     iter_internal_edit_candidates,
@@ -479,7 +478,6 @@ def build_cycle_candidates(
     existing_formulas: tuple[str, ...],
     seed_start: int,
     direction_candidates: tuple[CycleCandidate, ...] = (),
-    cold_start: bool = False,
     idea_pool: IdeaVariantPool | None = None,
     idea_percent: int = 0,
     combo_variants: tuple[IdeaVariant, ...] = (),
@@ -548,14 +546,8 @@ def build_cycle_candidates(
         )
 
     exploration_backtest_count = source_allocation.exploration_count
-    mothers = _cold_start_candidates(
-        catalog, policy, existing_formulas=existing_formulas,
-        limit=exploration_backtest_count,
-    ) if cold_start and exploration_backtest_count else ()
-    initial_candidates = tuple(improvement_candidates) + mothers
-    random_backtest_count = exploration_backtest_count - len(mothers)
-    if cold_start:
-        phase(cycle_number, 1, f"首次冷启动：选用 {len(mothers)} 条合法母体，随机探索补齐 {random_backtest_count} 个名额")
+    initial_candidates = tuple(improvement_candidates)
+    random_backtest_count = exploration_backtest_count
     idea_target = (random_backtest_count * idea_percent + 50) // 100 if idea_pool is not None else 0
     if idea_target:
         ideas = _idea_candidates(
@@ -720,24 +712,6 @@ def _idea_candidates(
             take(item.variant, item.candidate)
         attempt += 1
     return tuple(chosen)
-
-
-def _cold_start_candidates(
-    catalog: GenerationCatalog, policy: BacktestSettingsPolicy, *,
-    existing_formulas: tuple[str, ...], limit: int,
-) -> tuple[CycleCandidate, ...]:
-    excluded = supported_formula_identities(existing_formulas).formula_fingerprints
-    by_id = {}
-    selection_inputs = []
-    for candidate in seed_mother_candidates(catalog):
-        if candidate.fingerprint in excluded:
-            continue
-        settings = choose_backtest_settings(candidate.expression, catalog, policy)
-        selection = formula_selection_candidate(candidate.expression, catalog, settings)
-        by_id[selection.candidate_id] = CycleCandidate(candidate, settings)
-        selection_inputs.append(selection)
-    selected = select_candidates(tuple(selection_inputs), requested_count=limit)
-    return tuple(by_id[item.candidate_id] for item in selected.selected)
 
 
 def _planning_exclusion_counts(

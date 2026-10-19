@@ -201,6 +201,22 @@ def _low_vol(pool):
         yield (profile.field_id,), None, f"-{pool.atom(profile)}"
 
 
+def _intraday_position(pool):
+    if not all(pool.has(name) for name in ("high", "low", "close")):
+        return
+    position = f"(high-close)/(high-low+{_EPSILON})"
+    yield ("high", "low", "close"), None, position
+    for w in (5, 10):
+        yield ("high", "low", "close"), w, f"ts_mean({position},{w})"
+
+
+def _abnormal_volume(pool):
+    if not pool.has("volume"):
+        return
+    for w in (10, 20, 60):
+        yield ("volume",), w, f"volume/(ts_mean(volume,{w})+{_EPSILON})"
+
+
 def _value(pool):
     for profile in pool.select(lambda p: p.kind == "fundamental" and _not_negative(p)
                                and p.scale in {"amount", "per_share"}):
@@ -333,6 +349,8 @@ TEMPLATES: tuple[IdeaTemplate, ...] = (
     IdeaTemplate("momentum", "price_action", "中期趋势会延续（跳过最近一个月）", _momentum),
     IdeaTemplate("price_volume", "price_action", "量价同向的上涨不可持续", _price_volume),
     IdeaTemplate("low_vol", "price_action", "低波动、低贝塔的股票长期表现更好", _low_vol),
+    IdeaTemplate("intraday_position", "price_action", "收盘离当日高点越远，之后越容易反弹", _intraday_position),
+    IdeaTemplate("abnormal_volume", "price_action", "成交量异常放大的股票之后表现更好", _abnormal_volume),
     IdeaTemplate("value", "valuation", "同样的基本面，价格越低越好", _value),
     IdeaTemplate("forward_value", "valuation", "预期盈利相对价格越高越好", _forward_value),
     IdeaTemplate("quality", "quality", "资产回报率高的公司更好", _quality),

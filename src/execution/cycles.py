@@ -511,9 +511,6 @@ def plan_automated_cycle(
             idea_pool=idea_pool,
             idea_percent=idea_percent,
             combo_variants=combo_variants,
-            cold_start=(not run.optimization_only and cycle_number == 1
-                        and not submitted_alphas
-                        and not any(task.account_scope == run.account_scope for task in historical_tasks)),
         )
         selected_candidates = candidate_plan.candidates
     prepared = prepare_automated_candidate_backtest_batch(
