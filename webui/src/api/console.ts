@@ -42,6 +42,7 @@ export interface RunDefaults {
   selfCorrelationPercent: number; mutationPercent: number; directionValidationPercent: number;
   maxPendingSeconds: number; maxConsecutiveFailures: number; maxRequestFailures: number;
   maxInFlightBacktests: number; explorationSeedAttemptMultiplier: number;
+  ideaPercent?: number;
 }
 export interface Settings {
   policy: BacktestPolicy; run_config: RunDefaults;

@@ -44,6 +44,7 @@ class AutomatedRunConfigTests(unittest.TestCase):
                 exploration_seed_attempt_multiplier=4,
                 real_backtests_authorized=True,
                 automatic_submissions_enabled=False,
+                idea_percent=90,
             ),
         )
 

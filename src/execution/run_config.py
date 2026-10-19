@@ -21,6 +21,11 @@ _CONFIG_KEYS = {
     "maxInFlightBacktests": "max_in_flight_backtests",
     "explorationSeedAttemptMultiplier": "exploration_seed_attempt_multiplier",
 }
+# Optional keys keep older config files valid; absent means the field default.
+_OPTIONAL_CONFIG_KEYS = {
+    "ideaPercent": "idea_percent",
+}
+OPTIONAL_RUN_CONFIG_KEYS = frozenset(_OPTIONAL_CONFIG_KEYS)
 
 
 def load_automated_run_limits(
@@ -56,10 +61,13 @@ def automated_run_limits_from_config(
     self_correlation_parent_task_id: str | None = None,
     self_correlation_plan_key: str | None = None,
 ) -> AutomatedRunLimits:
-    if not isinstance(payload, Mapping) or set(payload) != set(_CONFIG_KEYS):
+    if (not isinstance(payload, Mapping) or not set(_CONFIG_KEYS) <= set(payload)
+            or not set(payload) <= set(_CONFIG_KEYS) | set(_OPTIONAL_CONFIG_KEYS)):
         raise ValueError("automated_run_config_invalid")
     values: dict[str, int] = {}
-    for config_name, field_name in _CONFIG_KEYS.items():
+    for config_name, field_name in (*_CONFIG_KEYS.items(), *_OPTIONAL_CONFIG_KEYS.items()):
+        if config_name not in payload:
+            continue
         value = payload[config_name]
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("automated_run_config_invalid")

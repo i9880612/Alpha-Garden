@@ -14,6 +14,7 @@ from execution.backtest_batches import (
 )
 from execution.backtests import backtest_request_fingerprint
 from execution.catalog import load_generation_catalog
+from execution.idea_planning import load_idea_pool
 from execution.direction import build_direction_candidates
 from execution.cycle_candidates import (
     OptimizationCandidatesExhausted,
@@ -66,6 +67,7 @@ from persistence.backtests import (
 )
 from persistence.catalog import FieldCatalogContext
 from persistence.database import open_database
+from persistence.formula_ideas import get_run_idea_percent
 from persistence.run_allocations import get_run_allocation
 from persistence.runs import (
     AutomatedRunBacktestRecord,
@@ -194,16 +196,22 @@ def plan_automated_cycle(
         settings_policy = BacktestSettingsPolicy.from_config_dict(
             json.loads(run.settings_policy_json)
         )
+        catalog_context = FieldCatalogContext(
+            instrument_type=settings_policy.instrument_type,
+            region=settings_policy.region,
+            universe=settings_policy.universe,
+            delay=settings_policy.delay,
+        )
         catalog = load_generation_catalog(
             connection,
-            FieldCatalogContext(
-                instrument_type=settings_policy.instrument_type,
-                region=settings_policy.region,
-                universe=settings_policy.universe,
-                delay=settings_policy.delay,
-            ),
+            catalog_context,
             account_scope=run.account_scope,
         )
+        idea_percent = 0 if run.optimization_only else (
+            get_run_idea_percent(connection, run.run_id) or 0)
+        idea_pool = load_idea_pool(
+            connection, database_path, catalog, catalog_context, cycle_number=cycle_number,
+        ) if idea_percent else None
         evidence_cutoff = _timestamp(created_at, "action_effect_cutoff_invalid")
         historical_tasks = list_backtest_tasks(connection)
         reserved_tasks = tuple(task for task in historical_tasks
@@ -497,6 +505,8 @@ def plan_automated_cycle(
             existing_formulas=existing_formulas,
             seed_start=_cycle_seed_start(run.run_id, cycle_number),
             direction_candidates=direction_candidates,
+            idea_pool=idea_pool,
+            idea_percent=idea_percent,
             cold_start=(not run.optimization_only and cycle_number == 1
                         and not submitted_alphas
                         and not any(task.account_scope == run.account_scope for task in historical_tasks)),
@@ -510,6 +520,7 @@ def plan_automated_cycle(
                 candidate=item.candidate,
                 settings=item.settings,
                 quality_root_task_id=item.quality_root_task_id,
+                idea=item.idea,
             )
             for item in selected_candidates
         ),

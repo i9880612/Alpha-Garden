@@ -13,6 +13,7 @@ from execution.backtests import cancel_unsubmitted_backtest_task
 from persistence.backtests import get_backtest_task, get_backtest_task_by_identity, list_active_backtest_tasks, replace_backtest_task
 from persistence.catalog import FieldCatalogContext
 from persistence.database import open_database
+from persistence.formula_ideas import create_run_idea_policy
 from persistence.run_allocations import RunAllocationRecord, create_run_allocation
 from persistence.run_diagnostics import (
     CANDIDATE_PLANNING_STOP_REASONS,
@@ -58,6 +59,8 @@ class AutomatedRunLimits:
     optimization_only: bool = False
     self_correlation_parent_task_id: str | None = None
     self_correlation_plan_key: str | None = None
+    # Share of random exploration slots handed to idea templates; frozen per run.
+    idea_percent: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +109,7 @@ def validate_automated_run_limits(limits: AutomatedRunLimits) -> None:
         "self_correlation_percent",
         "mutation_percent",
         "direction_validation_percent",
+        "idea_percent",
     ):
         value = getattr(limits, name)
         if isinstance(value, bool) or not isinstance(value, int):
@@ -121,6 +125,8 @@ def validate_automated_run_limits(limits: AutomatedRunLimits) -> None:
         + limits.mutation_percent == 100
     ):
         raise ValueError("automated_run_allocation_percent_invalid")
+    if not 0 <= limits.idea_percent <= 100:
+        raise ValueError("automated_run_idea_percent_invalid")
     if not 0 < limits.backtest_count <= limits.generation_count:
         raise ValueError("automated_run_backtest_count_invalid")
     if limits.max_cycles == 0 or limits.max_cycles < -1:
@@ -343,6 +349,7 @@ def prepare_automated_run(
             mutation_percent=limits.mutation_percent,
             direction_validation_percent=limits.direction_validation_percent,
         ))
+        create_run_idea_policy(connection, run_id=record.run_id, idea_percent=limits.idea_percent)
         return result
 
 
@@ -1146,6 +1153,15 @@ def _cancel_unsubmitted_automated_run_backtests(
             )
 
 
+# Optional limits left at their default do not enter the run identity, so runs created
+# before an option existed keep the same identity.
+_RUN_ID_OMITTED_DEFAULTS = {
+    "self_correlation_parent_task_id": None,
+    "self_correlation_plan_key": None,
+    "idea_percent": 0,
+}
+
+
 def _run_id(
     *,
     account_scope: str,
@@ -1159,8 +1175,8 @@ def _run_id(
             "settingsPolicy": json.loads(settings_policy_json),
             "limits": {
                 name: getattr(limits, name) for name in limits.__dataclass_fields__
-                if name not in {"self_correlation_parent_task_id", "self_correlation_plan_key"}
-                or getattr(limits, name) is not None
+                if name not in _RUN_ID_OMITTED_DEFAULTS
+                or getattr(limits, name) != _RUN_ID_OMITTED_DEFAULTS[name]
             },
             "created_at": created_at,
         },

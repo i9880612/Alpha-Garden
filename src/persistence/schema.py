@@ -16,6 +16,10 @@ from persistence.submissions import initialize_submission_schema
 from persistence.submission_checks import initialize_submission_check_schema
 from persistence.submitted_sync import initialize_submitted_sync_schema
 from persistence.quality_research import initialize_quality_research_schema
+from persistence.formula_ideas import (
+    initialize_formula_idea_schema,
+    initialize_run_idea_policy_schema,
+)
 
 
 PROJECT_TABLE_NAMES = frozenset(
@@ -47,8 +51,11 @@ PROJECT_TABLE_NAMES = frozenset(
         "submission_queue",
         "submission_checks",
         "quality_research_tasks",
+        "formula_ideas",
+        "automated_run_idea_policies",
     }
 )
+_IDEA_TABLES = ("formula_ideas", "automated_run_idea_policies")
 
 
 def initialize_database_schema(connection: sqlite3.Connection) -> None:
@@ -65,6 +72,7 @@ def add_submitted_sync_storage(connection: sqlite3.Connection) -> None:
     expected = _reference_schema_objects()
     actual = _schema_objects(connection)
     _omit_missing_catalog_download_storage(expected, actual)
+    _omit_missing_idea_storage(expected, actual)
     quality_key = ("table", "quality_research_tasks", "quality_research_tasks")
     if quality_key not in actual:
         expected.pop(quality_key)
@@ -264,6 +272,7 @@ def add_quality_research_storage(connection: sqlite3.Connection) -> None:
     expected = _reference_schema_objects()
     actual = _schema_objects(connection)
     _omit_missing_catalog_download_storage(expected, actual)
+    _omit_missing_idea_storage(expected, actual)
     if actual == expected:
         return
     previous = {key: value for key, value in expected.items() if key[2] != "quality_research_tasks"}
@@ -379,6 +388,7 @@ def _migration_schema_objects(connection) -> dict[tuple[str, str, str], str]:
     """Earlier explicit migrations must remain usable before the sync upgrade."""
     expected = _reference_schema_objects()
     _omit_missing_catalog_download_storage(expected, _schema_objects(connection))
+    _omit_missing_idea_storage(expected, _schema_objects(connection))
     key = ("table", "platform_submitted_alpha_syncs", "platform_submitted_alpha_syncs")
     if key not in _schema_objects(connection):
         expected.pop(key)
@@ -386,6 +396,37 @@ def _migration_schema_objects(connection) -> dict[tuple[str, str, str], str]:
     if quality_key not in _schema_objects(connection):
         expected.pop(quality_key)
     return expected
+
+
+def add_formula_idea_storage(connection: sqlite3.Connection) -> None:
+    """Explicit additive migration for idea-driven exploration; history is untouched.
+
+    Existing tasks get no idea record (they came from other generators) and existing
+    runs get no idea policy (their template share is 0).
+    """
+    expected = _migration_schema_objects(connection)
+    for table in _IDEA_TABLES:
+        key = ("table", table, table)
+        if key not in expected:
+            expected[key] = _reference_schema_objects()[key]
+    actual = _schema_objects(connection)
+    if actual == expected:
+        return
+    previous = {key: value for key, value in expected.items() if key[2] not in _IDEA_TABLES}
+    if actual != previous:
+        raise ValueError("formula_idea_migration_schema_mismatch")
+    if not connection.in_transaction:
+        raise ValueError("formula_idea_migration_requires_transaction")
+    initialize_formula_idea_schema(connection)
+    initialize_run_idea_policy_schema(connection)
+    _require_current_schema(connection, expected)
+
+
+def _omit_missing_idea_storage(expected, actual) -> None:
+    # Earlier explicit upgrades stay usable before the idea-storage upgrade.
+    if not any(key[2] in _IDEA_TABLES for key in actual):
+        for table in _IDEA_TABLES:
+            expected.pop(("table", table, table), None)
 
 
 def _omit_missing_catalog_download_storage(expected, actual) -> None:

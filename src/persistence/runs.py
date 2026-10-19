@@ -12,6 +12,7 @@ from persistence.run_diagnostics import (
     CandidatePlanningDiagnostic,
 )
 from persistence.submissions import automated_run_has_active_formal_submission
+from persistence.formula_ideas import initialize_run_idea_policy_schema
 from persistence.run_allocations import initialize_run_allocation_schema
 
 
@@ -74,6 +75,7 @@ class AutomatedCycleSettlementRecord:
 def initialize_run_schema(connection: sqlite3.Connection) -> None:
     _create_automated_run_table(connection)
     initialize_run_allocation_schema(connection)
+    initialize_run_idea_policy_schema(connection)
     connection.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_automated_runs_single_active

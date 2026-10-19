@@ -15,6 +15,7 @@ from execution.quality_research import load_quality_budgets, reserve_quality_tas
 from execution.cycle_schedule import scheduled_cycle_number
 from generation.candidate import FormulaCandidate
 from generation.direction import DIRECTION_REVERSAL, reverse_direction_candidate
+from generation.ideas import IdeaVariant
 from generation.self_correlation import SELF_CORRELATION_REPAIR_FAMILIES
 from generation.parser import parse_formula
 from learning.direction import negative_direction_is_testable
@@ -28,6 +29,7 @@ from persistence.backtests import (
     get_backtest_mutation,
 )
 from persistence.database import open_database
+from persistence.formula_ideas import FormulaIdeaRecord, record_formula_idea
 from persistence.runs import (
     AutomatedRunBacktestRecord,
     AutomatedRunRecord,
@@ -56,6 +58,7 @@ class AutomatedCandidateBacktest:
     candidate: FormulaCandidate
     settings: BacktestSettings
     quality_root_task_id: str | None = None
+    idea: IdeaVariant | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,7 @@ class _AutomatedBatchItem:
     settings: BacktestSettings
     mutation: FormulaCandidate | None = None
     quality_root_task_id: str | None = None
+    idea: IdeaVariant | None = None
 
 
 def prepare_automated_candidate_backtest_batch(
@@ -88,6 +92,7 @@ def prepare_automated_candidate_backtest_batch(
                     else None
                 ),
                 item.quality_root_task_id,
+                item.idea,
             )
             for item in candidates
         ),
@@ -219,6 +224,14 @@ def _prepare_automated_items(
                         conflict_reference_formula=item.mutation.change.conflict_reference_formula,
                     ),
                 )
+            if item.idea is not None:
+                record_formula_idea(connection, FormulaIdeaRecord(
+                    task_id=snapshot.task.task_id,
+                    template_id=item.idea.template_id,
+                    family=item.idea.family,
+                    field_ids=item.idea.field_ids,
+                    hypothesis=item.idea.hypothesis,
+                ))
             quality_root = item.quality_root_task_id
             if run.optimization_only and parent is not None and quality_root is None:
                 quality_root = load_quality_budgets(connection, (parent,))[parent.task.task_id].root_task_id
@@ -336,6 +349,12 @@ def _validate_automated_candidates(
         candidate = item.candidate
         if not isinstance(candidate, FormulaCandidate):
             raise ValueError("backtest_automated_candidate_invalid")
+        if item.idea is not None and (
+            not isinstance(item.idea, IdeaVariant)
+            or candidate.generation_action != "exploration"
+            or candidate.fingerprint != item.idea.fingerprint
+        ):
+            raise ValueError("backtest_automated_candidate_idea_invalid")
         if candidate.generation_action == "exploration":
             if (
                 candidate.parent_task_id is not None

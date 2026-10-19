@@ -69,6 +69,24 @@ class ConsoleSettingsTests(unittest.TestCase):
         self.assertEqual(new.max_pending_seconds, 900)
         self.assertFalse(new.automatic_submissions_enabled)
 
+    def test_saving_from_an_older_console_keeps_optional_run_keys(self):
+        paths = self.reader.paths
+        payload = json.loads(paths.run_config.read_bytes())
+        payload["ideaPercent"] = 90
+        paths.run_config.write_text(json.dumps(payload), encoding="utf-8")
+        request = self.request("run")
+        request["value"].pop("ideaPercent")
+        request["value"]["maxPendingSeconds"] = 900
+        result = self.jobs.save_settings(request)
+        saved = json.loads(paths.run_config.read_bytes())
+        self.assertEqual((saved["ideaPercent"], saved["maxPendingSeconds"]), (90, 900))
+        self.assertEqual(result["value"]["ideaPercent"], 90)
+        self.assertEqual(load_automated_run_limits(paths.run_config, cycles=1).idea_percent, 90)
+        request = self.request("run")
+        request["value"]["ideaPercent"] = 0
+        self.jobs.save_settings(request)
+        self.assertEqual(json.loads(paths.run_config.read_bytes())["ideaPercent"], 0)
+
     def test_invalid_settings_never_change_either_file(self):
         originals = [path.read_bytes() for path in (self.reader.paths.settings, self.reader.paths.run_config)]
         cases = [

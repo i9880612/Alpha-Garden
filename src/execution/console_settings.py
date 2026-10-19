@@ -9,7 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from execution.process_lock import exclusive_run_process
-from execution.run_config import automated_run_limits_from_config
+from execution.run_config import OPTIONAL_RUN_CONFIG_KEYS, automated_run_limits_from_config
 from selection.settings import BacktestSettingsPolicy
 
 
@@ -44,8 +44,17 @@ def save_settings(paths, request):
     try:
         # Coordinate with CLI research as well as web operations. No database write.
         with exclusive_run_process(paths.database):
-            if _revision(path.read_bytes()) != request["revision"]:
+            current = path.read_bytes()
+            if _revision(current) != request["revision"]:
                 raise ValueError("console_settings_conflict")
+            if request["section"] == "run":
+                # A console built before an optional key existed must not silently drop it.
+                kept = {key: item for key, item in json.loads(current).items()
+                        if key in OPTIONAL_RUN_CONFIG_KEYS and key not in value}
+                if kept:
+                    value = {**value, **kept}
+                    encoded = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
+                               + "\n").encode("utf-8")
             _replace_file(path, encoded)
     except ValueError as exc:
         if str(exc) == "已有命令正在使用此数据库，请先停止该进程。":

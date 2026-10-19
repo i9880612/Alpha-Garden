@@ -950,5 +950,107 @@ class ImprovementCandidatePoolTests(unittest.TestCase):
         )
 
 
+class IdeaExplorationShareTests(unittest.TestCase):
+    """Template share inside the random exploration slots, with random fallback."""
+
+    def setUp(self) -> None:
+        from generation.catalog import FieldDefinition, OperatorDefinition, OperatorParameter
+        from generation.field_profiles import FieldProfile, FieldProfileSet
+        from generation.ideas import build_idea_variant_pool
+
+        def operator(name, *parameters, roles=()):
+            return OperatorDefinition(name, None, ("REGULAR",), tuple(
+                OperatorParameter(key, kind, optional=optional)
+                for key, kind, optional in parameters), roles=roles, output_kind="signal")
+
+        x, d = ("x", "expr", False), ("d", "window", False)
+        self.catalog = GenerationCatalog(
+            context=CatalogContext("EQUITY", "USA", "TOP3000", 1),
+            fields=tuple(FieldDefinition(name, "pv1", "sample", None, "MATRIX", 1.0)
+                         for name in ("close", "open", "returns", "volume")),
+            operators=(
+                operator("rank", x, roles=("cross_sectional_normalization",)),
+                *(operator(name, x, d) for name in ("ts_delay", "ts_mean", "ts_std_dev")),
+                operator("ts_corr", x, ("y", "expr", False), d),
+            ),
+            windows=(WindowDefinition(5, "week"), WindowDefinition(22, "month")),
+        )
+        profiles = FieldProfileSet.from_profiles([
+            FieldProfile("close", "pv1", "MATRIX", "reviewed", "price", "daily", "price"),
+            FieldProfile("returns", "pv1", "MATRIX", "reviewed", "price", "daily", "ratio"),
+            FieldProfile("volume", "pv1", "MATRIX", "reviewed", "volume", "daily", "count"),
+        ])
+        self.pool = build_idea_variant_pool(
+            self.catalog, profiles, enabled_field_ids=frozenset({"close", "returns", "volume"}))
+        self.policy = BacktestSettingsPolicy(
+            instrument_type="EQUITY", region="USA", universe="TOP3000", delay=1, decay=4,
+            default_neutralization="SECTOR", root_group_neutralization="NONE",
+            category_neutralizations=(CategoryNeutralization("sample", "SECTOR"),),
+            default_truncation=0.08, tail_risk_truncation=0.05, pasteurization="ON",
+            unit_handling="VERIFY", nan_handling="OFF", language="FASTEXPR",
+            visualization=False, max_trade="OFF", max_position="OFF",
+        )
+
+    def _plan(self, *, exploration_count, idea_percent, pool=None, random_formulas=()):
+        allocation = BacktestSourceAllocation(
+            requested_count=exploration_count, minimum_exploration_count=exploration_count,
+            exploration_count=exploration_count, structural_evolution_count=0,
+            local_polishing_count=0, signal_improvements=(),
+            reason="exploration_reserve_uses_full_batch",
+        )
+        random_batch = ExplorationBatch(
+            candidates=tuple(
+                ExplorationCandidate(exploration_candidate(parse_formula(f).expression), seed=i)
+                for i, f in enumerate(random_formulas)),
+            attempted_seed_count=len(random_formulas), exclusions=(), shortfall=None,
+        )
+        with patch("execution.cycle_candidates.generate_exploration_batch",
+                   return_value=random_batch) as generate:
+            plan = build_cycle_candidates(
+                self.catalog, self.policy, cycle_number=1,
+                requested_generation_count=20, requested_backtest_count=exploration_count,
+                exploration_seed_attempt_multiplier=2, source_allocation=allocation,
+                improvement_pools=(), exploration_field_candidates=("close", "open"),
+                group_candidates=(), existing_formulas=(), seed_start=7,
+                idea_pool=self.pool if pool is None else pool, idea_percent=idea_percent,
+            )
+        return plan, generate
+
+    def test_templates_take_their_share_and_random_fills_the_rest(self):
+        plan, generate = self._plan(exploration_count=4, idea_percent=50,
+                                    random_formulas=("rank(open)", "rank(-open)"))
+        ideas = [item for item in plan.candidates if item.idea is not None]
+        self.assertEqual(len(ideas), 2)
+        self.assertTrue(all(item.candidate.fingerprint == item.idea.fingerprint for item in ideas))
+        self.assertEqual(len(plan.candidates), 4)
+        self.assertEqual(plan.exploration_backtest_count, 4)
+        excluded = generate.call_args.kwargs["existing_formulas"]
+        self.assertTrue({item.candidate.formula for item in ideas} <= set(excluded))
+
+    def test_exhausted_templates_leave_the_gap_to_random_exploration(self):
+        tiny = replace(self.pool, variants=self.pool.variants[:1])
+        plan, _ = self._plan(exploration_count=4, idea_percent=100, pool=tiny,
+                             random_formulas=("rank(open)", "rank(-open)", "rank(open*open)"))
+        self.assertEqual(sum(item.idea is not None for item in plan.candidates), 1)
+        self.assertEqual(len(plan.candidates), 4)
+
+    def test_already_tested_variants_are_not_drawn_again(self):
+        plan, _ = self._plan(exploration_count=len(self.pool.variants), idea_percent=100)
+        drawn = {item.candidate.formula for item in plan.candidates}
+        self.assertEqual(len(drawn), len(self.pool.variants))
+
+    def test_zero_share_or_no_pool_keeps_random_exploration_unchanged(self):
+        for pool, percent in ((self.pool, 0), (None, 50)):
+            allocation_pool = pool if pool is not None else replace(self.pool, variants=())
+            plan, _ = self._plan(exploration_count=2, idea_percent=percent, pool=allocation_pool,
+                                 random_formulas=("rank(open)", "rank(-open)"))
+            self.assertTrue(all(item.idea is None for item in plan.candidates))
+
+    def test_invalid_share_is_rejected(self):
+        for bad in (-1, 101, True):
+            with self.assertRaisesRegex(ValueError, "automated_cycle_idea_percent_invalid"):
+                self._plan(exploration_count=1, idea_percent=bad, random_formulas=("rank(open)",))
+
+
 if __name__ == "__main__":
     unittest.main()

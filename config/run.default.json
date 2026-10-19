@@ -9,5 +9,6 @@
   "maxConsecutiveFailures": 2,
   "maxRequestFailures": 30,
   "maxInFlightBacktests": 3,
-  "explorationSeedAttemptMultiplier": 4
+  "explorationSeedAttemptMultiplier": 4,
+  "ideaPercent": 90
 }

@@ -15,6 +15,7 @@ from generation.candidate import (
     mutation_candidate,
 )
 from generation.catalog import GenerationCatalog
+from generation.ideas import IdeaVariant, IdeaVariantPool, plan_idea_batch
 from generation.parser import FormulaSyntaxError, parse_formula
 from generation.seed_formulas import seed_mother_candidates
 from generation.polishing import POLISHING_FAMILIES, iter_window_mutation_leaves
@@ -110,6 +111,7 @@ class CycleCandidate:
     candidate: FormulaCandidate
     settings: BacktestSettings
     quality_root_task_id: str | None = None
+    idea: IdeaVariant | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,7 +475,14 @@ def build_cycle_candidates(
     seed_start: int,
     direction_candidates: tuple[CycleCandidate, ...] = (),
     cold_start: bool = False,
+    idea_pool: IdeaVariantPool | None = None,
+    idea_percent: int = 0,
 ) -> CycleCandidatePlan:
+    if (
+        isinstance(idea_percent, bool) or not isinstance(idea_percent, int)
+        or not 0 <= idea_percent <= 100
+    ):
+        raise ValueError("automated_cycle_idea_percent_invalid")
     if (
         isinstance(cycle_number, bool)
         or not isinstance(cycle_number, int)
@@ -541,6 +550,17 @@ def build_cycle_candidates(
     random_backtest_count = exploration_backtest_count - len(mothers)
     if cold_start:
         phase(cycle_number, 1, f"首次冷启动：选用 {len(mothers)} 条合法母体，随机探索补齐 {random_backtest_count} 个名额")
+    idea_target = (random_backtest_count * idea_percent + 50) // 100 if idea_pool is not None else 0
+    if idea_target:
+        ideas = _idea_candidates(
+            catalog, policy, idea_pool, target_count=idea_target, seed=seed_start,
+            existing_formulas=existing_formulas + tuple(item.candidate.formula for item in initial_candidates),
+        )
+        missing = idea_target - len(ideas)
+        phase(cycle_number, 1, f"想法模板选用 {len(ideas)}/{idea_target} 条"
+              + (f"；模板库接近饱和，缺口 {missing} 条由随机探索补齐" if missing else ""))
+        initial_candidates += ideas
+        random_backtest_count -= len(ideas)
     if random_backtest_count == 0:
         phase(cycle_number, 1, f"候选已选定，共 {len(initial_candidates)} 条")
         phase(cycle_number, 2, "公式筛选与回测计划冻结中...")
@@ -646,6 +666,36 @@ def build_cycle_candidates(
         local_polishing_backtest_count=source_allocation.local_polishing_count,
         direction_validation_backtest_count=len(direction_candidates),
     )
+
+
+def _idea_candidates(
+    catalog: GenerationCatalog,
+    policy: BacktestSettingsPolicy,
+    pool: IdeaVariantPool,
+    *,
+    target_count: int,
+    seed: int,
+    existing_formulas: tuple[str, ...],
+) -> tuple[CycleCandidate, ...]:
+    """Draw untested template variants; selection-rejected ones are skipped, never retried."""
+    excluded = set(supported_formula_identities(existing_formulas).formula_fingerprints)
+    chosen: list[CycleCandidate] = []
+    attempt = 0
+    while len(chosen) < target_count:
+        batch = plan_idea_batch(
+            pool, target_count=target_count - len(chosen), seed=seed + attempt,
+            excluded_fingerprints=frozenset(excluded),
+        )
+        if not batch.candidates:
+            break
+        for item in batch.candidates:
+            excluded.add(item.variant.fingerprint)
+            settings = choose_backtest_settings(item.candidate.expression, catalog, policy)
+            selection = formula_selection_candidate(item.candidate.expression, catalog, settings)
+            if not selection.rejection_reasons:
+                chosen.append(CycleCandidate(item.candidate, settings, idea=item.variant))
+        attempt += 1
+    return tuple(chosen)
 
 
 def _cold_start_candidates(
