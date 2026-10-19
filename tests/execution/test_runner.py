@@ -1056,7 +1056,7 @@ class AutomatedRunnerTests(unittest.TestCase):
         self.assertEqual(completion.run.status, "completed")
         self.assertEqual(completion.platform_request_count, 7)
         self.assertEqual(completion.run.request_failure_count, 0)
-        self.assertEqual(fake_time.waits[0], 1.0)
+        self.assertEqual(fake_time.waits[0], 5.0)
         self.assertEqual(client.calls.count("authenticate"), 1)
         self.assertEqual(client.calls.count("submit"), 2)
 
@@ -1253,7 +1253,7 @@ class AutomatedRunnerTests(unittest.TestCase):
         self.assertTrue(completion.authentication_performed)
         self.assertEqual(client.calls.count("authenticate"), 2)
         self.assertEqual(client.calls.count("submit"), 1)
-        self.assertEqual(fake_time.waits, [2, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0])
+        self.assertEqual(fake_time.waits, [5.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0])
 
     def test_authentication_failure_limit_stops_without_submitting(self) -> None:
         run_id = self._prepare_running_task(max_pending_seconds=60)
@@ -1291,7 +1291,7 @@ class AutomatedRunnerTests(unittest.TestCase):
     def test_authentication_failure_preserves_pending_until_explicit_resume(
         self,
     ) -> None:
-        run_id = self._prepare_running_task(max_pending_seconds=5)
+        run_id = self._prepare_running_task(max_pending_seconds=60)
         with open_database(self.database_path) as connection:
             link = list_automated_run_backtests(connection, run_id)[0]
             record_submission_accepted(
@@ -1322,7 +1322,7 @@ class AutomatedRunnerTests(unittest.TestCase):
             "request_failure_limit_reached",
         )
         self.assertEqual(client.calls, ["authenticate", "authenticate", "authenticate"])
-        self.assertEqual(fake_time.waits, [1.0, 2.0])
+        self.assertEqual(fake_time.waits, [5.0, 10.0])
         with open_database(self.database_path) as connection:
             snapshot = get_backtest_task(connection, link.task_id)
         assert snapshot is not None
@@ -1333,7 +1333,7 @@ class AutomatedRunnerTests(unittest.TestCase):
         self,
     ) -> None:
         run_id = self._prepare_running_task(
-            max_pending_seconds=5,
+            max_pending_seconds=60,
             formulas=("rank(close)", "rank(open)"),
             max_in_flight_backtests=1,
         )
@@ -1362,7 +1362,7 @@ class AutomatedRunnerTests(unittest.TestCase):
             "request_failure_limit_reached",
         )
         self.assertEqual(completion.platform_request_count, 4)
-        self.assertEqual(fake_time.waits, [1.0, 1.0, 2.0])
+        self.assertEqual(fake_time.waits, [1.0, 5.0, 10.0])
         with open_database(self.database_path) as connection:
             links = list_automated_run_backtests(connection, run_id)
             snapshots = tuple(

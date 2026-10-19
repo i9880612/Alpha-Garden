@@ -7,14 +7,17 @@ from pathlib import Path
 from execution.runs import (
     fail_automated_run,
     record_automated_request_failure,
-    uses_continuous_recovery,
 )
 from persistence.runs import AutomatedRunRecord
 from execution.pnl import PnlAccountRequestError
 from worldquant.client import WorldQuantRequestError
 
 
-_MAX_RETRY_DELAY_SECONDS = 60.0
+# Retryable faults (network drops, 5xx, 429) back off 5, 10, 20 ... seconds up to 5 minutes.
+# A finite run stops only after max_request_failures consecutive faults, so the limit
+# maps to an outage length: 30 consecutive faults wait about 2 hours before stopping.
+_FIRST_RETRY_DELAY_SECONDS = 5.0
+_MAX_RETRY_DELAY_SECONDS = 300.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,13 +49,7 @@ def handle_automated_request_failure(
         )
         return AutomatedRequestFailure(stopped, None)
 
-    # Clamp before exponentiation: an unattended outage can last indefinitely.
-    local_retry_delay = min(
-        _MAX_RETRY_DELAY_SECONDS,
-        float(2 ** min(run.request_failure_count, 6)),
-    )
-    if uses_continuous_recovery(run):
-        local_retry_delay = min(120.0, 3.0 * local_retry_delay)
+    local_retry_delay = request_retry_delay_seconds(run.request_failure_count)
     if (isinstance(error, PnlAccountRequestError) and error.status_code == 429
             and error.retry_after_seconds is None):
         local_retry_delay = max(60.0, local_retry_delay)
@@ -74,6 +71,20 @@ def handle_automated_request_failure(
             None if updated.status == "failed" else retry_delay
         ),
     )
+
+
+def request_retry_delay_seconds(previous_failures: int) -> float:
+    """Local wait after the (previous_failures + 1)-th consecutive retryable fault."""
+    # Clamp before exponentiation: an unattended outage can last indefinitely.
+    return min(
+        _MAX_RETRY_DELAY_SECONDS,
+        _FIRST_RETRY_DELAY_SECONDS * float(2 ** min(previous_failures, 10)),
+    )
+
+
+def request_outage_tolerance_seconds(max_request_failures: int) -> float:
+    """Minimum outage a finite run waits through before the failure limit stops it."""
+    return sum(request_retry_delay_seconds(count) for count in range(max_request_failures - 1))
 
 
 def remaining_automated_request_retry_seconds(

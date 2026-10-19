@@ -13,6 +13,7 @@ from execution.launch import launch_automated_run, resume_automated_run
 from execution.process_lock import exclusive_run_process
 from execution.run_config import load_automated_run_limits
 from execution.runner import AutomatedRunCompletion
+from execution.request_failures import request_outage_tolerance_seconds
 from execution.runs import uses_continuous_recovery
 from execution.submission_runner import (
     SubmissionQueueCompletion,
@@ -577,6 +578,7 @@ def _print_automated_run_created(run: AutomatedRunRecord) -> None:
             f"单任务 pending 上限 {run.max_pending_seconds} 秒，"
             f"连续 {run.max_consecutive_failures} 轮整批失败停止，"
             f"连续请求故障上限 {run.max_request_failures}"
+            f"（退避等待约 {request_outage_tolerance_seconds(run.max_request_failures) / 60:.0f} 分钟后停止）"
         )
     batch_plan = (f"每轮回测上限 {run.backtest_count}，" if run.optimization_only else
                   f"每轮生成 {run.generation_count}，每轮回测 {run.backtest_count}，")

@@ -39,7 +39,7 @@ class AutomatedRunConfigTests(unittest.TestCase):
                 max_backtests=100,
                 max_pending_seconds=600,
                 max_consecutive_failures=2,
-                max_request_failures=3,
+                max_request_failures=30,
                 max_in_flight_backtests=3,
                 exploration_seed_attempt_multiplier=4,
                 real_backtests_authorized=True,
