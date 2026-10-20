@@ -247,22 +247,31 @@ class SignalSeedExecutionTests(unittest.TestCase):
         with open_database(self.database_path) as connection:
             seed = self._completed(connection, "rank(close)", "1", 2.0, 1.1)
             self.assertEqual(len(synchronize_signal_seeds(connection)), 1)
-            # Same signal as the seed without a ten percent improvement: redundant.
+            # Same signal as the seed: redundant.
             duplicate = self._completed(connection, "rank(open)", "2", 2.0, 1.1, capture_pnl=False)
-            # Same signal as the seed with a fifteen percent improvement: a new root.
+            # Same signal with a fifteen percent better Sharpe: still the same idea. The
+            # platform would let it be submitted, but it gets no second mutation budget.
             improved = self._completed(connection, "rank(volume)", "3", 2.3, 1.1, capture_pnl=False)
             pnl = [math.sin(i) for i in range(300)]
             for alpha in ("alpha_1", "alpha_2", "alpha_3"):
                 save_pnl_series(connection, series(alpha, pnl, "group-account"))
+            self.assertEqual(synchronize_signal_seeds(connection), ())
+            self.assertEqual(
+                [record.root_task_id for record in list_signal_seeds(connection)],
+                [seed.task.task_id],
+            )
+
+    def test_same_batch_near_copies_admit_the_strongest_seed(self):
+        import math
+        from tests.learning.test_seed_correlation import series
+        with open_database(self.database_path) as connection:
+            weaker = self._completed(connection, "rank(close)", "1", 1.6, 1.1, capture_pnl=False)
+            stronger = self._completed(connection, "rank(open)", "2", 2.0, 1.1, capture_pnl=False)
+            pnl = [math.sin(i) for i in range(300)]
+            for alpha in ("alpha_1", "alpha_2"):
+                save_pnl_series(connection, series(alpha, pnl, "group-account"))
             created = synchronize_signal_seeds(connection)
-            self.assertEqual(
-                [record.root_task_id for record in created],
-                [improved.task.task_id],
-            )
-            self.assertEqual(
-                sorted(record.root_task_id for record in list_signal_seeds(connection)),
-                sorted((seed.task.task_id, improved.task.task_id)),
-            )
+            self.assertEqual([record.root_task_id for record in created], [stronger.task.task_id])
 
     def test_same_batch_redundant_candidates_admit_only_one_seed(self):
         import math

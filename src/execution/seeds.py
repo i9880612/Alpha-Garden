@@ -56,8 +56,13 @@ def synchronize_signal_seeds(
         mutation.parent_task_id for child, mutation in mutation_children.items() if child in requested
     } | seed_ids
     snapshots = list_completed_backtests(connection, task_ids=frozenset(required) if required is not None else None)
-    candidates = tuple(snapshot for snapshot in _candidate_snapshots(snapshots, candidate_task_ids)
-                       if snapshot.task.task_id not in seed_ids and assess_signal_seed(snapshot).eligible)
+    # Strongest first: within a group of near-copies the best one becomes the seed and
+    # blocks the rest (seed-to-seed overlap has no Sharpe exception).
+    candidates = tuple(sorted(
+        (snapshot for snapshot in _candidate_snapshots(snapshots, candidate_task_ids)
+         if snapshot.task.task_id not in seed_ids and assess_signal_seed(snapshot).eligible),
+        key=lambda snapshot: (-abs(snapshot.result.sharpe), snapshot.task.task_id),
+    ))
     if not candidates:
         return ()
     comparison_ids = seed_ids | set(load_signal_frontiers(connection).active_branch_task_ids) if seed_ids else set()

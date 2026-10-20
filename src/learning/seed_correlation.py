@@ -24,7 +24,14 @@ def assess_seed_redundancy(
     seeds: tuple[BacktestSnapshot, ...],
     *, correlations: PnlCorrelations,
 ) -> str:
-    """Require usable daily evidence before granting an independent seed root."""
+    """Require usable daily evidence before granting an independent seed root.
+
+    Unlike the platform's submission check, a higher Sharpe does not excuse a
+    correlation at or above MAX_SEED_CORRELATION: every seed root gets its own
+    mutation budget, and near-copies of one idea would split it over children that
+    block each other at submission. A stronger version of an existing idea can still
+    take over inside that seed's lineage.
+    """
     task = snapshot.task
     key = (task.account_scope, task.platform_alpha_id)
     if correlations.correlation(key, key, minimum_intervals=MIN_SEED_CORRELATION_INTERVALS,
@@ -39,10 +46,16 @@ def assess_seed_redundancy(
             minimum_intervals=MIN_SEED_CORRELATION_INTERVALS,
             calendar_years=CORRELATION_CALENDAR_YEARS,
         )
-        states.append(correlation_check(value, snapshot.result.sharpe, seed.result.sharpe))
+        states.append(seed_overlap_check(value))
     if "failed" in states:
         return "failed"
     return "pending" if "pending" in states else "passed"
+
+
+def seed_overlap_check(correlation: float | None) -> str:
+    if correlation is None:
+        return "pending"
+    return "failed" if correlation >= MAX_SEED_CORRELATION else "passed"
 
 
 @dataclass(frozen=True, slots=True)
