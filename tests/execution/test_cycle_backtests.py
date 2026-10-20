@@ -402,8 +402,10 @@ class AutomatedCycleBacktestTests(unittest.TestCase):
         self.assertEqual(recovered.action, "failed")
         self.assertEqual(stopped.action, "reconciliation_required")
         self.assertFalse(stopped.platform_request_performed)
-        self.assertEqual(run.status, "failed")
-        self.assertEqual(run.stop_reason, "submission_reconciliation_required")
+        # The run waits for the unknown outcome (reconciled or released at its deadline)
+        # instead of failing with nothing else left to send.
+        self.assertEqual(run.status, "running")
+        self.assertIsNone(run.stop_reason)
         self.assertEqual(statuses.count("created"), 0)
         self.assertEqual(statuses.count("submission_unknown"), 1)
         self.assertEqual(statuses.count("failed"), 2)

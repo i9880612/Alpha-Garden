@@ -32,6 +32,7 @@ from execution.runs import (
     automated_run_has_hard_stop_evidence,
     can_resume_independent_backtests,
     clear_automated_request_failures,
+    complete_reconciled_finished_run,
     fail_automated_run,
     submission_rate_limited,
 )
@@ -235,6 +236,18 @@ def run_automated_run(
                 if settlement is not None:
                     step_count += 1
                     continue
+                finished = complete_reconciled_finished_run(
+                    database_path, run.run_id, completed_at=observed.isoformat(),
+                )
+                if finished is not None:
+                    progress.notice(
+                        "恢复检查：本轮计划已全部完成，未确认的请求已核对或按超时释放（未重发），"
+                        "运行改记为已完成。")
+                    run = finished
+                elif run.stop_reason == "submission_reconciliation_required":
+                    progress.notice(
+                        "恢复检查：本轮有请求超时未获平台确认，按规则不能继续原计划；"
+                        "已完成的结果均已保存，可开始新一轮。")
                 return _completion(
                     database_path,
                     run,

@@ -680,16 +680,21 @@ class AutomatedRunnerTests(unittest.TestCase):
         completion = run_automated_run(
             self.database_path, client, run_id, clock=fake_time.now, waiter=fake_time.wait
         )
-        self.assertEqual(completion.run.stop_reason, "submission_reconciliation_required")
+        # Independent work finishes first; the unknown request is then looked up on the
+        # platform while waiting and, never found, released at its deadline unsent.
+        self.assertEqual((completion.run.status, completion.run.stop_reason),
+                         ("completed", "max_cycles_reached"))
         self.assertEqual(client.calls.count("submit"), 2)
-        self.assertEqual(client.calls.count("alpha_list"), 4)
+        self.assertGreaterEqual(client.calls.count("alpha_list"), 1)
         self.assertLess(client.calls.index("submit"), client.calls.index("alpha_list"))
         with open_database(self.database_path) as connection:
             after = get_backtest_task(connection, unknown_id)
             completed = connection.execute(
                 "SELECT COUNT(*) FROM backtest_tasks WHERE status='completed'"
             ).fetchone()[0]
-        self.assertEqual(after, before)
+        self.assertEqual((after.task.status, after.task.failure_code),
+                         ("failed", "submission_outcome_timeout"))
+        self.assertEqual(after.task.formula, before.task.formula)
         self.assertEqual(completed, 2)
         repeated = RunnerClient()
         run_automated_run(
@@ -728,7 +733,8 @@ class AutomatedRunnerTests(unittest.TestCase):
             created_at=datetime.fromisoformat("2026-08-30T00:01:31.500000+08:00"),
             hidden=False,
         ),))
-        fake_time.advance(90)
+        # Past the request's visibility window, still inside its 600 s deadline.
+        fake_time.advance(300)
         reconciled = run_automated_run(
             self.database_path, reconciliation_client, run_id,
             clock=fake_time.now, waiter=fake_time.wait,
@@ -742,7 +748,7 @@ class AutomatedRunnerTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM backtest_tasks WHERE status='submission_unknown'"
             ).fetchone()[0], 0)
 
-    def test_all_unknown_slots_stop_without_resending_or_overcommitting(self):
+    def test_all_unknown_slots_wait_without_resending_or_overcommitting(self):
         run_id = self._prepare_running_task(
             max_pending_seconds=600,
             formulas=("rank(close)", "rank(open)", "rank(volume)", "ts_rank(close,5)"),
@@ -750,17 +756,31 @@ class AutomatedRunnerTests(unittest.TestCase):
         client = RunnerClient(*(
             BacktestSubmissionObservation("unknown", None, "missing_location")
             for _ in range(3)
-        ))
+        ), self._accepted("simulation-4"))
         fake_time = FakeTime("2026-08-30T00:01:31+08:00")
+        submit_times = []
+        original_submit = client.submit_backtest
+
+        def timed_submit(**kwargs):
+            submit_times.append(fake_time.now())
+            return original_submit(**kwargs)
+
+        client.submit_backtest = timed_submit
         completion = run_automated_run(
             self.database_path, client, run_id, clock=fake_time.now, waiter=fake_time.wait
         )
-        self.assertEqual(completion.run.stop_reason, "submission_reconciliation_required")
-        self.assertEqual(client.calls.count("submit"), 3)
+        # The fourth request waits for a slot until the unknowns reach their deadline,
+        # polling once a minute; none of the unknown requests is ever sent again.
+        self.assertEqual((completion.run.status, completion.run.stop_reason),
+                         ("completed", "max_cycles_reached"))
+        self.assertEqual(client.calls.count("submit"), 4)
+        self.assertGreaterEqual((submit_times[3] - submit_times[2]).total_seconds(), 600)
+        self.assertTrue(all(seconds <= 60 for seconds in fake_time.waits))
         with open_database(self.database_path) as connection:
-            statuses = [row[0] for row in connection.execute("SELECT status FROM backtest_tasks")]
-        self.assertEqual(statuses.count("submission_unknown"), 3)
-        self.assertEqual(statuses.count("created"), 1)
+            statuses = [tuple(row) for row in connection.execute(
+                "SELECT status, failure_code FROM backtest_tasks")]
+        self.assertEqual(statuses.count(("failed", "submission_outcome_timeout")), 3)
+        self.assertEqual(statuses.count(("completed", None)), 1)
 
     def test_confirming_unknown_cannot_resume_a_masked_historical_hard_stop(self):
         run_id = self._prepare_running_task(
@@ -888,7 +908,7 @@ class AutomatedRunnerTests(unittest.TestCase):
             "remote_accepted_without_simulation_id",
         )
 
-    def test_unknown_request_error_reconciles_same_timestamp_without_repost(
+    def test_unknown_request_error_reconciles_within_the_run_without_repost(
         self,
     ) -> None:
         run_id = self._prepare_running_task(
@@ -896,84 +916,42 @@ class AutomatedRunnerTests(unittest.TestCase):
             formulas=("rank(close)", "rank(open)"),
             max_in_flight_backtests=1,
         )
-        first_client = RunnerClient(
-            WorldQuantRequestError(
-                "lost_backtest_response",
-                retryable=True,
-                outcome_unknown=True,
-            )
-        )
-        first_time = FakeTime("2026-08-30T00:01:31+08:00")
+        fake_time = FakeTime("2026-08-30T00:01:31+08:00")
+        settings = self.settings
 
-        first_completion = run_automated_run(
-            self.database_path,
-            first_client,
-            run_id,
-            clock=first_time.now,
-            waiter=first_time.wait,
-        )
+        class LostThenFoundClient(RunnerClient):
+            """The first request's response is lost, but the platform did accept it."""
 
-        self.assertEqual(first_completion.run.status, "failed")
-        self.assertEqual(
-            first_completion.run.stop_reason,
-            "submission_reconciliation_required",
-        )
-        self.assertEqual(first_client.calls.count("submit"), 1)
-        self.assertEqual(first_client.calls.count("alpha_list"), 0)
-        with open_database(self.database_path) as connection:
-            links = list_automated_run_backtests(connection, run_id)
-            snapshots = tuple(
-                get_backtest_task(connection, link.task_id) for link in links
-            )
-        unknown = next(
-            snapshot
-            for snapshot in snapshots
-            if snapshot is not None and snapshot.task.status == "submission_unknown"
-        )
-        self.assertEqual(
-            unknown.task.submission_started_at,
-            first_completion.run.finished_at,
-        )
+            def submit_backtest(self, *, formula, settings):
+                if "submit" not in self.calls:
+                    self.alpha_records = (UserAlphaRecord(
+                        platform_alpha_id="alpha-reconciled", alpha_type="REGULAR",
+                        status="ACTIVE", formula=formula,
+                        settings={**settings_dict, "startDate": "2020-01-01",
+                                  "endDate": "2025-01-01"},
+                        created_at=fake_time.now() + timedelta(seconds=14), hidden=False,
+                    ),)
+                return super().submit_backtest(formula=formula, settings=settings)
 
-        second_client = RunnerClient(
+        settings_dict = settings.as_platform_dict()
+        client = LostThenFoundClient(
+            WorldQuantRequestError("lost_backtest_response", retryable=True, outcome_unknown=True),
             self._accepted("simulation-2"),
-            alpha_records=(
-                UserAlphaRecord(
-                    platform_alpha_id="alpha-reconciled",
-                    alpha_type="REGULAR",
-                    status="ACTIVE",
-                    formula=unknown.task.formula,
-                    settings={
-                        **self.settings.as_platform_dict(),
-                        "startDate": "2020-01-01",
-                        "endDate": "2025-01-01",
-                    },
-                    created_at=datetime.fromisoformat("2026-08-30T00:01:45+08:00"),
-                    hidden=False,
-                ),
-            ),
         )
-        second_time = FakeTime("2026-08-30T00:04:01+08:00")
-
         completion = run_automated_run(
-            self.database_path,
-            second_client,
-            run_id,
-            clock=second_time.now,
-            waiter=second_time.wait,
+            self.database_path, client, run_id, clock=fake_time.now, waiter=fake_time.wait,
         )
 
+        # The run itself finds the accepted request on the platform while waiting,
+        # frees its slot, sends the next one and completes; nothing is sent twice.
         self.assertEqual(completion.run.status, "completed")
-        self.assertEqual(second_client.calls.count("alpha_list"), 4)
-        self.assertEqual(second_client.calls.count("submit"), 1)
+        self.assertEqual(client.calls.count("submit"), 2)
+        self.assertGreaterEqual(client.calls.count("alpha_list"), 1)
         with open_database(self.database_path) as connection:
-            reconciled = get_backtest_task(connection, unknown.task.task_id)
-        assert reconciled is not None
-        self.assertEqual(reconciled.task.status, "failed")
-        self.assertEqual(
-            reconciled.task.platform_alpha_id,
-            "alpha-reconciled",
-        )
+            rows = [tuple(row) for row in connection.execute(
+                "SELECT status, platform_alpha_id FROM backtest_tasks ORDER BY submission_started_at")]
+        self.assertEqual(rows[0], ("failed", "alpha-reconciled"))
+        self.assertEqual(rows[1][0], "completed")
 
     def test_enabled_automatic_submission_runs_to_confirmed_completion(self) -> None:
         run_id = self._prepare_running_task(
@@ -1442,6 +1420,51 @@ class AutomatedRunnerTests(unittest.TestCase):
             None,
         )
 
+    # A run parked by the old rule with all planned work done completes on resume.
+
+    def test_resume_completes_a_finished_run_left_failed_for_reconciliation(self):
+        run_id = self._prepare_running_task(
+            max_pending_seconds=600, formulas=("rank(close)", "rank(open)"),
+        )
+        client = RunnerClient(
+            BacktestSubmissionObservation("unknown", None, "missing_location"),
+            self._accepted("simulation-2"),
+        )
+        fake_time = FakeTime("2026-08-30T00:01:31+08:00")
+        run_automated_run(self.database_path, client, run_id,
+                          clock=fake_time.now, waiter=fake_time.wait)
+        # Recreate what the old rule left behind: the same finished plan, marked failed.
+        with open_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE automated_runs SET status='failed', "
+                "stop_reason='submission_reconciliation_required' WHERE run_id=?", (run_id,))
+            connection.commit()
+            statuses = sorted(row[0] for row in connection.execute(
+                "SELECT failure_code FROM backtest_tasks WHERE status='failed'"))
+        self.assertEqual(statuses, ["submission_outcome_timeout"])
+
+        resumed_client = RunnerClient()
+        fake_time.advance(60)
+        resumed = run_automated_run(self.database_path, resumed_client, run_id,
+                                    clock=fake_time.now, waiter=fake_time.wait)
+        self.assertEqual((resumed.run.status, resumed.run.stop_reason),
+                         ("completed", "max_cycles_reached"))
+        self.assertEqual(resumed_client.calls.count("submit"), 0)
+
+    def test_unfinished_plan_is_not_completed(self):
+        from execution.runs import complete_reconciled_finished_run
+        run_id = self._prepare_running_task(
+            max_pending_seconds=600, formulas=("rank(close)", "rank(open)"),
+        )
+        with open_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE automated_runs SET status='failed', finished_at=started_at, "
+                "stop_reason='submission_reconciliation_required' WHERE run_id=?", (run_id,))
+            connection.commit()
+        self.assertIsNone(complete_reconciled_finished_run(
+            self.database_path, run_id, completed_at="2026-08-30T01:00:00+08:00"))
+
 
 if __name__ == "__main__":
     unittest.main()
+

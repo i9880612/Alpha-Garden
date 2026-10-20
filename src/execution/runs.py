@@ -1198,3 +1198,60 @@ def _timestamp(value: object, error: str) -> datetime:
     if parsed.utcoffset() is None:
         raise ValueError(error)
     return parsed
+
+
+def complete_reconciled_finished_run(
+    database_path: str | Path,
+    run_id: str,
+    *,
+    completed_at: str,
+) -> AutomatedRunRecord | None:
+    """Complete a run parked for request reconciliation once its plan is fully done.
+
+    Such a run has every request resolved (reconciled with the platform or released at
+    its deadline, never resent), every cycle settled and its cycle or backtest budget
+    spent, so nothing is left to resume; leaving it "failed" only asked a person to act
+    on nothing. Returns the completed record, or None when the run still has work.
+    """
+    completed = _timestamp(completed_at, "automated_run_finished_at_invalid")
+    with open_database(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        record = get_automated_run(connection, run_id)
+        if record is None:
+            raise ValueError("automated_run_missing")
+        if record.status != "failed" or record.stop_reason != "submission_reconciliation_required":
+            return None
+        if record.automatic_submissions_enabled and automated_run_has_unresolved_formal_submission(
+                connection, run_id):
+            return None
+        links = list_automated_run_backtests(connection, run_id)
+        for link in links:
+            snapshot = get_backtest_task(connection, link.task_id)
+            if snapshot is None:
+                raise ValueError("automated_run_backtest_task_missing")
+            if snapshot.task.status in {"created", "pending", "submission_unknown"}:
+                return None
+        unsettled = connection.execute(
+            """SELECT 1 FROM automated_run_backtests links
+               LEFT JOIN automated_cycle_settlements settled
+                 ON settled.run_id = links.run_id AND settled.cycle_number = links.cycle_number
+               WHERE links.run_id = ? AND settled.run_id IS NULL LIMIT 1""",
+            (run_id,),
+        ).fetchone()
+        if unsettled is not None:
+            return None
+        limit = automated_run_backtest_limit(record)
+        if record.max_cycles > 0 and record.current_cycle >= record.max_cycles:
+            reason = "max_cycles_reached"
+        elif limit is not None and len(links) >= limit:
+            reason = "backtest_limit_reached"
+        else:
+            return None
+        finished = max(completed, _timestamp(record.finished_at, "automated_run_finished_at_invalid")) \
+            if record.finished_at else completed
+        return replace_automated_run(
+            connection,
+            replace(record, status="completed", stop_reason=reason, retry_not_before=None,
+                    finished_at=finished.isoformat()),
+            expected_status="failed",
+        )

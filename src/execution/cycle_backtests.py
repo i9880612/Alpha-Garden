@@ -24,7 +24,6 @@ from execution.submission_queue import (
 from execution.real_backtests import advance_real_backtest, account_in_flight_backtest_count
 from execution.cycle_schedule import unsettled_cycle_numbers
 from execution.runs import (
-    fail_automated_run,
     remaining_automated_run_backtests,
     record_automated_cycle_settlement,
     uses_continuous_recovery,
@@ -453,18 +452,11 @@ def _advance_task(
             cycle_number=cycle_number,
         )
         current_counts = _counts(_load_run_active_snapshots(database_path, run))
+        # Every run, finite or continuous, waits here: the runner reconciles unknown
+        # requests against the platform while waiting, and releases them at the
+        # owner's deadline without resending. Failing early only left a finished run
+        # marked "failed" for a person to resume.
         run_status = run.status
-        if (
-            current_counts.pending == 0
-            and current_counts.submission_unknown >= run.max_in_flight_backtests
-            and not uses_continuous_recovery(run)
-        ):
-            run_status = fail_automated_run(
-                database_path,
-                run.run_id,
-                failed_at=observed_at,
-                reason="submission_reconciliation_required",
-            ).status
         return AutomatedCycleBacktestAdvance(
             run_id=run.run_id,
             cycle_number=cycle_number,
@@ -474,7 +466,11 @@ def _advance_task(
             platform_request_performed=True,
             run_status=run_status,
             request_error_code=exc.code,
-            retry_after_seconds=60.0 if uses_continuous_recovery(run) else None,
+            # Ready peers go on at once in finite runs; with nothing else to send,
+            # poll for the unknown outcome instead of spinning.
+            retry_after_seconds=(_UNKNOWN_OUTCOME_POLL_SECONDS
+                                 if uses_continuous_recovery(run) or current_counts.created == 0
+                                 else None),
         )
 
     if advanced.action == "reconciliation_required":
@@ -484,17 +480,7 @@ def _advance_task(
             cycle_number=cycle_number,
         )
         current_counts = _counts(_load_run_active_snapshots(database_path, run))
-        run_status = run.status
-        if not uses_continuous_recovery(run) and current_counts.pending == 0 and (
-            current_counts.submission_unknown >= run.max_in_flight_backtests
-            or (not allow_submission and current_counts.created == 0)
-        ):
-            run_status = fail_automated_run(
-                database_path,
-                run.run_id,
-                failed_at=observed_at,
-                reason="submission_reconciliation_required",
-            ).status
+        run_status = run.status  # wait for reconciliation or the deadline (see above)
     else:
         current = _load_cycle_snapshots(
             database_path,
@@ -509,8 +495,11 @@ def _advance_task(
             current,
             observed_at=observed_at,
             max_pending_seconds=run.max_pending_seconds,
-            requested_seconds=(60.0 if advanced.action == "reconciliation_required"
-                               and uses_continuous_recovery(run) else advanced.retry_after_seconds),
+            # Poll unknown outcomes once a minute (each poll may list alphas on the
+            # platform); a peer that can be sent now still goes at once (below).
+            requested_seconds=(_UNKNOWN_OUTCOME_POLL_SECONDS
+                               if advanced.action == "reconciliation_required"
+                               else advanced.retry_after_seconds),
         )
     )
     if retry_after_seconds is not None and advanced.action not in PNL_CAPTURE_ACTIONS:
@@ -634,6 +623,9 @@ def _terminal_unsettled_cycle_number(
         )):
             return cycle_number
     return None
+
+
+_UNKNOWN_OUTCOME_POLL_SECONDS = 60.0
 
 
 def _bounded_pending_wait(

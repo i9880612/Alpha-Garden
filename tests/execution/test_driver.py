@@ -331,7 +331,8 @@ class AutomatedRunDriverTests(unittest.TestCase):
             if advanced.run.status == "failed":
                 break
         self.assertEqual(maximum_active, 3)
-        self.assertEqual(advanced.run.stop_reason, "submission_reconciliation_required")
+        # Still inside the unknown request's deadline: the run waits rather than fails.
+        self.assertEqual((advanced.run.status, advanced.run.stop_reason), ("running", None))
         self.assertEqual(client.calls.count("submit"), 6)
         self.assertEqual(client.calls.count("formal_submit"), 0)
         self.assertEqual(len(rows), 6)
