@@ -27,6 +27,7 @@ from learning.diagnosis import (
     ((1.0, 0.5, 0.20), {"HIGH_TURNOVER"}, HIGH_TURNOVER),
     ((1.34, 0.90, 0.01), {"LOW_FITNESS"}, LOW_TURNOVER),
     ((1.40, 0.80, 0.08), {"LOW_FITNESS"}, LOW_RETURNS),
+    ((1.40, 0.80, 0.25), {"LOW_FITNESS"}, HIGH_TURNOVER),  # above the 12.5% Fitness floor
     ((-1.40, -0.80, 0.08), {"LOW_FITNESS"}, LOW_RETURNS),  # flipped parents count by size
     ((0.90, 0.60, 0.08), {"LOW_SHARPE", "LOW_FITNESS"}, LOW_SHARPE),
 ])
@@ -38,9 +39,16 @@ def test_parents_are_diagnosed_by_what_holds_fitness_back(metrics, failed, probl
     assert diagnosis.families == PRESCRIPTIONS[problem] and diagnosis.label
 
 
-def test_no_diagnosis_without_a_performance_problem_or_metrics():
-    assert diagnose_parent(sharpe=1.6, fitness=1.2, turnover=0.2,
-                           failed_checks=frozenset({"SELF_CORRELATION"})) is None
+def test_qualified_parents_are_diagnosed_by_their_weakest_metric():
+    # Quality optimization: every check passed, the grade still rises with the metrics.
+    def problem(sharpe, fitness, turnover, failed=()):
+        return diagnose_parent(sharpe=sharpe, fitness=fitness, turnover=turnover,
+                               failed_checks=frozenset(failed)).problem
+    assert problem(1.8, 1.3, 0.45) == HIGH_TURNOVER
+    assert problem(1.6, 1.2, 0.20) == HIGH_TURNOVER   # Fitness < Sharpe above the floor
+    assert problem(1.6, 1.2, 0.10) == LOW_RETURNS     # below the floor only returns help
+    assert problem(1.4, 1.7, 0.03) == LOW_SHARPE      # returns are ample; Sharpe is the edge
+    assert problem(1.6, 1.2, 0.10, {"SELF_CORRELATION"}) == LOW_RETURNS
     assert diagnose_parent(sharpe=None, fitness=1.0, turnover=0.2,
                            failed_checks=frozenset({"LOW_SHARPE"})) is None
 
@@ -86,8 +94,14 @@ def test_a_cure_needs_better_fitness_and_the_problem_metric_moving_the_right_way
     assert mutation_outcome(parent, _Result(1.4, 1.05, 0.25, 0.13), "smooth").cured
     # Better fitness without the turnover falling is not a cure for high turnover.
     assert not mutation_outcome(parent, _Result(1.6, 0.9, 0.60, 0.20), "other").cured
-    healthy = _Result(1.6, 1.2, 0.2, 0.1, checks=(_Check("SELF_CORRELATION", "FAIL"),))
-    assert mutation_outcome(healthy, parent, "x") is None
+    # A child the platform will not accept for self-correlation is never a cure.
+    sc_blocked = _Result(1.4, 1.05, 0.25, 0.13,
+                         checks=(_Check("SELF_CORRELATION", "FAIL"),))
+    assert not mutation_outcome(parent, sc_blocked, "smooth").cured
+    pending = _Result(1.4, 1.05, 0.25, 0.13, checks=(_Check("SELF_CORRELATION", "PENDING"),))
+    assert mutation_outcome(parent, pending, "smooth").cured
+    qualified = _Result(1.8, 1.3, 0.45, 0.2, checks=(_Check("LOW_SHARPE", "PASS"),))
+    assert mutation_outcome(qualified, _Result(1.8, 1.5, 0.3, 0.19, checks=()), "ladder").cured
 
 
 def test_learned_prescriptions_start_from_priors_and_follow_evidence():

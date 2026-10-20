@@ -34,6 +34,8 @@ LOW_SHARPE = "low_sharpe"
 
 # Above this the turnover term caps Fitness; the platform fails alphas above 70%.
 HIGH_TURNOVER_LEVEL = 0.30
+# Fitness treats any turnover below this as this, so cutting below it gains nothing.
+FITNESS_TURNOVER_FLOOR = 0.125
 # The platform fails alphas trading under 1% a day.
 LOW_TURNOVER_LEVEL = 0.015
 STRONG_SHARPE = 1.0
@@ -56,7 +58,7 @@ PRESCRIPTIONS = {
 }
 
 PROBLEM_LABELS = {
-    HIGH_TURNOVER: "换手过高",
+    HIGH_TURNOVER: "换手偏高",
     LOW_TURNOVER: "换手过低",
     LOW_RETURNS: "收益偏低",
     LOW_SHARPE: "夏普不足",
@@ -86,20 +88,28 @@ def diagnose_parent(
     failed_checks: frozenset[str],
     prescriptions: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ParentDiagnosis | None:
-    """None when the parent has no performance problem to aim at (e.g. only SC).
+    """The metric holding the parent back; None only without metrics.
 
-    ``prescriptions`` (from learn_prescriptions) replaces the starting priors.
+    A qualified parent (every performance check passed, as in quality optimization)
+    is diagnosed too: its grade rises with the same metrics, so its weakest one is
+    the target. For it, Fitness below Sharpe means sqrt(Returns / max(Turnover,
+    0.125)) < 1, i.e. returns are the binding term. SC-only work ignores the
+    prescription (see selection.allocations). ``prescriptions`` (from
+    learn_prescriptions) replaces the starting priors.
     """
     if sharpe is None or fitness is None or turnover is None:
         return None
-    if not failed_checks & _PERFORMANCE_CHECKS:
-        return None
+    qualified = not failed_checks & _PERFORMANCE_CHECKS
+    fitness_short = (abs(fitness) < abs(sharpe) if qualified
+                     else abs(sharpe) >= STRONG_SHARPE and abs(fitness) < 1.0)
     if "HIGH_TURNOVER" in failed_checks or turnover > HIGH_TURNOVER_LEVEL:
         problem = HIGH_TURNOVER
     elif "LOW_TURNOVER" in failed_checks or turnover < LOW_TURNOVER_LEVEL:
         problem = LOW_TURNOVER
-    elif abs(sharpe) >= STRONG_SHARPE and abs(fitness) < 1.0:
-        problem = LOW_RETURNS
+    elif fitness_short:
+        # Above the 12.5% floor, cutting turnover raises Fitness as surely as raising
+        # returns, and decay is the cheaper lever; below it only returns can help.
+        problem = HIGH_TURNOVER if turnover > FITNESS_TURNOVER_FLOOR else LOW_RETURNS
     else:
         problem = LOW_SHARPE
     families = (prescriptions or {}).get(problem) or PRESCRIPTIONS[problem]
@@ -140,7 +150,12 @@ class MutationOutcome:
 
 def mutation_outcome(parent: BacktestMetrics, child: BacktestMetrics,
                      action: str) -> MutationOutcome | None:
-    """How one mutation did against its parent's diagnosed problem (None: no problem)."""
+    """How one mutation did against its parent's diagnosed problem (None: no metrics).
+
+    A child that fails the platform's self-correlation check never counts as a cure:
+    a fix whose children cannot be submitted is not worth learning. A pending check
+    counts as not failed until the platform answers; later cycles recompute.
+    """
     diagnosis = diagnose_parent(
         sharpe=parent.sharpe, fitness=parent.fitness, turnover=parent.turnover,
         failed_checks=frozenset(check.name for check in parent.checks
@@ -154,8 +169,10 @@ def mutation_outcome(parent: BacktestMetrics, child: BacktestMetrics,
         LOW_RETURNS: abs(child.returns) > abs(parent.returns),
         LOW_SHARPE: abs(child.sharpe) > abs(parent.sharpe),
     }[diagnosis.problem]
+    child_sc_failed = any(check.name == "SELF_CORRELATION" and check.status.strip().upper() == "FAIL"
+                          for check in child.checks)
     return MutationOutcome(diagnosis.problem, action,
-                           moved and abs(child.fitness) > abs(parent.fitness))
+                           moved and abs(child.fitness) > abs(parent.fitness) and not child_sc_failed)
 
 
 def learn_prescriptions(outcomes: Iterable[MutationOutcome]) -> dict[str, tuple[str, ...]]:
