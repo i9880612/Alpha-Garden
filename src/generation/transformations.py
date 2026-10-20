@@ -15,11 +15,13 @@ from generation.formula import (
     Expression,
     Literal,
     Name,
+    Prefix,
     analyze_formula,
     formula_fingerprint,
     render_formula,
 )
 from generation.logic import prepare_formula_logic
+from generation.parser import parse_formula
 from generation.structure_limits import fits_formula_structure_limits
 from generation.unit_validation import find_coarse_unit_issues
 from generation.validation import validate_formula
@@ -490,12 +492,52 @@ def _same_nonempty_relation(left: str | None, right: str | None) -> bool:
     )
 
 
+# Cross-sectional reshapers. rank/quantile depend only on order; zscore/normalize/scale
+# are affine per day, which the platform's group neutralization and book scaling undo;
+# winsorize never clips rank/quantile output. So stacking two of them changes nothing.
+_ORDER_RESHAPERS = frozenset({"rank", "quantile"})
+_AFFINE_RESHAPERS = frozenset({"zscore", "normalize", "scale"})
+
+
+def collapse_stacked_reshapers(expression: Expression) -> Expression:
+    """Remove a reshaper that sits directly on another and cannot change the result."""
+    if isinstance(expression, Call):
+        expression = Call(expression.operator, tuple(
+            CallArgument(collapse_stacked_reshapers(argument.value), argument.name)
+            for argument in expression.arguments))
+        inner = _sole_argument(expression)
+        if isinstance(inner, Call) and _sole_argument(inner) is not None:
+            outer_name, inner_name = expression.operator, inner.operator
+            if outer_name in _ORDER_RESHAPERS and inner_name in _ORDER_RESHAPERS | _AFFINE_RESHAPERS:
+                return collapse_stacked_reshapers(
+                    Call(outer_name, (CallArgument(_sole_argument(inner)),)))
+            if outer_name in _AFFINE_RESHAPERS and inner_name in (
+                    _ORDER_RESHAPERS | _AFFINE_RESHAPERS | {"winsorize"}):
+                return inner
+            if outer_name == "winsorize" and inner_name in _ORDER_RESHAPERS:
+                return inner
+        return expression
+    if isinstance(expression, Binary):
+        return Binary(expression.operator, collapse_stacked_reshapers(expression.left),
+                      collapse_stacked_reshapers(expression.right))
+    if isinstance(expression, Prefix):
+        return Prefix(expression.operator, collapse_stacked_reshapers(expression.operand))
+    return expression
+
+
+def _sole_argument(call: Call) -> Expression | None:
+    if len(call.arguments) == 1 and call.arguments[0].name is None:
+        return call.arguments[0].value
+    return None
+
+
 def _prepare_leaf(
     expression: Expression,
     catalog: GenerationCatalog,
     *,
     before: str,
 ) -> Expression | None:
+    expression = collapse_stacked_reshapers(expression)
     validation = validate_formula(expression, catalog)
     if not validation.is_valid or find_coarse_unit_issues(expression, catalog):
         return None
@@ -504,7 +546,8 @@ def _prepare_leaf(
         return None
     if not fits_formula_structure_limits(logic.expression):
         return None
-    if render_formula(logic.expression) == before:
+    if render_formula(logic.expression) == before or _canonical_render(
+            logic.expression) == _canonical_render(parse_formula(before).expression):
         return None
     prepared_validation = validate_formula(logic.expression, catalog)
     if not prepared_validation.is_valid or find_coarse_unit_issues(
@@ -512,6 +555,20 @@ def _prepare_leaf(
     ):
         return None
     return logic.expression
+
+
+def _canonical_render(expression: Expression) -> str:
+    """Render with quantile read as rank: their backtests moved together (PnL correlation 1.0)."""
+    def as_rank(node: Expression) -> Expression:
+        if isinstance(node, Call):
+            return Call("rank" if node.operator == "quantile" else node.operator, tuple(
+                CallArgument(as_rank(argument.value), argument.name) for argument in node.arguments))
+        if isinstance(node, Binary):
+            return Binary(node.operator, as_rank(node.left), as_rank(node.right))
+        if isinstance(node, Prefix):
+            return Prefix(node.operator, as_rank(node.operand))
+        return node
+    return render_formula(collapse_stacked_reshapers(as_rank(expression)))
 
 
 def _balanced_product_indexes(

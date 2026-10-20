@@ -147,6 +147,29 @@ def test_directions_shape_the_sign_and_unknown_is_generated_positive():
     assert not any("debt,lookback=66)/cap" in f for f in formulas)  # value skips known-bad items
 
 
+def test_no_template_adds_a_bare_constant_to_a_field_value():
+    # The platform's unit check rejects e.g. high-low+0.0001 ("Incompatible unit for add").
+    for variant in _pool().variants:
+        assert "+0.0001" not in variant.formula and "(1+" not in variant.formula, variant.formula
+
+
+def test_per_share_surprise_only_pairs_fields_from_the_same_source():
+    profiles = _PROFILES + (
+        _p("est_eps", "analyst_estimate", "event", "per_share", "+", "mean", "eps", "analyst4"),
+        _p("anl4_eps_value", "analyst_actual", "quarterly", "per_share", "+", "actual", "eps",
+           "analyst4"),
+        _p("anl4_eps_median", "analyst_estimate", "event", "per_share", "+", "median", "eps",
+           "analyst4"),
+    )
+    catalog = _catalog(fields=tuple(
+        FieldDefinition(p.field_id, p.dataset, None, None, p.field_type, 0.9) for p in profiles))
+    pairs = [v.field_ids for v in _pool(profiles, _ALL | {p.field_id for p in profiles},
+                                        catalog).by_template()["earnings_surprise"]]
+    assert ("anl4_eps_value", "anl4_eps_median") in pairs
+    assert ("anl4_eps_value", "est_eps") not in pairs
+    assert ("anl4_ebit_value", "est_ebit") in pairs  # amounts carry no unit on the platform
+
+
 def test_vector_fields_are_reduced_and_sparse_fields_backfilled():
     sentiment = [v.formula for v in _pool().by_template()["sentiment_shift"] if "nws" in v.formula]
     assert sentiment and all("ts_backfill(vec_avg(nws),lookback=22)" in f for f in sentiment)
@@ -278,6 +301,36 @@ def test_combo_planning_spreads_parents_and_needs_enough_shared_days():
     assert sum("reversal" in v.hypothesis for v in combos) == COMBO_MAX_USES_PER_PARENT
     short = ComboParent(t["momentum"][0], 1.5, dict(list(star.daily_pnl.items())[:100]))
     assert plan_combo_variants([short, others[0]], catalog) == ()
+
+
+def test_near_duplicate_parents_share_one_idea_budget():
+    catalog = _catalog()
+    t = _pool(catalog=catalog).by_template()
+    # Three reversal-like parents that move together (vwap reversal written three ways).
+    twins = [_parent(v, 1.5 - 0.1 * k, 0.11, noise=0.05 * k)
+             for k, v in enumerate(t["reversal"][:2] + t["mean_deviation"][:1])]
+    others = [_parent(v, 1.0, 0.37 + k * 0.29) for k, v in
+              enumerate(t["value"] + t["forward_value"] + t["quality"])]
+    combos = plan_combo_variants([*twins, *others], catalog)
+    price_side = [v for v in combos if "reversal" in v.hypothesis or "mean_deviation" in v.hypothesis]
+    assert len(price_side) == COMBO_MAX_USES_PER_PARENT  # one budget for the three twins
+    partners = [v.hypothesis.split("：")[1] for v in price_side]
+    assert len(set(partners)) == len(partners)
+
+
+def test_calmer_parent_is_weighted_up_to_balance_the_combo():
+    import math
+    catalog = _catalog()
+    t = _pool(catalog=catalog).by_template()
+    days = [f"2020-{1 + i // 28:02d}-{1 + i % 28:02d}" for i in range(300)]
+    loud = ComboParent(t["reversal"][0], 1.5, {d: 3 * math.sin(i * 0.11) for i, d in enumerate(days)})
+    calm = ComboParent(t["value"][0], 1.2, {d: math.sin(i * 0.53) for i, d in enumerate(days)})
+    (combo,) = plan_combo_variants([loud, calm], catalog)
+    assert f"3*{t['value'][0].formula}" in combo.formula
+    assert validate_formula(combo.expression, catalog).is_valid
+    assert not find_coarse_unit_issues(combo.expression, catalog)
+    with pytest.raises(ValueError):
+        build_combo_variant(t["reversal"][0], t["value"][0], catalog, weights=(1.0, 9.0))
 
 
 def test_combo_needs_two_families_and_stays_valid():

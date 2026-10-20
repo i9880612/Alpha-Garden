@@ -17,7 +17,7 @@ from generation.catalog import (
     OperatorParameter,
     WindowDefinition,
 )
-from generation.formula import analyze_formula
+from generation.formula import Call, analyze_formula
 from generation.parser import parse_formula
 from generation.structure_limits import (
     FORMULA_MAX_COMPLEXITY,
@@ -64,19 +64,44 @@ class StructuralTransformationTests(unittest.TestCase):
             )
         )
 
+        # The parent is already rank(...): a second reshaper on it changes nothing, so
+        # stabilization adds no leaf and the reframes only vary what they add around it.
         self.assertEqual(
             Counter(leaf.family for leaf in leaves),
             Counter(
                 {
                     TEMPORAL_CHANGE_REFRAME: 4,
                     TEMPORAL_PERSISTENCE_REFRAME: 4,
-                    DISTRIBUTION_STABILIZATION: 2,
-                    GROUP_RELATIVE_REFRAME: 2,
-                    COMPLEMENTARY_SIGNAL_REFRAME: 16,
+                    GROUP_RELATIVE_REFRAME: 1,
+                    COMPLEMENTARY_SIGNAL_REFRAME: 8,
                 }
             ),
         )
-        self.assertEqual(len(leaves), 28)
+        self.assertEqual(len(leaves), 17)
+
+    def test_stacked_reshapers_are_collapsed_and_rank_wrappers_are_dropped(self) -> None:
+        leaves = tuple(iter_transformation_leaves(
+            self.parent, self.catalog, field_candidates=("open",), group_candidates=("sector",)))
+        formulas = [leaf.change.after for leaf in leaves]
+        self.assertTrue(formulas)
+        reshapers = {"rank", "zscore", "quantile", "normalize", "winsorize", "scale"}
+
+        def stacked(node) -> bool:
+            if isinstance(node, Call):
+                if (node.operator in reshapers and len(node.arguments) == 1
+                        and isinstance(node.arguments[0].value, Call)
+                        and node.arguments[0].value.operator in reshapers):
+                    return True
+                return any(stacked(argument.value) for argument in node.arguments)
+            return any(stacked(getattr(node, key)) for key in ("left", "right", "operand")
+                       if hasattr(node, key))
+
+        for formula in formulas:
+            self.assertFalse(stacked(parse_formula(formula).expression), formula)
+        unnormalized = tuple(iter_transformation_leaves(
+            parse_formula("ts_delta(close,5)").expression, self.catalog,
+            field_candidates=("open",), group_candidates=("sector",)))
+        self.assertTrue(any(leaf.family == DISTRIBUTION_STABILIZATION for leaf in unnormalized))
 
     def test_repeated_enumeration_is_stable_unique_and_legal(self) -> None:
         arguments = {

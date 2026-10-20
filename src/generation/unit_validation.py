@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from generation.arguments import bind_operator_arguments
 from generation.catalog import GenerationCatalog
-from generation.formula import Binary, Call, Expression, Literal, Prefix
+from generation.formula import Binary, Call, Expression, Literal, Name, Prefix
 from generation.validation import ValidationIssue
 
 
@@ -22,6 +22,12 @@ _DIMENSIONLESS_INPUT_INDEXES = {
     "ts_product": (0,),
     "ts_regression": (0, 1),
 }
+# Operators whose output keeps the unit of their first input.
+_UNIT_PRESERVING = frozenset({
+    "abs", "ts_backfill", "ts_decay_linear", "ts_delay", "ts_delta", "ts_max",
+    "ts_mean", "ts_median", "ts_min", "ts_std_dev", "ts_sum", "vec_avg", "vec_max",
+    "vec_min", "vec_sum",
+})
 
 
 def find_coarse_unit_issues(
@@ -45,6 +51,11 @@ def find_coarse_unit_issues(
             if value.operator in _COMPARISONS:
                 require_dimensionless(value.left, f"{location}.left")
                 require_dimensionless(value.right, f"{location}.right")
+            elif value.operator in {"+", "-"} and _mixes_constant_with_unit(value, catalog):
+                # e.g. high-low+0.0001: the platform rejects adding a unitless
+                # value to a field-derived one ("Incompatible unit for add").
+                issues.append(ValidationIssue(code="unit_compatibility_unproven",
+                                              location=location))
             visit(value.left, f"{location}.left")
             visit(value.right, f"{location}.right")
             return
@@ -81,6 +92,54 @@ def find_coarse_unit_issues(
     return tuple(issues)
 
 
+def _mixes_constant_with_unit(value: Binary, catalog: GenerationCatalog) -> bool:
+    left, right = value.left, value.right
+    return (
+        is_proven_dimensionless(left, catalog) and _carries_unit(right, catalog)
+    ) or (
+        is_proven_dimensionless(right, catalog) and _carries_unit(left, catalog)
+    )
+
+
+def _carries_unit(expression: Expression, catalog: GenerationCatalog) -> bool:
+    """True only when the value surely keeps a field's unit (False means unknown)."""
+    if isinstance(expression, Name):
+        return catalog.field(expression.value) is not None
+    if isinstance(expression, Prefix):
+        return _carries_unit(expression.operand, catalog)
+    if isinstance(expression, Binary):
+        left = _carries_unit(expression.left, catalog)
+        right = _carries_unit(expression.right, catalog)
+        if expression.operator in {"+", "-"}:
+            return left or right
+        if expression.operator in {"*", "/"}:
+            if left and right:
+                # Only a ratio of the same fields (vwap/ts_delay(vwap,3)) surely cancels;
+                # different fields may carry different platform units.
+                return _field_names(expression.left, catalog) != _field_names(
+                    expression.right, catalog)
+            return (left and is_proven_dimensionless(expression.right, catalog)) or (
+                right and is_proven_dimensionless(expression.left, catalog))
+        return False
+    if isinstance(expression, Call) and expression.operator in _UNIT_PRESERVING:
+        arguments = _call_expression_arguments(expression, catalog)
+        return bool(arguments) and _carries_unit(arguments[0][1], catalog)
+    return False
+
+
+def _field_names(expression: Expression, catalog: GenerationCatalog) -> frozenset[str]:
+    if isinstance(expression, Name):
+        return frozenset({expression.value}) if catalog.field(expression.value) else frozenset()
+    if isinstance(expression, Prefix):
+        return _field_names(expression.operand, catalog)
+    if isinstance(expression, Binary):
+        return _field_names(expression.left, catalog) | _field_names(expression.right, catalog)
+    if isinstance(expression, Call):
+        return frozenset().union(*(_field_names(argument.value, catalog)
+                                   for argument in expression.arguments))
+    return frozenset()
+
+
 def dimensionless_input_indexes(operator_name: str) -> tuple[int, ...]:
     return _DIMENSIONLESS_INPUT_INDEXES.get(operator_name, ())
 
@@ -112,6 +171,9 @@ def is_proven_dimensionless(
         # An integer observation count, independent of the input field's units.
         return True
     if "cross_sectional_normalization" in definition.roles:
+        return True
+    if "time_series_normalization" in definition.roles:
+        # ts_rank/ts_zscore/ts_scale/ts_quantile: the platform reports these unitless.
         return True
     expression_arguments = _call_expression_arguments(expression, catalog)
     if not expression_arguments:

@@ -35,7 +35,6 @@ FAMILY_LABELS = {
 # Operators templates must never produce (data-availability signals, not economic ones).
 FORBIDDEN_OPERATORS = frozenset({"ts_count_nans", "days_from_last_change"})
 STRATEGY_LABEL_PREFIX = "idea:"
-_EPSILON = "0.0001"
 _BACKFILL_LOOKBACK = {"quarterly": 66, "event": 22}
 
 
@@ -204,7 +203,8 @@ def _low_vol(pool):
 def _intraday_position(pool):
     if not all(pool.has(name) for name in ("high", "low", "close")):
         return
-    position = f"(high-close)/(high-low+{_EPSILON})"
+    # high==low forces close==high, so the ratio is 0/0 (NaN), never x/0.
+    position = "(high-close)/(high-low)"
     yield ("high", "low", "close"), None, position
     for w in (5, 10):
         yield ("high", "low", "close"), w, f"ts_mean({position},{w})"
@@ -214,7 +214,7 @@ def _abnormal_volume(pool):
     if not pool.has("volume"):
         return
     for w in (10, 20, 60):
-        yield ("volume",), w, f"volume/(ts_mean(volume,{w})+{_EPSILON})"
+        yield ("volume",), w, f"volume/ts_mean(volume,{w})"
 
 
 def _value(pool):
@@ -289,7 +289,10 @@ def _revision(pool):
                                and p.role in {"mean", "median"}):
         atom = pool.atom(profile)
         for w in (22, 66, 120):
-            body = f"ts_delta({atom},{w})/(abs(ts_mean({atom},{w}))+{_EPSILON})"
+            # mean(|x|) over w+1 days covers both ends of the change, so it is
+            # zero only when the change is too: no epsilon, which the platform's
+            # unit check rejects next to fields that carry units.
+            body = f"ts_delta({atom},{w})/ts_mean(abs({atom}),{w + 1})"
             yield (profile.field_id,), w, _signed(profile, body)
 
 
@@ -301,7 +304,7 @@ def _dispersion(pool):
         if _same_stem(high.field_id, low.field_id, "high", "low"):
             h, l = pool.atom(high), pool.atom(low)
             yield (high.field_id, low.field_id), None, \
-                f"-({h}-{l})/(abs({h})+abs({l})+{_EPSILON})"
+                f"-({h}-{l})/(abs({h})+abs({l}))"
 
 
 def _earnings_surprise(pool):
@@ -311,9 +314,13 @@ def _earnings_surprise(pool):
     for actual, estimate in _metric_pairs(actuals, estimates):
         if actual.scale != estimate.scale:
             continue
-        prior = f"ts_delay({pool.atom(estimate)},66)"
+        if actual.scale == "per_share" and _name_source(actual) != _name_source(estimate):
+            # The platform gives est_* per-share estimates a per-share unit but
+            # anl4_* actuals none, so their difference fails unit verification.
+            continue
+        a, prior = pool.atom(actual), f"ts_delay({pool.atom(estimate)},66)"
         yield (actual.field_id, estimate.field_id), None, \
-            f"({pool.atom(actual)}-{prior})/(abs({prior})+{_EPSILON})"
+            f"({a}-{prior})/(abs({a})+abs({prior}))"
 
 
 def _sentiment_shift(pool):
@@ -322,7 +329,7 @@ def _sentiment_shift(pool):
         atom = pool.atom(profile)
         for w in (5, 22, 66):
             if profile.scale == "count":
-                body = f"{atom}/(ts_mean({atom},{w})+{_EPSILON})-1"
+                body = f"{atom}/ts_mean({atom},{w})-1"
             else:
                 body = f"{atom}-ts_mean({atom},{w})"
             yield (profile.field_id,), w, _signed(profile, body)
@@ -332,11 +339,17 @@ def _option_signal(pool):
     for profile in pool.select(lambda p: p.kind in {"option_flow", "option_vol", "option_price"}):
         atom = pool.atom(profile)
         if profile.kind == "option_price":
-            yield (profile.field_id,), None, _signed(profile, f"{atom}/close-1")
+            # rank ignores the constant in x/close-1; dropping it keeps the ratio's
+            # unit question out of an addition.
+            yield (profile.field_id,), None, _signed(profile, f"{atom}/close")
             continue
         yield (profile.field_id,), None, _signed(profile, atom)
         for w in (22, 66):
             yield (profile.field_id,), w, _signed(profile, f"{atom}-ts_mean({atom},{w})")
+
+
+def _name_source(profile: FieldProfile) -> str:
+    return profile.field_id.split("_", 1)[0]
 
 
 def _same_stem(left: str, right: str, left_role: str, right_role: str) -> bool:
@@ -476,19 +489,26 @@ def build_combo_variant(
     catalog: GenerationCatalog,
     *,
     signs: tuple[int, int] = (1, 1),
+    weights: tuple[float, float] = (1.0, 1.0),
 ) -> IdeaVariant | None:
     """Add two single-template signals from different families; None if not combinable.
 
-    A sign of -1 flips a parent whose backtest showed the opposite direction.
+    A sign of -1 flips a parent whose backtest showed the opposite direction. Weights let
+    the calmer signal count for more, so the louder one does not drown it out.
     """
     if first.family == second.family or COMBO_TEMPLATE_ID in {first.template_id, second.template_id}:
         return None
     if any(sign not in (1, -1) for sign in signs):
         raise ValueError("idea_combo_sign_invalid")
-    left, right = sorted(zip((first, second), signs), key=lambda item: item[0].fingerprint)
-    (left_variant, left_sign), (right_variant, right_sign) = left, right
-    formula = (("-" if left_sign < 0 else "") + left_variant.formula
-               + ("-" if right_sign < 0 else "+") + right_variant.formula)
+    if any(isinstance(w, bool) or not isinstance(w, (int, float)) or not 0 < w <= COMBO_MAX_WEIGHT
+           for w in weights):
+        raise ValueError("idea_combo_weight_invalid")
+    left, right = sorted(zip((first, second), signs, weights),
+                         key=lambda item: item[0].fingerprint)
+    (left_variant, left_sign, left_weight), (right_variant, right_sign, right_weight) = left, right
+    formula = (("-" if left_sign < 0 else "") + _weight_prefix(left_weight) + left_variant.formula
+               + ("-" if right_sign < 0 else "+") + _weight_prefix(right_weight)
+               + right_variant.formula)
     outcome = _prepare_expression(formula, catalog)
     if isinstance(outcome, str):
         return None
@@ -498,6 +518,10 @@ def build_combo_variant(
         field_ids=tuple(dict.fromkeys(left[0].field_ids + right[0].field_ids)), window=None,
         expression=outcome,
     )
+
+
+def _weight_prefix(weight: float) -> str:
+    return "" if weight == 1 else f"{weight:g}*"
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,6 +536,10 @@ COMBO_MIN_ABS_SHARPE = 0.7
 COMBO_MAX_CORRELATION = 0.5
 COMBO_MAX_PARENTS = 60
 COMBO_MAX_USES_PER_PARENT = 3
+# Parents this correlated are one idea written differently (the platform's own
+# self-correlation line): they share one budget of pairs and pair at most once each.
+COMBO_SAME_IDEA_CORRELATION = 0.7
+COMBO_MAX_WEIGHT = 4.0
 _COMBO_MIN_OVERLAP_DAYS = 250
 
 
@@ -521,10 +549,12 @@ def plan_combo_variants(
 ) -> tuple[IdeaVariant, ...]:
     """Pair strong parents from different families whose PnL moves independently.
 
-    Parents with a negative Sharpe enter flipped. Pairs are ordered by the Sharpe two
-    equally weighted signals would reach given their correlation; each parent joins at
-    most a few pairs so one strong idea does not crowd out the rest. All limits are fixed,
-    so the work per cycle stays bounded however much history accumulates.
+    Parents with a negative Sharpe enter flipped. Near-duplicate parents (PnL correlation
+    above COMBO_SAME_IDEA_CORRELATION) count as one idea, and each idea joins at most a few
+    pairs so one strong idea does not crowd out the rest. The calmer parent is weighted up
+    to the louder one's daily PnL swing, which is what the expected Sharpe used for ordering
+    assumes. All limits are fixed, so the work per cycle stays bounded however much history
+    accumulates.
     """
     strong = sorted(
         (parent for parent in parents
@@ -532,11 +562,12 @@ def plan_combo_variants(
          and parent.variant.template_id != COMBO_TEMPLATE_ID),
         key=lambda parent: (-abs(parent.sharpe), parent.variant.fingerprint),
     )[:COMBO_MAX_PARENTS]
+    ideas = _idea_clusters(strong)
     scored: list[tuple[float, int, int]] = []
     for i, first in enumerate(strong):
         for j in range(i + 1, len(strong)):
             second = strong[j]
-            if first.variant.family == second.variant.family:
+            if first.variant.family == second.variant.family or ideas[i] == ideas[j]:
                 continue
             correlation = _signed_correlation(first, second)
             if correlation is None or correlation > COMBO_MAX_CORRELATION:
@@ -545,21 +576,61 @@ def plan_combo_variants(
             scored.append((expected, i, j))
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
     uses: Counter[int] = Counter()
+    paired: set[frozenset[int]] = set()
     combos: list[IdeaVariant] = []
     for _, i, j in scored:
-        if uses[i] >= COMBO_MAX_USES_PER_PARENT or uses[j] >= COMBO_MAX_USES_PER_PARENT:
+        idea_pair = frozenset((ideas[i], ideas[j]))
+        if (uses[ideas[i]] >= COMBO_MAX_USES_PER_PARENT
+                or uses[ideas[j]] >= COMBO_MAX_USES_PER_PARENT or idea_pair in paired):
             continue
         first, second = strong[i], strong[j]
         combo = build_combo_variant(
             first.variant, second.variant, catalog,
             signs=(1 if first.sharpe > 0 else -1, 1 if second.sharpe > 0 else -1),
+            weights=_balancing_weights(first, second),
         )
         if combo is None:
             continue
-        uses[i] += 1
-        uses[j] += 1
+        uses[ideas[i]] += 1
+        uses[ideas[j]] += 1
+        paired.add(idea_pair)
         combos.append(combo)
     return tuple(combos)
+
+
+def _idea_clusters(parents: list[ComboParent]) -> list[int]:
+    """Label each parent with the strongest earlier parent it nearly duplicates."""
+    labels: list[int] = []
+    leaders: list[int] = []
+    for index, parent in enumerate(parents):
+        for label, leader in enumerate(leaders):
+            correlation = _signed_correlation(parents[leader], parent)
+            if correlation is not None and correlation > COMBO_SAME_IDEA_CORRELATION:
+                labels.append(label)
+                break
+        else:
+            labels.append(len(leaders))
+            leaders.append(index)
+    return labels
+
+
+def _balancing_weights(first: ComboParent, second: ComboParent) -> tuple[float, float]:
+    """Weight the calmer parent up so both move the combined PnL about equally."""
+    swings = [_daily_swing(first.daily_pnl), _daily_swing(second.daily_pnl)]
+    if min(swings) <= 0:
+        return (1.0, 1.0)
+    ratio = min(round(max(swings) / min(swings), 1), COMBO_MAX_WEIGHT)
+    if ratio < 1.2:
+        return (1.0, 1.0)
+    return (ratio, 1.0) if swings[0] < swings[1] else (1.0, ratio)
+
+
+def _daily_swing(daily_pnl: Mapping[str, float]) -> float:
+    values = list(daily_pnl.values())
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    return (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
 
 
 def _signed_correlation(first: ComboParent, second: ComboParent) -> float | None:

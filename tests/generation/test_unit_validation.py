@@ -41,6 +41,8 @@ class CoarseUnitValidationTests(unittest.TestCase):
                     (("x", "expr"), ("group", "group"), ("d", "window")),
                 ),
                 self._operator("hump", (("x", "expr"),)),
+                self._operator("ts_rank", (("x", "expr"), ("d", "window")),
+                               roles=("time_series_normalization",)),
                 self._operator(
                     "ts_product",
                     (("x", "expr"), ("d", "window")),
@@ -97,6 +99,21 @@ class CoarseUnitValidationTests(unittest.TestCase):
                     (),
                 )
 
+    def test_rejects_constants_added_to_field_values(self) -> None:
+        for formula in ("close+1", "1-abs(close)", "(close-volume)/(close-volume+0.0001)",
+                        "-close+0.5", "abs(close)*2+1", "close/volume-1",
+                        "close/ts_rank(close,5)-1"):
+            with self.subTest(formula=formula):
+                expression = parse_formula(formula).expression
+                self.assertTrue(find_coarse_unit_issues(expression, self.catalog))
+
+    def test_accepts_constants_next_to_unitless_or_cancelled_values(self) -> None:
+        for formula in ("rank(close)+0.5", "ts_rank(close,5)-0.5", "close/abs(close)-1", "rank(close/volume)",
+                        "close-volume", "rank(close)+rank(volume)", "close+0.0001*close"):
+            with self.subTest(formula=formula):
+                expression = parse_formula(formula).expression
+                self.assertEqual(find_coarse_unit_issues(expression, self.catalog), ())
+
     @staticmethod
     def _field(field_id: str) -> FieldDefinition:
         return FieldDefinition(
@@ -114,6 +131,7 @@ class CoarseUnitValidationTests(unittest.TestCase):
         parameters: tuple[tuple[str, str], ...],
         *,
         normalized: bool = False,
+        roles: tuple[str, ...] = (),
     ) -> OperatorDefinition:
         return OperatorDefinition(
             name=name,
@@ -123,7 +141,7 @@ class CoarseUnitValidationTests(unittest.TestCase):
                 OperatorParameter(parameter_name, kind)
                 for parameter_name, kind in parameters
             ),
-            roles=("cross_sectional_normalization",) if normalized else (),
+            roles=("cross_sectional_normalization",) if normalized else roles,
             output_kind="signal",
         )
 
