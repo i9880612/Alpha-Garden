@@ -164,3 +164,30 @@ class ConsoleJobsTests(unittest.TestCase):
     def test_read_only_refuses_operation(self):
         with self.assertRaisesRegex(ValueError, "console_read_only"):
             ConsoleJobs(self.reader, read_only=True).start({"kind": "run"}, "readonly-request-identity")
+
+
+class ConsoleCodeVersionTests(unittest.TestCase):
+    def test_operations_refuse_to_start_after_the_source_changes(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        reader = make_console_reader(folder.name)
+        versions = iter(["v1", "v2"])
+        jobs = ConsoleJobs(reader, code_fingerprint=lambda: next(versions))
+        self.addCleanup(jobs.close)
+        with self.assertRaisesRegex(ValueError, "console_code_changed"):
+            jobs.start({"kind": "run"}, "request-1")
+        self.assertEqual(jobs.snapshot()["items"], [])
+
+    def test_source_fingerprint_follows_file_contents(self):
+        from pathlib import Path
+        from execution.code_version import source_fingerprint
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "pkg").mkdir()
+            (root / "pkg" / "a.py").write_text("x = 1\n", encoding="utf-8")
+            (root / "pkg" / "__pycache__").mkdir()
+            (root / "pkg" / "__pycache__" / "a.py").write_text("ignored", encoding="utf-8")
+            first = source_fingerprint(root)
+            self.assertEqual(first, source_fingerprint(root))
+            (root / "pkg" / "a.py").write_text("x = 2\n", encoding="utf-8")
+            self.assertNotEqual(first, source_fingerprint(root))

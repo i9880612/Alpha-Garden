@@ -93,6 +93,7 @@ export function errorMessage(error: string, zh: boolean) {
     console_formula_not_found: ["当前账号中未找到这条公式。", "This formula was not found in the current account."],
     console_read_only: ["当前服务为只读模式。", "The service is read-only."],
     console_operation_busy: ["已有操作正在执行，请等待完成或暂停后再启动。", "Another operation is running. Wait or pause it first."],
+    console_code_changed: ["程序代码已更新，控制台仍在使用旧版本。请关闭并重新启动控制台后再操作。", "The code was updated after the console started. Restart the console before continuing."],
     console_data_unavailable: ["暂时无法读取本地数据，请检查服务、数据库和账号配置。", "Local data is unavailable. Check the service, database and account configuration."],
     console_token_required: ["网页会话已更新，请刷新页面后再操作。", "The console session changed. Reload before continuing."],
     console_run_not_found: ["未找到当前账号的运行记录。", "The run was not found for this account."],

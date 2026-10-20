@@ -10,6 +10,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from execution.code_version import source_fingerprint
 from execution.launch import launch_automated_run, resume_automated_run
 from execution.progress import LOGGER_NAME
 from execution.run_config import load_automated_run_limits
@@ -19,8 +20,12 @@ from execution.submission_runner import submit_queued_alphas
 
 
 class ConsoleJobs:
-    def __init__(self, reader, *, read_only=False):
+    def __init__(self, reader, *, read_only=False, code_fingerprint=source_fingerprint):
         self.reader, self.read_only = reader, read_only
+        # Operations run in this process's threads with the code imported at startup;
+        # refuse to start one once the source on disk has moved on.
+        self._code_fingerprint = code_fingerprint
+        self._loaded_code = code_fingerprint()
         self._lock = threading.RLock()
         self._jobs = deque(maxlen=20)
         self._thread = None
@@ -48,6 +53,8 @@ class ConsoleJobs:
                 return existing["id"]
             if self._thread and self._thread.is_alive():
                 raise ValueError("console_operation_busy")
+            if self._code_fingerprint() != self._loaded_code:
+                raise ValueError("console_code_changed")
             # Validate before creating a worker or touching a running research plan.
             if request["kind"] == "run":
                 self.reader.settings()

@@ -270,7 +270,7 @@ def _error_response(exc):
         return (404 if code.endswith("not_found") else 409), {"error": code}
     if isinstance(exc, ValueError) and str(exc).startswith("console_"):
         code = str(exc)
-        status = (409 if code in {"console_operation_busy", "console_request_id_conflict", "console_run_not_resumable", "console_series_busy", "console_series_cooldown", "console_settings_conflict", "console_settings_busy"}
+        status = (409 if code in {"console_operation_busy", "console_request_id_conflict", "console_run_not_resumable", "console_series_busy", "console_series_cooldown", "console_settings_conflict", "console_settings_busy", "console_code_changed"}
                   else 403 if code == "console_read_only" else 404 if code.endswith("not_found") else 400)
         return status, {"error": code}
     if isinstance(exc, (OSError, sqlite3.Error, ValueError)):
