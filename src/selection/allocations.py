@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import math
 
+from generation.decay_ladder import DECAY_LADDER_FAMILIES
 from generation.polishing import POLISHING_FAMILIES
 from generation.internal_edits import INTERNAL_EDIT_FAMILIES
 from generation.self_correlation import (
@@ -24,6 +25,7 @@ from learning.action_effects import (
     ActionStrategy,
     ActionStrategySet,
 )
+from learning.diagnosis import follows_prescription
 from learning.optimization_targets import (
     OptimizationTarget,
     ParentOptimizationTargetSet,
@@ -55,10 +57,12 @@ QUALIFIED_EVOLUTION_FAMILIES = (
     *POLISHING_FAMILIES,
     *STRUCTURAL_TRANSFORMATION_FAMILIES,
     *SELF_CORRELATION_REPAIR_FAMILIES,
+    *DECAY_LADDER_FAMILIES,
 )
 IMPROVEMENT_FAMILIES_BY_STAGE = {
-    STRUCTURAL_EVOLUTION_STAGE: (*STRUCTURAL_TRANSFORMATION_FAMILIES, *INTERNAL_EDIT_FAMILIES),
-    LOCAL_POLISHING_STAGE: (*POLISHING_FAMILIES, *INTERNAL_EDIT_FAMILIES),
+    STRUCTURAL_EVOLUTION_STAGE: (*STRUCTURAL_TRANSFORMATION_FAMILIES, *INTERNAL_EDIT_FAMILIES,
+                                 *DECAY_LADDER_FAMILIES),
+    LOCAL_POLISHING_STAGE: (*POLISHING_FAMILIES, *INTERNAL_EDIT_FAMILIES, *DECAY_LADDER_FAMILIES),
     QUALIFIED_EVOLUTION_STAGE: QUALIFIED_EVOLUTION_FAMILIES,
 }
 
@@ -83,6 +87,8 @@ class SignalImprovementSource:
     self_correlation: float | None = None
     quality_budget_key: tuple[str, str] | None = None
     quality_remaining: int | None = None
+    # Families aimed at the parent's diagnosed problem (learning/diagnosis.py).
+    prescribed_families: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,6 +565,7 @@ def _round_robin_roots(
                         slot=len(selected),
                         action_strategy=strategy,
                         use_preference=use_preference,
+                        prescribed=source.prescribed_families,
                     )
                     family = next(
                         (
@@ -841,6 +848,7 @@ def _candidate_family_order(
     slot: int,
     action_strategy: ActionStrategy | None,
     use_preference: bool,
+    prescribed: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     comparison_counts = (
         _action_comparison_counts(target) if target is not None else {}
@@ -860,6 +868,14 @@ def _candidate_family_order(
         for item in action_strategy.actions
         if item.action in preferred and item.resolved_count > 0
     } if target is not None and target.name == "SELF_CORRELATION" and action_strategy is not None else {}
+    # Learned preferences outrank the diagnosis; the diagnosis outranks plain rotation,
+    # except on the exploration slots that keep other fixes findable.
+    aimed = (
+        set(prescribed)
+        if prescribed and (target is None or target.name != "SELF_CORRELATION")
+        and follows_prescription(rotation_key, parent_task_id, slot)
+        else set()
+    )
     return tuple(
         sorted(
             transformations,
@@ -869,6 +885,7 @@ def _candidate_family_order(
                     if action in preferred
                     else 2 if action in deprioritized else 1
                 ),
+                0 if action in aimed else 1,
                 -sc_success_rates.get(action, 0.0),
                 comparison_counts.get(action, 0),
                 attempted_by_family.get(action, 0),

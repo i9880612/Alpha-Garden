@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from itertools import chain
 from dataclasses import replace
 
 from generation.arguments import bind_operator_arguments
@@ -31,6 +32,10 @@ INTERNAL_EDIT_FAMILIES = (
     INTERNAL_FIELD_REPLACEMENT,
     INTERNAL_LAYER_REMOVAL,
 )
+# Dropping ts_backfill on sparse data only adds gaps; it never yields a new idea.
+_MISSING_VALUE_REPAIR = "missing_value_repair"
+# rank and quantile order stocks the same way; their backtests moved together.
+_EQUIVALENT_OPERATOR_PAIRS = ({"rank", "quantile"},)
 
 
 def iter_internal_edit_candidates(
@@ -41,12 +46,18 @@ def iter_internal_edit_candidates(
     field_candidates: tuple[str, ...] = (),
     families: tuple[str, ...] = INTERNAL_EDIT_FAMILIES,
     locations: frozenset[str] | None = None,
+    field_relatives: Callable[[str], tuple[str, ...]] | None = None,
 ) -> Iterator[FormulaCandidate]:
     """One local edit per candidate, with no increase in depth or complexity.
 
     Field inputs are explicitly supplied by the caller, not chosen as a quality
-    preference here. Enumeration order is deterministic, not a learned ranking.
-    Selection still owns coverage/tail-risk checks and allocation before use.
+    preference here. Passing ``field_relatives`` turns on related-only editing: a field
+    is only swapped for its own relatives (same kind, scale and cadence), every
+    occurrence at once so vwap/ts_delay(vwap,3) becomes close/ts_delay(close,3), operators only
+    within a shared catalog role (smoothing for smoothing, never rank for quantile), and
+    missing-value repair layers are never removed. Enumeration order is
+    deterministic, not a learned ranking. Selection still owns coverage/tail-risk
+    checks and allocation before use.
     """
     if not isinstance(parent_task_id, str) or not parent_task_id.strip():
         raise ValueError("internal_edit_parent_task_id_invalid")
@@ -64,10 +75,13 @@ def iter_internal_edit_candidates(
     facts = analyze_formula(expression)
     parent_fingerprint = formula_fingerprint(expression)
     seen = {parent_fingerprint}
-    for transformed, change in _edits(
+    edits = _edits(
         expression, catalog, tuple(sorted(set(field_candidates))), "formula",
-        families, locations,
-    ):
+        families, locations, field_relatives,
+    )
+    if field_relatives is not None and INTERNAL_FIELD_REPLACEMENT in families and locations is None:
+        edits = chain(_whole_field_swaps(expression, catalog, field_relatives), edits)
+    for transformed, change in edits:
         # Do not silently perform a second edit via global simplification.
         if not _valid(transformed, catalog):
             continue
@@ -84,6 +98,40 @@ def iter_internal_edit_candidates(
             parent_formula_fingerprint=parent_fingerprint,
             change=change,
         )
+
+
+def _whole_field_swaps(
+    expression: Expression,
+    catalog: GenerationCatalog,
+    field_relatives: Callable[[str], tuple[str, ...]],
+) -> Iterator[tuple[Expression, CandidateChange]]:
+    for name in dict.fromkeys(analyze_formula(expression).referenced_names):
+        source = catalog.field(name)
+        if source is None or source.field_type not in {"MATRIX", "VECTOR"}:
+            continue
+        for relative in field_relatives(name):
+            target = catalog.field(relative)
+            if target is None or relative == name or target.field_type != source.field_type:
+                continue
+            yield (
+                _substitute(expression, name, relative),
+                CandidateChange(INTERNAL_FIELD_REPLACEMENT, "formula", name, relative),
+            )
+
+
+def _substitute(node: Expression, old: str, new: str) -> Expression:
+    if isinstance(node, Name):
+        return Name(new) if node.value == old else node
+    if isinstance(node, Call):
+        return replace(node, arguments=tuple(
+            replace(argument, value=_substitute(argument.value, old, new))
+            for argument in node.arguments))
+    if isinstance(node, Binary):
+        return replace(node, left=_substitute(node.left, old, new),
+                       right=_substitute(node.right, old, new))
+    if isinstance(node, Prefix):
+        return replace(node, operand=_substitute(node.operand, old, new))
+    return node
 
 
 def _valid(expression: Expression, catalog: GenerationCatalog) -> bool:
@@ -104,15 +152,18 @@ def _edits(
     location: str,
     families: tuple[str, ...],
     locations: frozenset[str] | None,
+    field_relatives: Callable[[str], tuple[str, ...]] | None = None,
 ) -> Iterator[tuple[Expression, CandidateChange]]:
     editable = locations is None or location in locations
     if isinstance(node, Name):
         source = catalog.field(node.value)
-        if (editable and INTERNAL_FIELD_REPLACEMENT in families
+        if (editable and INTERNAL_FIELD_REPLACEMENT in families and field_relatives is None
                 and source is not None and source.field_type in {"MATRIX", "VECTOR"}):
-            for name in fields:
+            names = fields if field_relatives is None else field_relatives(source.field_id)
+            for name in names:
                 target = catalog.field(name)
-                assert target is not None
+                if target is None:
+                    continue
                 if name != source.field_id and target.field_type == source.field_type:
                     yield (
                         Name(name),
@@ -134,6 +185,9 @@ def _edits(
             for target in catalog.operators:
                 if (
                     target.name == source.name
+                    or (field_relatives is not None and (
+                        not set(source.roles) & set(target.roles)
+                        or {source.name, target.name} in _EQUIVALENT_OPERATOR_PAIRS))
                     or target.output_kind != source.output_kind
                     or "REGULAR" not in target.scope
                     or any(p.variadic for p in target.parameters)
@@ -172,7 +226,8 @@ def _edits(
                             ),
                         )
         inputs = [a for a in binding.assignments if a.parameter.kind == "expr"]
-        if editable and INTERNAL_LAYER_REMOVAL in families and len(inputs) == 1:
+        if (editable and INTERNAL_LAYER_REMOVAL in families and len(inputs) == 1
+                and (field_relatives is None or _MISSING_VALUE_REPAIR not in source.roles)):
             replacement = node.arguments[inputs[0].argument_index].value
             yield (
                 replacement,
@@ -192,7 +247,7 @@ def _edits(
                 continue
             for replacement, change in _edits(
                 argument.value, catalog, fields, f"{location}.arguments[{index}]",
-                families, locations,
+                families, locations, field_relatives,
             ):
                 arguments = list(node.arguments)
                 arguments[index] = replace(argument, value=replacement)
@@ -201,11 +256,12 @@ def _edits(
         for side in ("left", "right"):
             for replacement, change in _edits(
                 getattr(node, side), catalog, fields, f"{location}.{side}",
-                families, locations,
+                families, locations, field_relatives,
             ):
                 yield replace(node, **{side: replacement}), change
     elif isinstance(node, Prefix):
         for replacement, change in _edits(
             node.operand, catalog, fields, f"{location}.operand", families, locations,
+            field_relatives,
         ):
             yield replace(node, operand=replacement), change

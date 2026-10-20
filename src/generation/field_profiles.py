@@ -10,6 +10,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
 
@@ -382,3 +383,52 @@ def _scale_from_text(text: str, default: str = "amount") -> str:
     if _COUNT.search(text):
         return "count"
     return default
+
+
+FIELD_RELATIVE_LIMIT = 32
+
+
+class FieldRelatives:
+    """Fields a mutation may swap in for a given field, computed lazily per field.
+
+    A relative has the same kind, scale, cadence and shape, so the swap keeps both the
+    formula's idea (price for price, quarterly amount for quarterly amount) and its
+    platform units. Synonyms (same item, another vendor) are left out: they repeat the
+    parent instead of trying something new, and so are fields whose reviewed direction is
+    the opposite (debt for income). Reviewed, same-direction and same-dataset fields come
+    first, then a fixed per-pair order, and at most FIELD_RELATIVE_LIMIT are offered.
+    """
+
+    def __init__(self, profiles: FieldProfileSet, enabled_field_ids: frozenset[str]) -> None:
+        usable = [profile for profile in profiles.template_fields()
+                  if profile.field_id in enabled_field_ids]
+        self._by_id = {profile.field_id: profile for profile in usable}
+        self._groups: dict[tuple, list[FieldProfile]] = {}
+        for profile in usable:
+            self._groups.setdefault(_relative_key(profile), []).append(profile)
+        self._cache: dict[str, tuple[str, ...]] = {}
+
+    def __call__(self, field_id: str) -> tuple[str, ...]:
+        if field_id not in self._cache:
+            source = self._by_id.get(field_id)
+            if source is None:
+                self._cache[field_id] = ()
+            else:
+                peers = [peer for peer in self._groups[_relative_key(source)]
+                         if peer.field_id != field_id
+                         and (peer.synonym_group is None or peer.synonym_group != source.synonym_group)
+                         and not _opposite_directions(peer, source)]
+                peers.sort(key=lambda peer: (
+                    peer.tier != "reviewed", peer.direction != source.direction,
+                    peer.dataset != source.dataset,
+                    sha256(f"{field_id}|{peer.field_id}".encode("utf-8")).digest()))
+                self._cache[field_id] = tuple(peer.field_id for peer in peers[:FIELD_RELATIVE_LIMIT])
+        return self._cache[field_id]
+
+
+def _opposite_directions(left: FieldProfile, right: FieldProfile) -> bool:
+    return {left.direction, right.direction} == {"+", "-"}
+
+
+def _relative_key(profile: FieldProfile) -> tuple:
+    return (profile.kind, profile.scale, profile.cadence, profile.field_type)

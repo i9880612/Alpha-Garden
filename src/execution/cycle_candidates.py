@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from itertools import chain
 from hashlib import sha256
@@ -22,6 +23,7 @@ from generation.ideas import (
     plan_idea_batch,
 )
 from generation.parser import FormulaSyntaxError, parse_formula
+from generation.decay_ladder import iter_decay_ladder_leaves
 from generation.polishing import POLISHING_FAMILIES, iter_window_mutation_leaves
 from generation.internal_edits import (
     iter_internal_edit_candidates,
@@ -35,11 +37,22 @@ from generation.self_correlation import (
     shared_field_replacements,
     self_correlation_research_fields,
 )
-from generation.transformations import COMPLEMENTARY_SIGNAL_REFRAME, iter_transformation_leaves
+from generation.transformations import (
+    COMPLEMENTARY_SIGNAL_REFRAME,
+    TEMPORAL_PERSISTENCE_REFRAME,
+    TemporalReframeSpec,
+    iter_transformation_leaves,
+)
 from learning.quality_proximity import (
     LOCAL_POLISHING_STAGE,
     ParentImprovementStageSet,
     QUALIFIED_EVOLUTION_STAGE,
+)
+from learning.diagnosis import (
+    HIGH_TURNOVER,
+    SHORT_SMOOTHING_WINDOW,
+    ParentDiagnosis,
+    diagnose_parent,
 )
 from learning.self_correlation import SelfCorrelationReference
 from persistence.backtests import (
@@ -141,6 +154,8 @@ class ImprovementPoolCandidate:
     candidate: FormulaCandidate
     leaf_id: str
     family: str
+    # 0 = suits the parent's diagnosis better than its family siblings.
+    preference: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +174,11 @@ class ImprovementCandidatePool:
     settings: BacktestSettings
     candidates: tuple[ImprovementPoolCandidate, ...]
     family_usage: tuple[ImprovementFamilyUsage, ...]
+    diagnosis: ParentDiagnosis | None = None
+
+    @property
+    def prescribed_families(self) -> tuple[str, ...]:
+        return self.diagnosis.families if self.diagnosis is not None else ()
 
     @property
     def blocked_request_count(self) -> int:
@@ -188,6 +208,8 @@ def build_improvement_candidate_pools(
     self_correlation_references: tuple[SelfCorrelationReference, ...] = (),
     internal_field_candidates: tuple[str, ...] | None = None,
     rotation_key: str = "",
+    field_relatives: Callable[[str], tuple[str, ...]] | None = None,
+    prescriptions: Mapping[str, tuple[str, ...]] | None = None,
 ) -> tuple[ImprovementCandidatePool, ...]:
     _validate_pool_request(
         parent_task_ids=eligible_parent_task_ids,
@@ -236,6 +258,13 @@ def build_improvement_candidate_pools(
             parsed = parse_formula(parent.task.formula)
         except FormulaSyntaxError as exc:
             raise ValueError("automated_cycle_parent_formula_invalid") from exc
+        diagnosis = diagnose_parent(
+            sharpe=parent.result.sharpe, fitness=parent.result.fitness,
+            turnover=parent.result.turnover,
+            failed_checks=frozenset(check.name for check in parent.result.checks
+                                    if check.status.strip().upper() == "FAIL"),
+            prescriptions=prescriptions,
+        )
 
         available: list[ImprovementPoolCandidate] = []
         blocked_by_family: Counter[str] = Counter()
@@ -260,6 +289,9 @@ def build_improvement_candidate_pools(
                 field_candidates=field_candidates,
                 group_candidates=group_candidates,
             )
+        if diagnosis is not None and diagnosis.problem == HIGH_TURNOVER:
+            # Only a parent that trades too much climbs the decay ladder.
+            leaves = chain(iter_decay_ladder_leaves(parsed.expression, catalog), leaves)
         sc_reference = references_by_parent.get(parent_task_id)
         sc_families = allowed_self_correlation_families(
             sc_reference.correlation if sc_reference is not None else None,
@@ -312,6 +344,7 @@ def build_improvement_candidate_pools(
                     else internal_field_candidates,
                     rotation_key=f"{rotation_key}|{parent_task_id}",
                 ),
+                field_relatives=field_relatives,
             ),
         )
         for leaf in leaves:
@@ -407,6 +440,7 @@ def build_improvement_candidate_pools(
                     candidate=candidate,
                     leaf_id=leaf_id,
                     family=family,
+                    preference=_leaf_preference(leaf, diagnosis),
                 )
             )
         # Trial history comes from saved task/mutation facts, not re-enumeration
@@ -431,10 +465,12 @@ def build_improvement_candidate_pools(
                 parent_task_id=parent_task_id,
                 stage=stage,
                 settings=settings,
+                diagnosis=diagnosis,
                 candidates=tuple(
                     sorted(
                         available,
                         key=lambda item: (
+                            item.preference,
                             sha256(
                                 f"{rotation_key}|{parent_task_id}|{item.leaf_id}".encode()
                             ).digest()
@@ -796,6 +832,16 @@ def _snapshot_settings(snapshot: BacktestSnapshot) -> BacktestSettings:
         return BacktestSettings.from_platform_dict(payload)
     except (TypeError, ValueError) as exc:
         raise ValueError("automated_cycle_parent_settings_invalid") from exc
+
+
+def _leaf_preference(leaf: object, diagnosis: ParentDiagnosis | None) -> int:
+    """For a high-turnover parent, light smoothing comes before heavy smoothing."""
+    if (diagnosis is not None and diagnosis.problem == HIGH_TURNOVER
+            and getattr(leaf, "family", None) == TEMPORAL_PERSISTENCE_REFRAME
+            and isinstance(getattr(leaf, "spec", None), TemporalReframeSpec)
+            and leaf.spec.window <= SHORT_SMOOTHING_WINDOW):
+        return 0
+    return 1
 
 
 def _passed_checks(snapshot: BacktestSnapshot) -> tuple[str, ...]:

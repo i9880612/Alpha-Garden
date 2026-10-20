@@ -139,3 +139,39 @@ def test_promote_moves_only_labelled_unclassified_fields():
     assert promote_to_rule_tier(profiles, "odd") is profiles
     assert promote_to_rule_tier(profiles, "close") is profiles
     assert promote_to_rule_tier(profiles, "absent") is profiles
+
+
+def test_field_relatives_share_kind_scale_cadence_and_skip_synonyms():
+    from generation.field_profiles import FIELD_RELATIVE_LIMIT, FieldRelatives
+    profiles = FieldProfileSet.from_profiles([
+        FieldProfile("close", "pv1", "MATRIX", "reviewed", "price", "daily", "price",
+                     synonym_group="price:close"),
+        FieldProfile("vwap", "pv1", "MATRIX", "reviewed", "price", "daily", "price",
+                     synonym_group="price:vwap"),
+        FieldProfile("close_alt", "pv2", "MATRIX", "rule", "price", "daily", "price",
+                     synonym_group="price:close"),
+        FieldProfile("open_other", "pv2", "MATRIX", "rule", "price", "daily", "price",
+                     synonym_group="price:open"),
+        FieldProfile("cap", "pv1", "MATRIX", "reviewed", "price", "daily", "amount"),
+        FieldProfile("sales", "f6", "MATRIX", "reviewed", "fundamental", "quarterly", "amount"),
+        FieldProfile("revenue", "f6", "MATRIX", "reviewed", "fundamental", "quarterly", "amount"),
+        FieldProfile("disabled", "f6", "MATRIX", "reviewed", "fundamental", "quarterly", "amount"),
+    ])
+    enabled = frozenset({"close", "vwap", "close_alt", "open_other", "cap", "sales", "revenue"})
+    relatives = FieldRelatives(profiles, enabled)
+    assert relatives("close") == ("vwap", "open_other")  # reviewed first; synonym skipped
+    assert relatives("revenue") == ("sales",)             # not cap (other scale), not disabled
+    assert relatives("missing") == () and relatives("disabled") == ()
+    assert FIELD_RELATIVE_LIMIT >= 8
+
+
+def test_field_relatives_skip_opposite_directions():
+    from generation.field_profiles import FieldRelatives
+    profiles = FieldProfileSet.from_profiles([
+        FieldProfile("income", "f6", "MATRIX", "reviewed", "fundamental", "quarterly", "amount", "+"),
+        FieldProfile("debt", "f6", "MATRIX", "reviewed", "fundamental", "quarterly", "amount", "-"),
+        FieldProfile("ebitda", "f6", "MATRIX", "reviewed", "fundamental", "quarterly", "amount", "+"),
+        FieldProfile("misc", "f6", "MATRIX", "reviewed", "fundamental", "quarterly", "amount"),
+    ])
+    relatives = FieldRelatives(profiles, frozenset({"income", "debt", "ebitda", "misc"}))
+    assert relatives("income") == ("ebitda", "misc")

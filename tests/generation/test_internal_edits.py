@@ -249,3 +249,67 @@ def test_cannot_relax_depth_limit_to_accept_an_over_limit_parent(catalog):
         formula = f"ts_mean({formula},66)"
     with pytest.raises(ValueError, match="internal_edit_parent_invalid"):
         candidates(formula, catalog)
+
+
+def _related_catalog():
+    def field(name):
+        return FieldDefinition(name, "dataset", "Price Volume", "Price", "MATRIX", 1.0)
+
+    def operator(name, *parameters, roles=()):
+        return OperatorDefinition(name, "test", ("REGULAR",), parameters, roles, "signal")
+
+    x, d = OperatorParameter("x", "expr"), OperatorParameter("d", "window")
+    return GenerationCatalog(
+        CatalogContext("EQUITY", "USA", "TOP3000", 1),
+        tuple(field(name) for name in ("close", "vwap", "revenue", "sales", "iv30")),
+        (
+            operator("rank", x, roles=("cross_sectional_normalization",)),
+            operator("quantile", x, roles=("cross_sectional_normalization",)),
+            operator("zscore", x, roles=("cross_sectional_normalization",)),
+            operator("ts_mean", x, d, roles=("time_series_smoothing",)),
+            operator("ts_decay_linear", x, d, roles=("time_series_smoothing",)),
+            operator("ts_delay", x, d, roles=("time_series_lag",)),
+            operator("ts_rank", x, d, roles=("time_series_normalization",)),
+            operator("ts_backfill", x, OperatorParameter("lookback", "window", optional=True),
+                     roles=("missing_value_repair",)),
+        ),
+        (WindowDefinition(5, "week"), WindowDefinition(66, "quarter")),
+    )
+
+
+def test_related_only_editing_swaps_like_for_like():
+    catalog = _related_catalog()
+    relatives = {"close": ("vwap",), "revenue": ("sales",)}.get
+    parent = parse_formula(
+        "rank(ts_mean(close,5)/ts_delay(close,5)+ts_backfill(revenue,lookback=66))").expression
+    edits = list(iter_internal_edit_candidates(
+        parent, catalog, parent_task_id="p", field_candidates=("iv30", "sales", "vwap"),
+        field_relatives=lambda name: relatives(name, ())))
+    changes = {(e.change.action, e.change.before, e.change.after) for e in edits}
+    fields = {after for action, _, after in changes if action == INTERNAL_FIELD_REPLACEMENT}
+    assert fields == {"vwap", "sales"}  # never the unrelated iv30
+    operators = {after.split("(")[0] for action, _, after in changes
+                 if action == INTERNAL_OPERATOR_REPLACEMENT}
+    assert operators == {"ts_decay_linear", "zscore"}  # same role only; never quantile
+    removed = {before.split("(")[0] for action, before, _ in changes
+               if action == INTERNAL_LAYER_REMOVAL}
+    assert "ts_backfill" not in removed
+
+
+def test_without_relatives_the_old_open_editing_is_kept():
+    catalog = _related_catalog()
+    parent = parse_formula("rank(ts_delay(close,5))").expression
+    edits = list(iter_internal_edit_candidates(
+        parent, catalog, parent_task_id="p", field_candidates=("iv30",)))
+    assert any(e.change.after == "iv30" for e in edits)
+    assert any(e.change.after.startswith("ts_rank(") for e in edits)
+
+
+def test_related_field_swaps_replace_every_occurrence_together():
+    catalog = _related_catalog()
+    parent = parse_formula("rank(-(vwap/ts_delay(vwap,5)-1))").expression
+    edits = [e for e in iter_internal_edit_candidates(
+        parent, catalog, parent_task_id="p", field_candidates=(),
+        field_relatives=lambda name: ("close",) if name == "vwap" else ())
+        if e.change.action == INTERNAL_FIELD_REPLACEMENT]
+    assert [e.formula for e in edits] == ["rank(-(close/ts_delay(close,5)-1))"]

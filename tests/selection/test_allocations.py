@@ -1669,5 +1669,29 @@ class BacktestSourceAllocationTests(unittest.TestCase):
         )
 
 
+class PrescribedFamilyOrderTests(unittest.TestCase):
+    def test_prescribed_families_lead_except_on_exploration_slots(self) -> None:
+        from learning.diagnosis import follows_prescription
+        from selection.allocations import _candidate_family_order
+        from generation.transformations import (
+            GROUP_RELATIVE_REFRAME, TEMPORAL_PERSISTENCE_REFRAME,
+        )
+        families = (TEMPORAL_CHANGE_REFRAME, GROUP_RELATIVE_REFRAME, TEMPORAL_PERSISTENCE_REFRAME)
+        led = explored = 0
+        for slot in range(30):
+            order = _candidate_family_order(
+                None, families, attempted_by_family={}, rotation_key="run|1",
+                parent_task_id="parent", slot=slot, action_strategy=None,
+                use_preference=False, prescribed=(TEMPORAL_PERSISTENCE_REFRAME,),
+            )
+            self.assertEqual(set(order), set(families))
+            if follows_prescription("run|1", "parent", slot):
+                self.assertEqual(order[0], TEMPORAL_PERSISTENCE_REFRAME)
+                led += 1
+            else:
+                explored += 1
+        self.assertTrue(led and explored)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,8 @@ from execution.progress import phase
 from generation.catalog import GenerationCatalog
 from generation.field_profiles import (
     CatalogFieldInfo,
+    FieldProfileSet,
+    FieldRelatives,
     load_field_profiles,
     reconcile_field_profiles,
 )
@@ -45,10 +47,29 @@ def load_idea_pool(
     cycle_number: int,
 ) -> IdeaVariantPool | None:
     """None means "no templates this cycle": random exploration takes the whole share."""
+    loaded = load_enabled_field_profiles(
+        connection, database_path, context, cycle_number=cycle_number,
+        unavailable_note="本轮模板名额由随机探索补齐",
+    )
+    if loaded is None:
+        return None
+    profiles, enabled = loaded
+    return build_idea_variant_pool(catalog, profiles, enabled_field_ids=enabled)
+
+
+def load_enabled_field_profiles(
+    connection: sqlite3.Connection,
+    database_path: str | Path,
+    context: FieldCatalogContext,
+    *,
+    cycle_number: int,
+    unavailable_note: str,
+) -> tuple[FieldProfileSet, frozenset[str]] | None:
+    """Profiles reconciled with today's catalog, plus the fields enabled for use."""
     try:
         profiles = load_field_profiles(field_profiles_path(database_path))
     except (OSError, ValueError) as exc:
-        phase(cycle_number, 1, f"字段画像不可用（{exc}），本轮模板名额由随机探索补齐")
+        phase(cycle_number, 1, f"字段画像不可用（{exc}），{unavailable_note}")
         return None
     reconciled = reconcile_field_profiles(profiles, tuple(
         CatalogFieldInfo(record.field_id, record.dataset_id, record.field_type,
@@ -63,7 +84,16 @@ def load_idea_pool(
         profile.field_id for profile in reconciled.profiles.template_fields()
         if profile.tier in ENABLED_TIERS
     )
-    return build_idea_variant_pool(catalog, reconciled.profiles, enabled_field_ids=enabled)
+    return reconciled.profiles, enabled
+
+
+def no_field_relatives(field_id: str) -> tuple[str, ...]:
+    """Without profiles a mutation swaps no fields rather than random ones."""
+    return ()
+
+
+def field_relatives_from(loaded: tuple[FieldProfileSet, frozenset[str]] | None) -> FieldRelatives | None:
+    return FieldRelatives(*loaded) if loaded is not None else None
 
 
 def load_combo_variants(

@@ -14,7 +14,13 @@ from execution.backtest_batches import (
 )
 from execution.backtests import backtest_request_fingerprint
 from execution.catalog import load_generation_catalog
-from execution.idea_planning import load_combo_variants, load_idea_pool
+from execution.idea_planning import (
+    field_relatives_from,
+    load_combo_variants,
+    load_enabled_field_profiles,
+    no_field_relatives,
+)
+from generation.ideas import build_idea_variant_pool
 from execution.direction import build_direction_candidates
 from execution.cycle_candidates import (
     OptimizationCandidatesExhausted,
@@ -57,8 +63,17 @@ from learning.quality_proximity import (
 )
 from learning.seed_correlation import submitted_seed
 from learning.signal_duplicates import SignalDuplicate
+from learning.diagnosis import (
+    LEARNING_WINDOW_DAYS,
+    MAX_LEARNING_OUTCOMES,
+    PRESCRIPTIONS,
+    PROBLEM_LABELS,
+    learn_prescriptions,
+    mutation_outcome,
+)
 from persistence.backtests import (
     backtest_was_cancelled_before_submission,
+    BacktestMutationRecord,
     BacktestSnapshot,
     get_backtest_task,
     list_backtest_mutations,
@@ -209,9 +224,15 @@ def plan_automated_cycle(
         )
         idea_percent = 0 if run.optimization_only else (
             get_run_idea_percent(connection, run.run_id) or 0)
-        idea_pool = load_idea_pool(
-            connection, database_path, catalog, catalog_context, cycle_number=cycle_number,
-        ) if idea_percent else None
+        enabled_profiles = load_enabled_field_profiles(
+            connection, database_path, catalog_context, cycle_number=cycle_number,
+            unavailable_note=("本轮模板名额由随机探索补齐，变异不做换字段" if idea_percent
+                              else "本轮变异不做换字段"),
+        )
+        idea_pool = build_idea_variant_pool(
+            catalog, enabled_profiles[0], enabled_field_ids=enabled_profiles[1],
+        ) if idea_percent and enabled_profiles is not None else None
+        field_relatives = field_relatives_from(enabled_profiles) or no_field_relatives
         combo_variants = load_combo_variants(
             connection, catalog, account_scope=run.account_scope,
         ) if idea_pool is not None else ()
@@ -261,6 +282,16 @@ def plan_automated_cycle(
             and field.coverage > 0
         )
         planning_mutations = list_backtest_mutations(connection)
+        prescriptions = _learned_prescriptions(
+            planning_mutations, completed_by_task_id,
+            account_scope=run.account_scope, observed_at=evidence_cutoff,
+        )
+        changed = {problem: families for problem, families in prescriptions.items()
+                   if families != PRESCRIPTIONS[problem]}
+        if changed:
+            phase(cycle_number, 1, "变异处方已按近 30 天结果调整：" + "；".join(
+                f"{PROBLEM_LABELS[problem]} → {'、'.join(families)}"
+                for problem, families in sorted(changed.items())))
         effective_exploration_reserve = (
             requested_backtests * allocation_policy.exploration_percent + 99
         ) // 100 if not run.optimization_only else 0
@@ -358,6 +389,8 @@ def plan_automated_cycle(
             field_candidates=mutation_fields,
             internal_field_candidates=exploration_fields,
             rotation_key=f"{run.run_id}|{cycle_number}",
+            field_relatives=field_relatives,
+            prescriptions=prescriptions,
             group_candidates=groups,
             reserved_tasks=reserved_tasks,
             self_correlation_references=sc_references,
@@ -368,6 +401,10 @@ def plan_automated_cycle(
             ),
         )
         pools_by_parent = {pool.parent_task_id: pool for pool in improvement_pools}
+        diagnosed = Counter(pool.diagnosis.label for pool in improvement_pools if pool.diagnosis is not None)
+        if diagnosed:
+            phase(cycle_number, 1, "变异诊断：" + "，".join(
+                f"{label} {count} 个" for label, count in sorted(diagnosed.items())))
         signal_source_items: list[SignalImprovementSource] = []
         for frontier in frontiers.records:
             for branch in frontier.branches:
@@ -399,6 +436,7 @@ def plan_automated_cycle(
                         quality_budget_key=(quality_allowances[branch.task_id].root_task_id, branch.settings_key)
                             if branch.task_id in quality_allowances else None,
                         quality_remaining=quality_allowances[branch.task_id].available if branch.task_id in quality_allowances else None,
+                        prescribed_families=pool.prescribed_families if pool is not None else (),
                         family_capacities=tuple(
                             SignalImprovementFamilyCapacity(
                                 family=family,
@@ -679,6 +717,40 @@ def _cycle_seed_start(run_id: str, cycle_number: int) -> int:
 
 def _stable_seed(identity: str) -> int:
     return int.from_bytes(sha256(identity.encode("utf-8")).digest()[:8], "big")
+
+
+def _learned_prescriptions(
+    mutations: tuple[BacktestMutationRecord, ...],
+    completed_by_task_id: dict[str, BacktestSnapshot],
+    *,
+    account_scope: str,
+    observed_at: datetime,
+) -> dict[str, tuple[str, ...]]:
+    """Problem -> actions, from this account's mutations finished in the learning window."""
+    window_start = observed_at - timedelta(days=LEARNING_WINDOW_DAYS)
+    recent: list[tuple[datetime, BacktestMutationRecord]] = []
+    for mutation in mutations:
+        child = completed_by_task_id.get(mutation.child_task_id)
+        parent = completed_by_task_id.get(mutation.parent_task_id)
+        if (child is None or parent is None or child.result is None or parent.result is None
+                or child.task.account_scope != account_scope or not child.task.finished_at):
+            continue
+        try:
+            finished = datetime.fromisoformat(child.task.finished_at)
+        except ValueError:
+            continue
+        if finished.utcoffset() is None or not window_start <= finished <= observed_at:
+            continue
+        recent.append((finished, mutation))
+    recent.sort(key=lambda item: (item[0], item[1].child_task_id), reverse=True)
+    outcomes = []
+    for _, mutation in recent[:MAX_LEARNING_OUTCOMES]:
+        outcome = mutation_outcome(completed_by_task_id[mutation.parent_task_id].result,
+                                   completed_by_task_id[mutation.child_task_id].result,
+                                   mutation.action)
+        if outcome is not None:
+            outcomes.append(outcome)
+    return learn_prescriptions(outcomes)
 
 
 def _timestamp(value: object, error: str) -> datetime:
