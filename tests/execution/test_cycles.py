@@ -403,6 +403,45 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         with open_database(self.database_path) as connection:
             self.assertEqual(connection.execute("SELECT count(*) FROM automated_run_backtests").fetchone()[0], 0)
 
+    def test_optimization_adds_a_proven_independent_companion_first(self):
+        from generation.combo_enhancement import COMBO_ENHANCEMENT
+        from persistence.backtests import list_backtest_mutations
+        from persistence.formula_ideas import FormulaIdeaRecord, record_formula_idea
+        from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
+        parent_noise, companion_noise = Random("parent"), Random("companion")
+        parent_id = self._signal_seed("rank(ts_rank(close,22)+ts_zscore(open,66))",
+            sharpe_status="PASS", fitness_status="PASS",
+            pnl_increments=[0.25 + parent_noise.gauss(0, 1) for _ in range(300)])
+        companion_id = self._completed_backtest("rank(volume)", sharpe=1.0, fitness=0.8,
+            sharpe_status="FAIL", fitness_status="FAIL", time_offset=2, capture_pnl=False)
+        with open_database(self.database_path) as connection:
+            # Consistent metrics: Fitness = 1.5 * sqrt(0.10 / 0.15).
+            connection.execute("UPDATE backtest_results SET grade='AVERAGE', sharpe=1.5, fitness=1.22, "
+                               "returns=0.10, turnover=0.15 WHERE task_id=?", (parent_id,))
+            connection.execute("UPDATE backtest_results SET returns=0.08, turnover=0.10 WHERE task_id=?",
+                               (companion_id,))
+            connection.execute("INSERT INTO backtest_yearly_stats(task_id,stage,year,sharpe) VALUES (?, 'IS', 2023, 1.5)",
+                               (parent_id,))
+            save_submission_check(connection, SubmissionCheckRecord(parent_id, "2026-08-30T00:03:00+08:00",
+                canonical_submission_json({"is": {"checks": [{"name": name, "result": "PASS"}
+                                                               for name in STANDARD_REGULAR_CHECK_NAMES]}}), None))
+            record_formula_idea(connection, FormulaIdeaRecord(companion_id, "abnormal_volume", "price_action",
+                                                              ("volume",), "volume"))
+            save_pnl_series(connection, series(f"alpha-{companion_id}",
+                [0.2 + companion_noise.gauss(0, 1) for _ in range(300)], "group-account"))
+        run_id = self._start_run(generation_count=6, backtest_count=4, max_cycles=1,
+                                 max_backtests=4, optimization_only=True)
+        plan = plan_automated_cycle(self.database_path, run_id=run_id,
+                                    created_at="2026-08-30T00:04:00+08:00")
+        planned = {item.task.task_id for item in plan.backtests}
+        with open_database(self.database_path) as connection:
+            enhanced = [m for m in list_backtest_mutations(connection)
+                        if m.child_task_id in planned and m.action == COMBO_ENHANCEMENT]
+        self.assertTrue(enhanced)
+        self.assertTrue(enhanced[0].after.startswith("zscore(rank(ts_rank(close,22)+ts_zscore(open,66)))+"))
+        self.assertIn("zscore(rank(volume))", enhanced[0].after)
+        self.assertTrue(all(m.parent_task_id == parent_id for m in enhanced))
+
     def test_optimization_plans_qualified_alpha_outside_seed_lineages(self):
         from persistence.seeds import list_signal_seeds
         from persistence.submission_checks import SubmissionCheckRecord, save_submission_check

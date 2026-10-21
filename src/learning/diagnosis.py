@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Protocol
 
+from generation.combo_enhancement import COMBO_ENHANCEMENT
 from generation.decay_ladder import SIGNAL_DECAY_LADDER
 from generation.internal_edits import INTERNAL_FIELD_REPLACEMENT, INTERNAL_OPERATOR_REPLACEMENT
 from generation.polishing import POLISHING_FAMILIES
@@ -43,20 +44,25 @@ SHORT_SMOOTHING_WINDOW = 10
 # One slot in this many ignores the prescription and keeps the usual rotation.
 EXPLORATION_SLOT_EVERY = 5
 
+# Only qualified parents get combo-enhancement leaves, so leading every prescription with
+# it changes nothing elsewhere. It aims at the combined Sharpe rather than at one metric:
+# every GOOD grade so far came from adding an independent signal, while small edits moved
+# a qualified parent's Fitness by about 0.1 either way (10-21 runs: 0 grade gains in 40).
 PRESCRIPTIONS = {
     # Lengthen its windows, or add decay a rung at a time. In the 2026-10-20 run the
     # short-term reversal parent lost Fitness to every smoothing (0/9) and decay rung
     # (0/4); the window keeps its place and the ladder stays as a probe for other kinds.
-    HIGH_TURNOVER: (*POLISHING_FAMILIES, SIGNAL_DECAY_LADDER),
+    HIGH_TURNOVER: (COMBO_ENHANCEMENT, *POLISHING_FAMILIES, SIGNAL_DECAY_LADDER),
     # Slow fundamental signals: compare within industries, reshape the ranking, try
     # sibling fields or add a companion. The same run: operator swaps 2/2, group-relative
     # 1/2, companions 3/22; taking the change of the ranking cured 1 of 21.
-    LOW_TURNOVER: (GROUP_RELATIVE_REFRAME, INTERNAL_OPERATOR_REPLACEMENT,
+    LOW_TURNOVER: (COMBO_ENHANCEMENT, GROUP_RELATIVE_REFRAME, INTERNAL_OPERATOR_REPLACEMENT,
                    INTERNAL_FIELD_REPLACEMENT, COMPLEMENTARY_SIGNAL_REFRAME),
     # Good Sharpe, small edge: compare within industries, try sibling fields, add a signal.
-    LOW_RETURNS: (GROUP_RELATIVE_REFRAME, INTERNAL_FIELD_REPLACEMENT, COMPLEMENTARY_SIGNAL_REFRAME),
+    LOW_RETURNS: (COMBO_ENHANCEMENT, GROUP_RELATIVE_REFRAME, INTERNAL_FIELD_REPLACEMENT,
+                  COMPLEMENTARY_SIGNAL_REFRAME),
     # Weak or noisy: compare within industries, try sibling fields, tame outliers.
-    LOW_SHARPE: (GROUP_RELATIVE_REFRAME, INTERNAL_FIELD_REPLACEMENT, DISTRIBUTION_STABILIZATION,
+    LOW_SHARPE: (COMBO_ENHANCEMENT, GROUP_RELATIVE_REFRAME, INTERNAL_FIELD_REPLACEMENT, DISTRIBUTION_STABILIZATION,
                  COMPLEMENTARY_SIGNAL_REFRAME),
 }
 
@@ -133,7 +139,8 @@ _PRIOR_WEIGHT = 2.0
 _PRESCRIBED_PRIOR = 0.5
 _UNPRESCRIBED_PRIOR = 0.25
 MIN_CURE_SCORE = 0.3
-MAX_PRESCRIBED_FAMILIES = 4
+# One more than the four mutation fixes: combo enhancement leads them for qualified parents.
+MAX_PRESCRIBED_FAMILIES = 5
 # A child whose daily PnL moves this closely with its parent's is the same alpha written
 # differently (e.g. normalize(rank(x)) for rank(x)); a tiny Fitness change there is noise,
 # not a cure. Kept high on purpose: a decayed child sits near 0.95 and can be a real fix.
@@ -176,7 +183,7 @@ def mutation_outcome(parent: BacktestMetrics, child: BacktestMetrics,
         LOW_TURNOVER: child.turnover > parent.turnover,
         LOW_RETURNS: abs(child.returns) > abs(parent.returns),
         LOW_SHARPE: abs(child.sharpe) > abs(parent.sharpe),
-    }[diagnosis.problem]
+    }[diagnosis.problem] or action == COMBO_ENHANCEMENT  # aims at Fitness itself
     child_sc_failed = any(check.name == "SELF_CORRELATION" and check.status.strip().upper() == "FAIL"
                           for check in child.checks)
     identical = (parent_child_correlation is not None

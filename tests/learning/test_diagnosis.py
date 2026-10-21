@@ -134,3 +134,13 @@ def test_an_identical_rewrite_is_never_a_cure():
     assert not mutation_outcome(parent, better, "x",
                                 parent_child_correlation=IDENTICAL_PNL_CORRELATION).cured
     assert mutation_outcome(parent, better, "x", parent_child_correlation=None).cured
+
+
+def test_combo_enhancement_cures_by_fitness_alone():
+    from generation.combo_enhancement import COMBO_ENHANCEMENT
+    # High-turnover parent; the child keeps turnover but gains Fitness through Sharpe.
+    parent = _Result(1.8, 1.30, 0.40, 0.12)
+    child = _Result(2.2, 1.55, 0.42, 0.13)
+    assert mutation_outcome(parent, child, COMBO_ENHANCEMENT).cured
+    assert not mutation_outcome(parent, child, "other").cured
+    assert all(families[0] == COMBO_ENHANCEMENT for families in PRESCRIPTIONS.values())

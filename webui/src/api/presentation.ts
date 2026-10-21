@@ -28,6 +28,8 @@ export function mutationDescription({ action, before, after }: { action: string;
     distribution_stabilization: ["控制极端值并稳定信号分布", "Control outliers and stabilize the signal distribution"],
     group_relative_reframe: ["转换为组内相对信号", "Express the signal relative to its group"],
     complementary_signal_reframe: ["引入互补信号并重新归一化", "Add a complementary signal and renormalize"],
+    combo_enhancement: ["叠加已验证的低相关信号（组合增强）", "Add a proven low-correlation signal (combo enhancement)"],
+    signal_decay_ladder: ["对整条信号做线性衰减以降低换手", "Apply linear decay to the whole signal to cut turnover"],
     internal_operator_replacement: ["替换公式内部算子", "Replace an operator within the formula"],
     internal_layer_removal: ["移除一层算子以简化公式", "Remove an operator layer to simplify the formula"],
     direction_reversal: ["反转信号方向", "Reverse the signal direction"],

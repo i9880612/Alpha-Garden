@@ -14,6 +14,7 @@ from execution.backtest_batches import (
 )
 from execution.backtests import backtest_request_fingerprint
 from execution.catalog import load_generation_catalog
+from execution.combo_enhancement import load_combo_enhancement_leaves
 from execution.idea_planning import (
     field_relatives_from,
     load_combo_variants,
@@ -385,6 +386,15 @@ def plan_automated_cycle(
         ))
         quality_allowances = load_quality_budgets(connection,
             tuple(completed_by_task_id[task] for task in eligible_parent_task_ids), mutations=planning_mutations)
+        enhancement_leaves = load_combo_enhancement_leaves(
+            connection, catalog, account_scope=run.account_scope,
+            parents=tuple(completed_by_task_id[record.parent_task_id] for record in improvement_stages.records
+                          if record.stage == QUALIFIED_EVOLUTION_STAGE),
+            mutations=planning_mutations,
+        )
+        if enhancement_leaves:
+            phase(cycle_number, 1, f"组合增强：{len(enhancement_leaves)} 个合格父代找到 "
+                  f"{sum(map(len, enhancement_leaves.values()))} 个低相关补充信号")
         improvement_pools = build_improvement_candidate_pools(
             catalog,
             settings_policy,
@@ -396,6 +406,7 @@ def plan_automated_cycle(
             rotation_key=f"{run.run_id}|{cycle_number}",
             field_relatives=field_relatives,
             prescriptions=prescriptions,
+            enhancement_leaves=enhancement_leaves,
             group_candidates=groups,
             reserved_tasks=reserved_tasks,
             self_correlation_references=sc_references,

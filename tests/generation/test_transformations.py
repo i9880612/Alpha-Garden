@@ -73,11 +73,13 @@ class StructuralTransformationTests(unittest.TestCase):
                     TEMPORAL_CHANGE_REFRAME: 4,
                     TEMPORAL_PERSISTENCE_REFRAME: 4,
                     GROUP_RELATIVE_REFRAME: 1,
-                    COMPLEMENTARY_SIGNAL_REFRAME: 8,
+                    # rank- and zscore-normalized parents weigh differently against
+                    # the companion they are added to, so both stay.
+                    COMPLEMENTARY_SIGNAL_REFRAME: 16,
                 }
             ),
         )
-        self.assertEqual(len(leaves), 17)
+        self.assertEqual(len(leaves), 25)
 
     def test_stacked_reshapers_are_collapsed_and_rank_wrappers_are_dropped(self) -> None:
         leaves = tuple(iter_transformation_leaves(
@@ -86,15 +88,18 @@ class StructuralTransformationTests(unittest.TestCase):
         self.assertTrue(formulas)
         reshapers = {"rank", "zscore", "quantile", "normalize", "winsorize", "scale"}
 
-        def stacked(node) -> bool:
+        def stacked(node, in_sum=False) -> bool:
             if isinstance(node, Call):
-                if (node.operator in reshapers and len(node.arguments) == 1
+                # Inside a sum an affine layer sets the term's weight and must stay.
+                affine_weight = in_sum and node.operator in {"zscore", "normalize", "scale"}
+                if (node.operator in reshapers and len(node.arguments) == 1 and not affine_weight
                         and isinstance(node.arguments[0].value, Call)
                         and node.arguments[0].value.operator in reshapers):
                     return True
                 return any(stacked(argument.value) for argument in node.arguments)
-            return any(stacked(getattr(node, key)) for key in ("left", "right", "operand")
-                       if hasattr(node, key))
+            if hasattr(node, "left"):
+                return stacked(node.left, True) or stacked(node.right, True)
+            return hasattr(node, "operand") and stacked(node.operand, in_sum)
 
         for formula in formulas:
             self.assertFalse(stacked(parse_formula(formula).expression), formula)
@@ -113,6 +118,19 @@ class StructuralTransformationTests(unittest.TestCase):
             self.assertFalse(same_signal(parent, parse_formula(formula).expression), formula)
         self.assertEqual(render_formula(collapse_stacked_reshapers(
             parse_formula("winsorize(group_rank(rank(close),sector))").expression)), "group_rank(close,sector)")
+
+    def test_affine_layers_inside_a_weighted_sum_are_kept(self) -> None:
+        from generation.transformations import collapse_stacked_reshapers
+        def collapsed(formula):
+            return render_formula(collapse_stacked_reshapers(parse_formula(formula).expression))
+        # The affine layer sets each term's weight in the sum, so it must stay.
+        self.assertEqual(collapsed("zscore(rank(open))+2*zscore(rank(close))"),
+                         "zscore(rank(open))+2*zscore(rank(close))")
+        # Alone, or under another reshaper, its scale cancels.
+        self.assertEqual(collapsed("zscore(rank(open))"), "rank(open)")
+        self.assertEqual(collapsed("-zscore(rank(open))"), "-rank(open)")
+        # Order-only collapses never change scale, so they apply anywhere.
+        self.assertEqual(collapsed("rank(zscore(open))+rank(close)"), "rank(open)+rank(close)")
 
     def test_repeated_enumeration_is_stable_unique_and_legal(self) -> None:
         arguments = {

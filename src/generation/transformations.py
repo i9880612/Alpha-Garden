@@ -503,11 +503,20 @@ _AFFINE_RESHAPERS = frozenset({"zscore", "normalize", "scale"})
 _GROUP_ORDER_RESHAPERS = frozenset({"group_rank"})
 
 
-def collapse_stacked_reshapers(expression: Expression) -> Expression:
-    """Remove a reshaper that sits directly on another and cannot change the result."""
+def collapse_stacked_reshapers(expression: Expression, *, _scale_free: bool = True) -> Expression:
+    """Remove a reshaper that sits directly on another and cannot change the result.
+
+    Dropping an affine reshaper (zscore/normalize/scale) also changes the signal's
+    scale, which only cancels where nothing else is added to it: at the top level or
+    inside another reshaper. Inside a weighted sum, 2*zscore(rank(x)) and 2*rank(x)
+    weigh x differently against the other terms, so the affine layer stays.
+    """
     if isinstance(expression, Call):
+        children_scale_free = expression.operator in (
+            _ORDER_RESHAPERS | _AFFINE_RESHAPERS | _GROUP_ORDER_RESHAPERS)
         expression = Call(expression.operator, tuple(
-            CallArgument(collapse_stacked_reshapers(argument.value), argument.name)
+            CallArgument(collapse_stacked_reshapers(argument.value, _scale_free=children_scale_free),
+                         argument.name)
             for argument in expression.arguments))
         if (expression.operator in _GROUP_ORDER_RESHAPERS and expression.arguments
                 and expression.arguments[0].name is None):
@@ -515,27 +524,29 @@ def collapse_stacked_reshapers(expression: Expression) -> Expression:
             if (isinstance(first, Call) and first.operator in _ORDER_RESHAPERS | _AFFINE_RESHAPERS
                     and _sole_argument(first) is not None):
                 return collapse_stacked_reshapers(Call(expression.operator, (
-                    CallArgument(_sole_argument(first)), *expression.arguments[1:])))
+                    CallArgument(_sole_argument(first)), *expression.arguments[1:])),
+                    _scale_free=_scale_free)
         inner = _sole_argument(expression)
-        if (isinstance(inner, Call) and inner.operator in _GROUP_ORDER_RESHAPERS
-                and (expression.operator == "winsorize" or expression.operator in _AFFINE_RESHAPERS)):
+        if isinstance(inner, Call) and inner.operator in _GROUP_ORDER_RESHAPERS and (
+                expression.operator == "winsorize"
+                or (_scale_free and expression.operator in _AFFINE_RESHAPERS)):
             return inner
         if isinstance(inner, Call) and _sole_argument(inner) is not None:
             outer_name, inner_name = expression.operator, inner.operator
             if outer_name in _ORDER_RESHAPERS and inner_name in _ORDER_RESHAPERS | _AFFINE_RESHAPERS:
                 return collapse_stacked_reshapers(
-                    Call(outer_name, (CallArgument(_sole_argument(inner)),)))
-            if outer_name in _AFFINE_RESHAPERS and inner_name in (
+                    Call(outer_name, (CallArgument(_sole_argument(inner)),)), _scale_free=_scale_free)
+            if _scale_free and outer_name in _AFFINE_RESHAPERS and inner_name in (
                     _ORDER_RESHAPERS | _AFFINE_RESHAPERS | {"winsorize"}):
                 return inner
             if outer_name == "winsorize" and inner_name in _ORDER_RESHAPERS:
                 return inner
         return expression
     if isinstance(expression, Binary):
-        return Binary(expression.operator, collapse_stacked_reshapers(expression.left),
-                      collapse_stacked_reshapers(expression.right))
+        return Binary(expression.operator, collapse_stacked_reshapers(expression.left, _scale_free=False),
+                      collapse_stacked_reshapers(expression.right, _scale_free=False))
     if isinstance(expression, Prefix):
-        return Prefix(expression.operator, collapse_stacked_reshapers(expression.operand))
+        return Prefix(expression.operator, collapse_stacked_reshapers(expression.operand, _scale_free=_scale_free))
     return expression
 
 

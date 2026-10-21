@@ -23,6 +23,7 @@ from generation.ideas import (
     plan_idea_batch,
 )
 from generation.parser import FormulaSyntaxError, parse_formula
+from generation.combo_enhancement import ComboEnhancementLeaf
 from generation.decay_ladder import iter_decay_ladder_leaves
 from generation.polishing import POLISHING_FAMILIES, iter_window_mutation_leaves
 from generation.internal_edits import (
@@ -210,6 +211,7 @@ def build_improvement_candidate_pools(
     rotation_key: str = "",
     field_relatives: Callable[[str], tuple[str, ...]] | None = None,
     prescriptions: Mapping[str, tuple[str, ...]] | None = None,
+    enhancement_leaves: Mapping[str, tuple[ComboEnhancementLeaf, ...]] | None = None,
 ) -> tuple[ImprovementCandidatePool, ...]:
     _validate_pool_request(
         parent_task_ids=eligible_parent_task_ids,
@@ -289,6 +291,9 @@ def build_improvement_candidate_pools(
                 field_candidates=field_candidates,
                 group_candidates=group_candidates,
             )
+        if stage == QUALIFIED_EVOLUTION_STAGE and enhancement_leaves:
+            # Proven independent companions come first, best expected gain first.
+            leaves = chain(enhancement_leaves.get(parent_task_id, ()), leaves)
         if diagnosis is not None and diagnosis.problem == HIGH_TURNOVER:
             # Only a parent that trades too much climbs the decay ladder.
             leaves = chain(iter_decay_ladder_leaves(parsed.expression, catalog), leaves)

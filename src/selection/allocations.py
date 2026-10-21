@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import math
 
+from generation.combo_enhancement import COMBO_ENHANCEMENT_FAMILIES
 from generation.decay_ladder import DECAY_LADDER_FAMILIES
 from generation.polishing import POLISHING_FAMILIES
 from generation.internal_edits import INTERNAL_EDIT_FAMILIES
@@ -57,6 +58,7 @@ MAX_QUALIFIED_EVOLUTION_BACKTESTS_PER_LINEAGE = 2
 MAX_FAMILY_ATTEMPTS_PER_PARENT_PER_CYCLE = 3
 INITIAL_SC_TRIALS_PER_FAMILY = 2
 QUALIFIED_EVOLUTION_FAMILIES = (
+    *COMBO_ENHANCEMENT_FAMILIES,
     *INTERNAL_EDIT_FAMILIES,
     *POLISHING_FAMILIES,
     *STRUCTURAL_TRANSFORMATION_FAMILIES,
