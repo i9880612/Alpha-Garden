@@ -497,6 +497,10 @@ def _same_nonempty_relation(left: str | None, right: str | None) -> bool:
 # winsorize never clips rank/quantile output. So stacking two of them changes nothing.
 _ORDER_RESHAPERS = frozenset({"rank", "quantile"})
 _AFFINE_RESHAPERS = frozenset({"zscore", "normalize", "scale"})
+# group_rank reads only the order of its input within each group, which a monotone
+# whole-universe reshaper keeps; its output is bounded like rank's, so winsorize and
+# affine reshapers on top change nothing either.
+_GROUP_ORDER_RESHAPERS = frozenset({"group_rank"})
 
 
 def collapse_stacked_reshapers(expression: Expression) -> Expression:
@@ -505,7 +509,17 @@ def collapse_stacked_reshapers(expression: Expression) -> Expression:
         expression = Call(expression.operator, tuple(
             CallArgument(collapse_stacked_reshapers(argument.value), argument.name)
             for argument in expression.arguments))
+        if (expression.operator in _GROUP_ORDER_RESHAPERS and expression.arguments
+                and expression.arguments[0].name is None):
+            first = expression.arguments[0].value
+            if (isinstance(first, Call) and first.operator in _ORDER_RESHAPERS | _AFFINE_RESHAPERS
+                    and _sole_argument(first) is not None):
+                return collapse_stacked_reshapers(Call(expression.operator, (
+                    CallArgument(_sole_argument(first)), *expression.arguments[1:])))
         inner = _sole_argument(expression)
+        if (isinstance(inner, Call) and inner.operator in _GROUP_ORDER_RESHAPERS
+                and (expression.operator == "winsorize" or expression.operator in _AFFINE_RESHAPERS)):
+            return inner
         if isinstance(inner, Call) and _sole_argument(inner) is not None:
             outer_name, inner_name = expression.operator, inner.operator
             if outer_name in _ORDER_RESHAPERS and inner_name in _ORDER_RESHAPERS | _AFFINE_RESHAPERS:
@@ -555,6 +569,11 @@ def _prepare_leaf(
     ):
         return None
     return logic.expression
+
+
+def same_signal(first: Expression, second: Expression) -> bool:
+    """True when the two formulas differ only by reshapers that cannot change the result."""
+    return _canonical_render(first) == _canonical_render(second)
 
 
 def _canonical_render(expression: Expression) -> str:

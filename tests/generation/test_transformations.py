@@ -17,7 +17,7 @@ from generation.catalog import (
     OperatorParameter,
     WindowDefinition,
 )
-from generation.formula import Call, analyze_formula
+from generation.formula import Call, analyze_formula, render_formula
 from generation.parser import parse_formula
 from generation.structure_limits import (
     FORMULA_MAX_COMPLEXITY,
@@ -102,6 +102,17 @@ class StructuralTransformationTests(unittest.TestCase):
             parse_formula("ts_delta(close,5)").expression, self.catalog,
             field_candidates=("open",), group_candidates=("sector",)))
         self.assertTrue(any(leaf.family == DISTRIBUTION_STABILIZATION for leaf in unnormalized))
+
+    def test_reshapers_that_group_rank_ignores_are_collapsed(self) -> None:
+        from generation.transformations import collapse_stacked_reshapers, same_signal
+        parent = parse_formula("group_rank(rank(close),sector)").expression
+        for formula in ("group_rank(normalize(close),sector)", "winsorize(group_rank(rank(close),sector))",
+                        "zscore(group_rank(quantile(close),sector))", "group_rank(close,sector)"):
+            self.assertTrue(same_signal(parent, parse_formula(formula).expression), formula)
+        for formula in ("group_zscore(rank(close),sector)", "group_rank(rank(open),sector)"):
+            self.assertFalse(same_signal(parent, parse_formula(formula).expression), formula)
+        self.assertEqual(render_formula(collapse_stacked_reshapers(
+            parse_formula("winsorize(group_rank(rank(close),sector))").expression)), "group_rank(close,sector)")
 
     def test_repeated_enumeration_is_stable_unique_and_legal(self) -> None:
         arguments = {

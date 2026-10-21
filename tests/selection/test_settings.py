@@ -57,12 +57,13 @@ class BacktestSettingsPolicyTests(unittest.TestCase):
         policy = self._policy()
 
         industry = self._choose("fundamental", catalog, policy)
-        sector = self._choose("option", catalog, policy)
+        option = self._choose("option", catalog, policy)
         most_granular = self._choose("fundamental+model", catalog, policy)
         fallback = self._choose("unmapped", catalog, policy)
 
         self.assertEqual(industry.neutralization, "INDUSTRY")
-        self.assertEqual(sector.neutralization, "SECTOR")
+        # SECTOR failed CONCENTRATED_WEIGHT on every option formula (20/20).
+        self.assertEqual(option.neutralization, "SUBINDUSTRY")
         self.assertEqual(most_granular.neutralization, "SUBINDUSTRY")
         self.assertEqual(fallback.neutralization, "SUBINDUSTRY")
 

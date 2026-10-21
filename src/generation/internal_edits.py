@@ -20,6 +20,7 @@ from generation.formula import (
 )
 from generation.logic import prepare_formula_logic
 from generation.structure_limits import fits_formula_structure_limits
+from generation.transformations import same_signal
 from generation.unit_validation import find_coarse_unit_issues
 from generation.validation import validate_formula
 
@@ -89,7 +90,7 @@ def iter_internal_edit_candidates(
         if child_facts.depth > facts.depth or child_facts.complexity > facts.complexity:
             continue
         fingerprint = formula_fingerprint(transformed)
-        if fingerprint in seen:
+        if fingerprint in seen or same_signal(transformed, expression):
             continue
         seen.add(fingerprint)
         yield mutation_candidate(

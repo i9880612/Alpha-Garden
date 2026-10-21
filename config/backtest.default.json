@@ -15,7 +15,7 @@
       "Fundamental": "INDUSTRY",
       "Model": "SUBINDUSTRY",
       "News": "SUBINDUSTRY",
-      "Option": "SECTOR",
+      "Option": "SUBINDUSTRY",
       "Price Volume": "SUBINDUSTRY",
       "Sentiment": "SUBINDUSTRY",
       "Social Media": "SUBINDUSTRY"

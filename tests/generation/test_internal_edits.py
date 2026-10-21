@@ -313,3 +313,10 @@ def test_related_field_swaps_replace_every_occurrence_together():
         field_relatives=lambda name: ("close",) if name == "vwap" else ())
         if e.change.action == INTERNAL_FIELD_REPLACEMENT]
     assert [e.formula for e in edits] == ["rank(-(close/ts_delay(close,5)-1))"]
+
+
+def test_swapping_a_reshaper_that_group_rank_ignores_is_not_an_edit(catalog):
+    # group_rank reads only the order within each group: rank -> zscore changes nothing.
+    result = candidates("group_rank(rank(ts_mean(close,22)),sector)", catalog)
+    assert "group_rank(zscore(ts_mean(close,22)),sector)" not in {c.formula for c in result}
+    assert any(c.change.action == INTERNAL_FIELD_REPLACEMENT for c in result)
