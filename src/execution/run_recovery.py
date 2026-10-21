@@ -14,7 +14,9 @@ from execution.cycle_backtests import settle_failed_automated_cycle_if_terminal
 from execution.real_backtests import RealBacktestAdvance, advance_real_backtest
 from execution.seeds import synchronize_signal_seeds
 from execution.qualified_archive import synchronize_qualified_alpha_archive
-from execution.submission_checks import check_completed_backtest, remaining_submission_check_seconds, MAX_SUBMISSION_CHECK_ATTEMPTS
+from execution.submission_checks import (
+    MAX_SUBMISSION_CHECK_ATTEMPTS, PLATFORM_CHECK, check_completed_backtest, remaining_submission_check_seconds,
+)
 from persistence.backtests import get_backtest_task, list_active_backtest_tasks
 from persistence.database import open_database
 from persistence.submission_checks import get_submission_check
@@ -76,7 +78,7 @@ def advance_stopped_run_check(
     selected, owner, delay = min(checks, key=lambda item: item[2])
     if delay > 0:
         return RealBacktestAdvance("submission_check_wait", selected, False, delay)
-    performed = check_completed_backtest(database_path, client, selected.task.task_id,
+    performed = PLATFORM_CHECK == check_completed_backtest(database_path, client, selected.task.task_id,
         observed_at=observed_at, recovered=True,
         include_deferred=run_id is not None and owner.self_correlation_plan_json is not None)
     while settle_failed_automated_cycle_if_terminal(database_path, owner.run_id, observed_at=observed_at) is not None:

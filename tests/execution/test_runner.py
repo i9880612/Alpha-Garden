@@ -262,6 +262,7 @@ class AutomatedRunnerTests(unittest.TestCase):
         reconcile.assert_not_called()
         self.assertEqual(client.calls, [])
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_deferred_checks_do_not_stop_new_batches_and_late_pass_is_queued(self):
         old_run = self._prepare_running_task(max_pending_seconds=60)
         clock = FakeTime("2026-08-30T00:01:31+08:00")
@@ -624,6 +625,7 @@ class AutomatedRunnerTests(unittest.TestCase):
         self.assertEqual(recovered.current_cycle, 1)
         self.assertEqual(recovered.request_failure_count, 0)
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_authenticates_once_and_runs_until_terminal(self) -> None:
         run_id = self._prepare_running_task(max_pending_seconds=60)
         client = RunnerClient(self._accepted())
@@ -953,6 +955,7 @@ class AutomatedRunnerTests(unittest.TestCase):
         self.assertEqual(rows[0], ("failed", "alpha-reconciled"))
         self.assertEqual(rows[1][0], "completed")
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_enabled_automatic_submission_runs_to_confirmed_completion(self) -> None:
         run_id = self._prepare_running_task(
             max_pending_seconds=60,
@@ -1011,6 +1014,7 @@ class AutomatedRunnerTests(unittest.TestCase):
             self.assertEqual(len(tasks), 1)
             self.assertEqual(get_backtest_task(connection, tasks[0].task_id).task.status, "completed")
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_retry_wait_is_executed_without_losing_the_run(self) -> None:
         run_id = self._prepare_running_task(max_pending_seconds=60)
         client = RunnerClient(
@@ -1203,6 +1207,7 @@ class AutomatedRunnerTests(unittest.TestCase):
         self.assertNotIn("submit", client.calls)
         self.assertEqual(states_at_authentication, ["pending"])
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_authentication_retry_uses_the_persisted_failure_boundary(self) -> None:
         run_id = self._prepare_running_task(max_pending_seconds=60)
         client = RunnerClient(

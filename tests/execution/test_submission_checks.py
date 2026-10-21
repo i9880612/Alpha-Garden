@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -45,6 +46,70 @@ class SubmissionCheckTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.database_path = self.fixture.database_path
 
+    def test_local_check_needs_no_platform_read_and_passes_without_submissions(self):
+        tasks, _ = self.fixture._completed_run(("rank(close)",))
+        with open_database(self.database_path) as connection:
+            connection.execute("DELETE FROM submission_queue")
+            connection.execute("DELETE FROM submission_checks")
+
+        def refuse(**_):
+            raise AssertionError("an ordinary check must not read the platform")
+
+        outcome = check_completed_backtest(self.database_path, SimpleNamespace(fetch_formal_submission_check=refuse),
+                                           tasks[0], observed_at="2026-09-04T00:08:00+00:00")
+        self.assertEqual(outcome, "local")
+        with open_database(self.database_path) as connection:
+            payload = json.loads(get_submission_check(connection, tasks[0]).payload_json)
+            self.assertEqual(payload["source"], "local")
+            statuses = {check["name"]: check["result"] for check in payload["is"]["checks"]}
+            self.assertEqual(set(statuses), set(STANDARD_REGULAR_CHECK_NAMES))
+            self.assertEqual(set(statuses.values()), {"PASS"})
+            self.assertEqual([item.task_id for item in list_formal_submission_queue(connection)], [tasks[0]])
+            # Nothing is left to read for this batch.
+            self.assertIsNone(remaining_submission_check_seconds(
+                connection, get_backtest_task(connection, tasks[0]), "2026-09-04T00:08:01+00:00",
+                include_deferred=True))
+
+    def test_local_check_applies_the_platform_rule_and_waits_for_a_missing_curve(self):
+        from persistence.pnl import save_pnl_series
+        from persistence.submissions import PlatformSubmittedAlphaRecord, record_platform_submitted_alphas
+        from tests.learning.test_seed_correlation import independent_series, series
+        tasks, _ = self.fixture._completed_run(("rank(close)",))
+        with open_database(self.database_path) as connection:
+            connection.execute("DELETE FROM submission_queue")
+            connection.execute("DELETE FROM submission_checks")
+            alpha = get_backtest_task(connection, tasks[0]).task.platform_alpha_id
+            connection.execute("DELETE FROM platform_pnl_series WHERE platform_alpha_id=?", (alpha,))
+            record_platform_submitted_alphas(connection, (PlatformSubmittedAlphaRecord(
+                "group-account", "submitted-alpha", "rank(open)", "ACTIVE", "2026-09-01T00:00:00+00:00", False,
+                {"id": "submitted-alpha", "status": "ACTIVE", "hidden": False, "is": {"sharpe": 2.0},
+                 "dateSubmitted": "2026-09-01T00:00:00+00:00", "regular": {"code": "rank(open)"}},
+                "2026-09-02T00:00:00+00:00"),))
+            reference = independent_series("submitted-alpha")
+            save_pnl_series(connection, reference)
+        client = SimpleNamespace(fetch_formal_submission_check=None)
+        base = datetime.fromisoformat("2026-09-04T00:08:00+00:00")
+        self.assertEqual(check_completed_backtest(self.database_path, client, tasks[0],
+                                                  observed_at=base.isoformat()), "local")
+        with open_database(self.database_path) as connection:
+            snapshot = get_backtest_task(connection, tasks[0])
+            # The candidate's own curve is missing: pending, but the batch is not held up.
+            self.assertIsNone(remaining_submission_check_seconds(connection, snapshot, base.isoformat()))
+            self.assertEqual(remaining_submission_check_seconds(
+                connection, snapshot, base.isoformat(), include_deferred=True), 60.0)
+            self.assertEqual(list_formal_submission_queue(connection), ())
+            increments = [b - a for (_, a), (_, b) in zip(reference.points, reference.points[1:])]
+            save_pnl_series(connection, series(alpha, increments, "group-account"))
+        later = (base + timedelta(seconds=60)).isoformat()
+        self.assertFalse(advance_deferred_submission_check(self.database_path, client,
+                                                           account_scope="group-account", observed_at=later))
+        with open_database(self.database_path) as connection:
+            payload = json.loads(get_submission_check(connection, tasks[0]).payload_json)
+            sc = next(check for check in payload["is"]["checks"] if check["name"] == "SELF_CORRELATION")
+            # Same curve, and 1.3 is not 10% above the submitted alpha's 2.0.
+            self.assertEqual((sc["result"], sc["reference"]), ("FAIL", "submitted-alpha"))
+            self.assertEqual(list_formal_submission_queue(connection), ())
+
     def test_only_spectacular_enters_queue_without_changing_other_results(self):
         grades = ("SPECTACULAR", "EXCELLENT", "GOOD", "AVERAGE", "INFERIOR", None, "UNKNOWN")
         formulas = tuple(f"ts_mean(close,{i})" for i in range(2, 9))
@@ -74,6 +139,7 @@ class SubmissionCheckTests(unittest.TestCase):
             for task in tasks[1:]:
                 self.assertIn('"PASS"', get_submission_check(connection, task).payload_json)
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_only_official_pass_enters_queue_and_replay_never_rechecks(self):
         tasks, _ = self.fixture._completed_run(("rank(close)", "rank(open)", "rank(high)", "rank(low)"))
         with open_database(self.database_path) as connection:
@@ -117,6 +183,7 @@ class SubmissionCheckTests(unittest.TestCase):
             self.database_path, SimpleNamespace(), tasks[0], observed_at="2026-09-04T00:08:00+00:00",
         ))
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_transient_reads_respect_retry_after_and_survive_restart(self):
         tasks, _ = self.fixture._completed_run(("rank(close)",))
         with open_database(self.database_path) as connection:
@@ -140,9 +207,9 @@ class SubmissionCheckTests(unittest.TestCase):
         base = datetime.fromisoformat("2026-09-04T00:08:00+00:00")
         for seconds, expected in [(0, True), (119, False), (120, True), (209, False), (210, True), (400, False)]:
             # A fresh caller each time relies only on persisted retry state.
-            self.assertEqual(check_completed_backtest(self.database_path,
+            self.assertEqual(bool(check_completed_backtest(self.database_path,
                 SimpleNamespace(fetch_formal_submission_check=check), tasks[0],
-                observed_at=(base + timedelta(seconds=seconds)).isoformat()), expected)
+                observed_at=(base + timedelta(seconds=seconds)).isoformat())), expected)
         self.assertEqual(len(calls), 3)
         with open_database(self.database_path) as connection:
             saved = get_submission_check(connection, tasks[0])
@@ -150,6 +217,7 @@ class SubmissionCheckTests(unittest.TestCase):
             self.assertIsNone(saved.retry_not_before)
             self.assertEqual([row.task_id for row in list_formal_submission_queue(connection)], list(tasks))
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_exhausted_pending_is_unknown_not_queued_or_a_failed_backtest(self):
         tasks, _ = self.fixture._completed_run(("rank(close)",))
         with open_database(self.database_path) as connection:
@@ -170,6 +238,7 @@ class SubmissionCheckTests(unittest.TestCase):
             self.assertIsNone(remaining_submission_check_seconds(
                 connection, get_backtest_task(connection, tasks[0]), "2026-09-04T00:20:00+00:00"))
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_deferred_check_survives_settlement_and_enters_queue_on_late_pass(self):
         tasks, _ = self.fixture._completed_run(("rank(close)",))
         with open_database(self.database_path) as connection:
@@ -194,6 +263,7 @@ class SubmissionCheckTests(unittest.TestCase):
             self.assertEqual(get_submission_check(connection, tasks[0]).attempt_count, 4)
             self.assertEqual(get_backtest_task(connection, tasks[0]).task.status, "completed")
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_legacy_exhausted_empty_check_is_revisited_one_at_a_time(self):
         tasks, _ = self.fixture._completed_run(("rank(close)", "rank(open)"))
         with open_database(self.database_path) as connection:
@@ -259,6 +329,7 @@ class SubmissionCheckTests(unittest.TestCase):
             self.assertFalse(check_completed_backtest(self.database_path, SimpleNamespace(), task_id,
                 observed_at="2026-09-04T02:00:00+00:00"))
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_deferred_authentication_failure_is_not_saved_as_formula_failure(self):
         tasks, _ = self.fixture._completed_run(("rank(close)",))
         with open_database(self.database_path) as connection:

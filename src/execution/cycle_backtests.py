@@ -41,7 +41,7 @@ from persistence.runs import (
     list_automated_run_backtests,
 )
 from worldquant.client import WorldQuantClient, WorldQuantRequestError
-from execution.submission_checks import check_completed_backtest, remaining_submission_check_seconds
+from execution.submission_checks import PLATFORM_CHECK, check_completed_backtest, remaining_submission_check_seconds
 from execution.seed_evidence import capture_next_seed_series
 from execution.pnl import PNL_CAPTURE_ACTIONS, PnlAccountRequestError
 
@@ -100,8 +100,9 @@ def advance_automated_cycle_backtests(
     if counts.terminal:
         sc_research = run.self_correlation_plan_json is not None
         for snapshot in snapshots:
+            # Local checks finish in place; only a platform read ends this step.
             if check_completed_backtest(database_path, client, snapshot.task.task_id,
-                                        observed_at=observed_at):
+                                        observed_at=observed_at) == PLATFORM_CHECK:
                 return _advance_result(
                     run=run, cycle_number=cycle_number, action="submission_check_observed",
                     snapshot=snapshot, counts=counts, platform_request_performed=True,

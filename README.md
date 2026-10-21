@@ -235,6 +235,7 @@ Candidate bytes measure JSON payload, not immediately reclaimable disk space. De
 - Qualified-stage quality research also shares an **80-attempt** lifetime limit per account, settings and root lineage.
 - Better qualifying descendants can take over using their own remaining attempts. Replaced formulas and their research history remain recorded.
 - The **qualified archive** lists currently submittable retained formulas. A replaced formula does not have to exhaust all 20 attempts first.
+- Queue checks run locally: the other items come from the backtest, and self-correlation applies the platform's rule (daily PnL correlation of 0.7 or more with a submitted alpha fails unless Sharpe is 10% higher) to local curves, with no platform call; a missing curve leaves the check pending and it is rechecked later without holding up the batch. SC research runs still use the platform's check.
 - Local evidence helps select candidates and preserve improvement opportunities. **Platform checks remain required before formal submission.**
 
 <details>

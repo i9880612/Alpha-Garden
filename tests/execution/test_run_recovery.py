@@ -1,5 +1,6 @@
 import sys
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 
@@ -324,6 +325,7 @@ class RunRecoveryTests(unittest.TestCase):
             self.assertEqual(get_backtest_task(c, tasks[2].task.task_id).task.status, "completed")
             self.assertIn(tasks[3].task.task_id, {s.root_task_id for s in list_signal_seeds(c)})
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_old_checks_finish_before_new_batch_and_new_checks_wait_for_all_results(self):
         old, tasks = self._old()
         test = self

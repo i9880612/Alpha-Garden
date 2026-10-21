@@ -368,6 +368,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
                 self.database_path, run_id, cycle_number=1, observed_at=observed.isoformat()
             )
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_check_and_queue_are_atomic_without_rolling_back_backtest(self):
         run_id = self._prepare_run()
         client = DriverClient(self._accepted())
@@ -647,6 +648,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
             initialize_database_schema(connection)
         self._initialize_catalog()
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_connects_start_plan_requests_and_settlement(self) -> None:
         self._prepare_run()
         client = DriverClient(self._accepted())
@@ -682,6 +684,24 @@ class AutomatedRunDriverTests(unittest.TestCase):
         self.assertEqual(client.calls, ["submit", "poll", "detail", "pnl", "yearly_stats", "formal_check"])
         self.assertEqual(advances[-1].run.status, "completed")
         self.assertEqual(advances[-1].run.current_cycle, 1)
+
+    def test_batch_check_is_local_and_reads_nothing_from_the_platform(self) -> None:
+        from persistence.submission_checks import list_submission_checks
+        self._prepare_run()
+        client = DriverClient(self._accepted())
+
+        advances = tuple(self._advance(client, minute=minute) for minute in range(1, 9))
+
+        self.assertEqual(
+            tuple(item.backtest_action for item in advances[2:]),
+            ("submitted", "detail_ready", "detail_captured", "pnl_captured", "completed", "cycle_terminal"),
+        )
+        self.assertEqual(client.calls, ["submit", "poll", "detail", "pnl", "yearly_stats"])
+        self.assertEqual(advances[-1].run.status, "completed")
+        with open_database(self.database_path) as connection:
+            checks = list_submission_checks(connection)
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(json.loads(checks[0].payload_json)["source"], "local")
 
     def test_retry_wait_survives_database_reloads_and_resets_on_success(self) -> None:
         run_id = self._prepare_run(max_request_failures=3)
@@ -809,6 +829,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
         self.assertEqual(self._advance(client, minute=4).backtest_action, "retry_wait")
         self.assertEqual(self._advance(client, minute=8).backtest_action, "detail_ready")
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_continuous_run_stops_at_the_backtest_limit(self) -> None:
         self._prepare_run(max_cycles=-1, max_backtests=2)
         client = DriverClient(
@@ -856,6 +877,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
         self.assertEqual(advances[-1].cycle_number, 4)
         self.assertEqual(client.calls.count("submit"), 3)
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_batch_check_retry_finishes_before_next_batch_is_planned(self):
         self._prepare_run(max_cycles=2, max_backtests=2)
 
@@ -1216,6 +1238,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
         self.assertNotIn("formal_check", client.calls)
         self.assertNotIn("formal_submit", client.calls)
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_authorized_formal_submission_requires_fresh_check_and_confirmation(
         self,
     ) -> None:
@@ -1474,6 +1497,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
         assert attempt is not None
         self.assertEqual(attempt.status, "submission_unknown")
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_concurrent_advance_does_not_reconcile_an_active_formal_post(
         self,
     ) -> None:
@@ -1599,6 +1623,7 @@ class AutomatedRunDriverTests(unittest.TestCase):
         )
         self.assertEqual(client.calls.count("formal_submit"), 1)
 
+    @patch("execution.submission_checks.LOCAL_SUBMISSION_CHECKS", False)  # platform check path
     def test_stale_formal_check_is_refreshed_before_any_post(self) -> None:
         run_id = self._prepare_run(automatic_submissions_enabled=True)
         client = DriverClient(self._accepted())

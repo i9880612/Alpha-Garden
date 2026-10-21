@@ -5,7 +5,9 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from learning.seed_correlation import assess_seed_correlation
 from persistence.backtests import get_backtest_task
+from persistence.pnl import list_pnl_series
 from persistence.database import open_database
 from persistence.runs import get_automated_run, get_automated_run_backtest_by_task
 from persistence.submission_checks import SubmissionCheckRecord, get_submission_check, save_submission_check
@@ -43,6 +45,13 @@ def remaining_submission_check_seconds(connection, snapshot, observed_at: str, *
     saved = get_submission_check(connection, snapshot.task.task_id)
     if saved is None:
         return 0.0
+    if not research_only and LOCAL_SUBMISSION_CHECKS and _is_local_record(saved):
+        # A local check needs no platform read; one waiting for a curve is rechecked on
+        # the deferred path and never holds the batch back.
+        if saved.retry_not_before is None or not include_deferred:
+            return None
+        return max(0.0, (datetime.fromisoformat(saved.retry_not_before)
+                         - datetime.fromisoformat(observed_at)).total_seconds())
     if research_only and saved.attempt_count >= MAX_RESEARCH_SUBMISSION_CHECK_ATTEMPTS:
         return None
     if saved.attempt_count >= MAX_SUBMISSION_CHECK_ATTEMPTS and not include_deferred:
@@ -61,22 +70,40 @@ def remaining_submission_check_seconds(connection, snapshot, observed_at: str, *
                      - datetime.fromisoformat(observed_at)).total_seconds())
 
 
+# Ordinary checks are decided locally (see _check_locally). The platform path stays for
+# research runs, which need the platform's own self-correlation numbers.
+LOCAL_SUBMISSION_CHECKS = True
+# What check_completed_backtest did: nothing due, a local check, or a platform read.
+LOCAL_CHECK = "local"
+PLATFORM_CHECK = "platform"
+# A local check waiting for a PnL curve looks again after this, without blocking the batch.
+LOCAL_CHECK_RETRY_SECONDS = 60
+
+
 def check_completed_backtest(
     database_path: str | Path, client: WorldQuantClient, task_id: str, *, observed_at: str,
     recovered: bool = False, include_deferred: bool = False,
-) -> bool:
-    """Run one due check read; terminal checks are not repeated, transient reads are bounded."""
+) -> str | None:
+    """Run one due check; terminal checks are not repeated, transient reads are bounded.
+
+    Research checks use the platform; everything else is decided locally (see
+    _check_locally). The platform's check still runs right before any submission.
+    """
     with open_database(database_path) as connection:
         snapshot = get_backtest_task(connection, task_id)
         if snapshot is None:
-            return False
+            return None
         delay = remaining_submission_check_seconds(connection, snapshot, observed_at,
             include_deferred=include_deferred)
         if delay is None or delay > 0:
-            return False
+            return None
         previous = get_submission_check(connection, task_id)
         attempts = previous.attempt_count + 1 if previous else 1
         research_only = _is_research_check(connection, task_id)
+    if not research_only and LOCAL_SUBMISSION_CHECKS:
+        _check_locally(database_path, snapshot, attempts=attempts, observed_at=observed_at,
+                       recovered=recovered)
+        return LOCAL_CHECK
     assert snapshot.task.platform_alpha_id is not None
     try:
         observation = client.fetch_formal_submission_check(platform_alpha_id=snapshot.task.platform_alpha_id)
@@ -125,7 +152,65 @@ def check_completed_backtest(
         "%s入队检查 %s：%s", "旧" if recovered else "本批", snapshot.task.platform_alpha_id, label,
         extra={"transient": retry_at is not None and not deferred},
     )
-    return True
+    return PLATFORM_CHECK
+
+
+def _check_locally(database_path, snapshot, *, attempts: int, observed_at: str, recovered: bool) -> None:
+    """The platform's check, rebuilt from facts already saved.
+
+    Across every saved platform check the only item that differed from the backtest's own
+    was SELF_CORRELATION (PENDING in the backtest), and that is the platform rule applied
+    to this account's submitted alphas: daily PnL correlation of 0.7 or more fails unless
+    Sharpe is 10% higher. The other items are copied from the backtest. A missing curve
+    leaves the check pending and looks again later without holding up the batch; the
+    platform's own check still runs right before a submission.
+    """
+    task = snapshot.task
+    with open_database(database_path) as connection:
+        references = list_platform_submitted_alphas(connection, account_scope=task.account_scope)
+        series = list_pnl_series(connection, account_scope=task.account_scope, platform_alpha_ids=frozenset(
+            [task.platform_alpha_id, *(ref.platform_alpha_id for ref in references)]))
+    correlation = assess_seed_correlation(snapshot, references, series)
+    sc_result = {"passed": "PASS", "failed": "FAIL"}.get(correlation.state, "PENDING")
+    checks = [{"name": check.name, "result": check.status.strip().upper()}
+              for check in snapshot.result.checks if check.name != "SELF_CORRELATION"]
+    sc_check = {"name": "SELF_CORRELATION", "result": sc_result, "limit": 0.7,
+                "compared": correlation.compared, "required": correlation.required}
+    if correlation.maximum is not None:
+        sc_check.update(value=round(correlation.maximum, 4), reference=correlation.reference_id)
+    payload = {"source": "local", "is": {"checks": sorted([*checks, sc_check], key=lambda item: item["name"])}}
+    assessment = assess_formal_check_payload(payload)
+    pending = assessment.state == "pending"
+    retry_at = ((datetime.fromisoformat(observed_at) + timedelta(seconds=LOCAL_CHECK_RETRY_SECONDS)).isoformat()
+                if pending else None)
+    record = SubmissionCheckRecord(task.task_id, observed_at, canonical_submission_json(payload), None,
+                                   attempts, retry_at)
+    with open_database(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        save_submission_check(connection, record)
+        synchronize_submission_queue(connection, candidate_task_ids=(task.task_id,), enqueued_at=observed_at)
+        synchronize_qualified_alpha_archive(connection, observed_at=observed_at)
+    compared = f"本地比对 {correlation.compared} 条已提交公式" if references else "尚无已提交公式"
+    label = {"passed": f"通过（{compared}）", "failed": f"自相关未通过（{compared}，最高 {correlation.maximum:.2f}），不入队"
+             if correlation.maximum is not None else "未通过，不入队"}.get(
+        assessment.state, "待定（缺少收益曲线），稍后自动复查，不阻塞回测")
+    if assessment.state == "failed" and "SELF_CORRELATION" not in assessment.failed_checks:
+        label = "未通过，不入队"
+    if assessment.state == "passed" and snapshot.result is not None:
+        rejection = formal_submission_grade_rejection(snapshot.result.grade)
+        if rejection == "formal_submission_grade_unavailable":
+            label += "；评级未确认，不入队"
+        elif rejection is not None:
+            label += f"；评级 {snapshot.result.grade} 未达 SPECTACULAR，不入队"
+    logging.getLogger("execution.progress").info(
+        "%s入队检查 %s：%s", "旧" if recovered else "本批", task.platform_alpha_id, label)
+
+
+def _is_local_record(record: SubmissionCheckRecord) -> bool:
+    if not record.payload_json:
+        return False
+    payload = json.loads(record.payload_json)
+    return isinstance(payload, dict) and payload.get("source") == "local"
 
 
 def _is_research_check(connection, task_id: str) -> bool:
@@ -146,7 +231,8 @@ def next_deferred_submission_check(connection, *, account_scope: str, observed_a
     rows = connection.execute(
         "SELECT c.task_id FROM submission_checks c JOIN backtest_tasks t ON t.task_id=c.task_id "
         "LEFT JOIN automated_run_backtests b ON b.task_id=c.task_id "
-        "WHERE t.account_scope=? AND t.status='completed' AND c.attempt_count>=? "
+        "WHERE t.account_scope=? AND t.status='completed' "
+        "AND (c.attempt_count>=? OR json_extract(c.payload_json, '$.source')='local') "
         "AND (? IS NULL OR b.run_id=?) "
         "ORDER BY c.observed_at, c.task_id", (account_scope, MAX_SUBMISSION_CHECK_ATTEMPTS, run_id, run_id),
     ).fetchall()
@@ -163,10 +249,10 @@ def next_deferred_submission_check(connection, *, account_scope: str, observed_a
 
 def advance_deferred_submission_check(database_path, client, *, account_scope: str, observed_at: str,
                                       run_id: str | None = None) -> bool:
-    """Read at most one due deferred check; never wait or reopen a backtest."""
+    """Run at most one due deferred check; True only if it read the platform."""
     with open_database(database_path) as connection:
         selected = next_deferred_submission_check(connection, account_scope=account_scope,
                                                   observed_at=observed_at, run_id=run_id)
     return selected is not None and selected[1] == 0 and check_completed_backtest(
         database_path, client, selected[0], observed_at=observed_at, recovered=True, include_deferred=True,
-    )
+    ) == PLATFORM_CHECK
