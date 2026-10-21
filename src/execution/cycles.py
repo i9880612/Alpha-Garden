@@ -63,6 +63,9 @@ from learning.quality_proximity import (
 )
 from learning.seed_correlation import submitted_seed
 from learning.signal_duplicates import SignalDuplicate
+from evaluation.correlation import CORRELATION_CALENDAR_YEARS, MIN_CORRELATION_INTERVALS
+from learning.pnl import PnlCorrelations
+from persistence.pnl import list_pnl_series
 from learning.diagnosis import (
     LEARNING_WINDOW_DAYS,
     MAX_LEARNING_OUTCOMES,
@@ -96,6 +99,7 @@ from persistence.submissions import (
     list_platform_submitted_alphas,
 )
 from selection.allocations import (
+    MAX_FAMILY_ATTEMPTS_PER_PARENT_PER_CYCLE,
     BacktestSourceAllocation,
     IMPROVEMENT_FAMILIES_BY_STAGE,
     SignalImprovementFamilyCapacity,
@@ -285,6 +289,7 @@ def plan_automated_cycle(
         prescriptions = _learned_prescriptions(
             planning_mutations, completed_by_task_id,
             account_scope=run.account_scope, observed_at=evidence_cutoff,
+            connection=connection,
         )
         changed = {problem: families for problem, families in prescriptions.items()
                    if families != PRESCRIPTIONS[problem]}
@@ -523,6 +528,7 @@ def plan_automated_cycle(
             self_correlation_percent=0 if run.optimization_only else allocation_policy.self_correlation_percent,
             direction_validation_percent=0 if run.optimization_only else allocation_policy.direction_validation_percent,
             optimization_only=run.optimization_only,
+            max_family_attempts_per_parent=MAX_FAMILY_ATTEMPTS_PER_PARENT_PER_CYCLE,
         )
         if run.optimization_only and source_allocation.requested_count == 0:
             raise OptimizationCandidatesExhausted("optimization_candidates_exhausted")
@@ -725,8 +731,13 @@ def _learned_prescriptions(
     *,
     account_scope: str,
     observed_at: datetime,
+    connection: sqlite3.Connection | None = None,
 ) -> dict[str, tuple[str, ...]]:
-    """Problem -> actions, from this account's mutations finished in the learning window."""
+    """Problem -> actions, from this account's mutations finished in the learning window.
+
+    With a connection, an apparent cure whose PnL is identical to its parent's is not
+    counted (see IDENTICAL_PNL_CORRELATION).
+    """
     window_start = observed_at - timedelta(days=LEARNING_WINDOW_DAYS)
     recent: list[tuple[datetime, BacktestMutationRecord]] = []
     for mutation in mutations:
@@ -744,12 +755,31 @@ def _learned_prescriptions(
         recent.append((finished, mutation))
     recent.sort(key=lambda item: (item[0], item[1].child_task_id), reverse=True)
     outcomes = []
+    cured: list[tuple[int, BacktestMutationRecord]] = []
     for _, mutation in recent[:MAX_LEARNING_OUTCOMES]:
         outcome = mutation_outcome(completed_by_task_id[mutation.parent_task_id].result,
                                    completed_by_task_id[mutation.child_task_id].result,
                                    mutation.action)
         if outcome is not None:
+            if outcome.cured:
+                cured.append((len(outcomes), mutation))
             outcomes.append(outcome)
+    if cured and connection is not None:
+        # Only apparent cures need the PnL check, so the curves read stay few.
+        alpha = {task_id: completed_by_task_id[task_id].task.platform_alpha_id
+                 for _, mutation in cured for task_id in (mutation.parent_task_id, mutation.child_task_id)}
+        correlations = PnlCorrelations(list_pnl_series(
+            connection, account_scope=account_scope,
+            platform_alpha_ids=frozenset(value for value in alpha.values() if value)))
+        for index, mutation in cured:
+            parent_alpha, child_alpha = alpha[mutation.parent_task_id], alpha[mutation.child_task_id]
+            value = None if not parent_alpha or not child_alpha else correlations.correlation(
+                (account_scope, parent_alpha), (account_scope, child_alpha),
+                minimum_intervals=MIN_CORRELATION_INTERVALS, calendar_years=CORRELATION_CALENDAR_YEARS)
+            outcomes[index] = mutation_outcome(
+                completed_by_task_id[mutation.parent_task_id].result,
+                completed_by_task_id[mutation.child_task_id].result,
+                mutation.action, parent_child_correlation=value)
     return learn_prescriptions(outcomes)
 
 

@@ -282,6 +282,32 @@ class BacktestSourceAllocationTests(unittest.TestCase):
         self.assertEqual((result.exploration_count, sc, result.improvement_count-sc,
                           result.direction_validation_count), (20, 50, 25, 5))
 
+    def test_family_cap_spreads_tries_and_hands_leftovers_to_exploration(self):
+        from selection.allocations import MAX_FAMILY_ATTEMPTS_PER_PARENT_PER_CYCLE as cap
+        families = STRUCTURAL_TRANSFORMATION_FAMILIES[:2]
+        sources = tuple(self._source(f"root-{i}", f"root-{i}", 20, families=families,
+                                     family_counts={families[0]: 15, families[1]: 5})
+                        for i in range(2))
+        kwargs = dict(requested_count=100, minimum_exploration_count=20, sources=sources,
+                      settings=tuple(self._settings(s.branch_task_id, risk=None) for s in sources),
+                      targets=tuple(self._branch_targets(s.branch_task_id, (self._target("LOW_FITNESS"),))
+                                    for s in sources))
+        uncapped = self._allocate(**kwargs)
+        self.assertEqual(uncapped.improvement_count, 40)
+        capped = allocate_backtest_sources(
+            requested_count=100, minimum_exploration_count=20, improvement_sources=sources,
+            settings_evidence=ParentSettingsEvidenceSet(records=kwargs["settings"]),
+            optimization_targets=ParentOptimizationTargetSet(records=kwargs["targets"]),
+            action_strategies=ActionStrategySet(records=(), observations=()),
+            account_scope="group-account", rotation_key="run-a:1",
+            self_correlation_percent=30, direction_validation_percent=3,
+            max_family_attempts_per_parent=cap,
+        )
+        counts = Counter((x.parent_task_id, x.candidate_family) for x in capped.signal_improvements)
+        self.assertEqual(set(counts.values()), {cap})
+        self.assertEqual(capped.improvement_count, 2 * len(families) * cap)
+        self.assertEqual(capped.exploration_count, 100 - capped.improvement_count)
+
     def test_hundred_slots_keep_sc_and_direction_caps_and_fill_shortfalls(self):
         for sc_count, ordinary_roots, directions, expected in (
             (50, 4, 3, (30, 30, 37, 3)),

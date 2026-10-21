@@ -124,3 +124,13 @@ def test_diagnosis_uses_learned_prescriptions_when_given():
                                 failed_checks=frozenset({"LOW_FITNESS"}),
                                 prescriptions={HIGH_TURNOVER: ("stranger",)})
     assert diagnosis.families == ("stranger",)
+
+
+def test_an_identical_rewrite_is_never_a_cure():
+    from learning.diagnosis import IDENTICAL_PNL_CORRELATION
+    parent = _Result(1.36, 0.75, 0.52, 0.155)
+    better = _Result(1.4, 1.05, 0.25, 0.13)
+    assert mutation_outcome(parent, better, "x", parent_child_correlation=0.95).cured
+    assert not mutation_outcome(parent, better, "x",
+                                parent_child_correlation=IDENTICAL_PNL_CORRELATION).cured
+    assert mutation_outcome(parent, better, "x", parent_child_correlation=None).cured

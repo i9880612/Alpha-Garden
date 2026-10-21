@@ -17,14 +17,12 @@ from hashlib import sha256
 from typing import Protocol
 
 from generation.decay_ladder import SIGNAL_DECAY_LADDER
-from generation.internal_edits import INTERNAL_FIELD_REPLACEMENT
+from generation.internal_edits import INTERNAL_FIELD_REPLACEMENT, INTERNAL_OPERATOR_REPLACEMENT
 from generation.polishing import POLISHING_FAMILIES
 from generation.transformations import (
     COMPLEMENTARY_SIGNAL_REFRAME,
     DISTRIBUTION_STABILIZATION,
     GROUP_RELATIVE_REFRAME,
-    TEMPORAL_CHANGE_REFRAME,
-    TEMPORAL_PERSISTENCE_REFRAME,
 )
 
 HIGH_TURNOVER = "high_turnover"
@@ -46,10 +44,15 @@ SHORT_SMOOTHING_WINDOW = 10
 EXPLORATION_SLOT_EVERY = 5
 
 PRESCRIPTIONS = {
-    # Add decay a rung at a time, smooth the signal a little, or lengthen its windows.
-    HIGH_TURNOVER: (SIGNAL_DECAY_LADDER, TEMPORAL_PERSISTENCE_REFRAME, *POLISHING_FAMILIES),
-    # Too slow to trade enough: look at its change, or add a faster companion.
-    LOW_TURNOVER: (TEMPORAL_CHANGE_REFRAME, COMPLEMENTARY_SIGNAL_REFRAME),
+    # Lengthen its windows, or add decay a rung at a time. In the 2026-10-20 run the
+    # short-term reversal parent lost Fitness to every smoothing (0/9) and decay rung
+    # (0/4); the window keeps its place and the ladder stays as a probe for other kinds.
+    HIGH_TURNOVER: (*POLISHING_FAMILIES, SIGNAL_DECAY_LADDER),
+    # Slow fundamental signals: compare within industries, reshape the ranking, try
+    # sibling fields or add a companion. The same run: operator swaps 2/2, group-relative
+    # 1/2, companions 3/22; taking the change of the ranking cured 1 of 21.
+    LOW_TURNOVER: (GROUP_RELATIVE_REFRAME, INTERNAL_OPERATOR_REPLACEMENT,
+                   INTERNAL_FIELD_REPLACEMENT, COMPLEMENTARY_SIGNAL_REFRAME),
     # Good Sharpe, small edge: compare within industries, try sibling fields, add a signal.
     LOW_RETURNS: (GROUP_RELATIVE_REFRAME, INTERNAL_FIELD_REPLACEMENT, COMPLEMENTARY_SIGNAL_REFRAME),
     # Weak or noisy: compare within industries, try sibling fields, tame outliers.
@@ -131,6 +134,10 @@ _PRESCRIBED_PRIOR = 0.5
 _UNPRESCRIBED_PRIOR = 0.25
 MIN_CURE_SCORE = 0.3
 MAX_PRESCRIBED_FAMILIES = 4
+# A child whose daily PnL moves this closely with its parent's is the same alpha written
+# differently (e.g. normalize(rank(x)) for rank(x)); a tiny Fitness change there is noise,
+# not a cure. Kept high on purpose: a decayed child sits near 0.95 and can be a real fix.
+IDENTICAL_PNL_CORRELATION = 0.99
 
 
 class BacktestMetrics(Protocol):
@@ -149,7 +156,8 @@ class MutationOutcome:
 
 
 def mutation_outcome(parent: BacktestMetrics, child: BacktestMetrics,
-                     action: str) -> MutationOutcome | None:
+                     action: str, *, parent_child_correlation: float | None = None,
+                     ) -> MutationOutcome | None:
     """How one mutation did against its parent's diagnosed problem (None: no metrics).
 
     A child that fails the platform's self-correlation check never counts as a cure:
@@ -171,8 +179,11 @@ def mutation_outcome(parent: BacktestMetrics, child: BacktestMetrics,
     }[diagnosis.problem]
     child_sc_failed = any(check.name == "SELF_CORRELATION" and check.status.strip().upper() == "FAIL"
                           for check in child.checks)
+    identical = (parent_child_correlation is not None
+                 and parent_child_correlation >= IDENTICAL_PNL_CORRELATION)
     return MutationOutcome(diagnosis.problem, action,
-                           moved and abs(child.fitness) > abs(parent.fitness) and not child_sc_failed)
+                           moved and abs(child.fitness) > abs(parent.fitness)
+                           and not child_sc_failed and not identical)
 
 
 def learn_prescriptions(outcomes: Iterable[MutationOutcome]) -> dict[str, tuple[str, ...]]:

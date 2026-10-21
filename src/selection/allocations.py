@@ -51,6 +51,10 @@ LOW_SUB_UNIVERSE_SHARPE_STRUCTURAL_FAMILIES = (
     TEMPORAL_PERSISTENCE_REFRAME,
 )
 MAX_QUALIFIED_EVOLUTION_BACKTESTS_PER_LINEAGE = 2
+# Probe, then learn: one cycle gives one parent at most this many tries of one family,
+# so an untested prescription costs a few backtests before its results feed the next
+# cycle's learning, instead of a parent's whole allowance. Unused slots go to exploration.
+MAX_FAMILY_ATTEMPTS_PER_PARENT_PER_CYCLE = 3
 INITIAL_SC_TRIALS_PER_FAMILY = 2
 QUALIFIED_EVOLUTION_FAMILIES = (
     *INTERNAL_EDIT_FAMILIES,
@@ -138,8 +142,13 @@ def allocate_backtest_sources(
     direction_validation_percent: int,
     direction_validation_count: int = 0,
     optimization_only: bool = False,
+    max_family_attempts_per_parent: int | None = None,
 ) -> BacktestSourceAllocation:
+    """``max_family_attempts_per_parent`` caps one family's tries per parent in this
+    cycle (MAX_FAMILY_ATTEMPTS_PER_PARENT_PER_CYCLE in research runs); None: no cap."""
     _positive_integer(requested_count, "source_allocation_requested_count_invalid")
+    if max_family_attempts_per_parent is not None:
+        _positive_integer(max_family_attempts_per_parent, "source_allocation_family_cap_invalid")
     for percent in (self_correlation_percent, direction_validation_percent):
         if isinstance(percent, bool) or not isinstance(percent, int) or not 0 <= percent <= 100:
             raise ValueError("source_allocation_percent_invalid")
@@ -331,6 +340,7 @@ def allocate_backtest_sources(
         capacity=improvement_capacity,
         sc_capacity=min((requested_count * self_correlation_percent + 99) // 100, improvement_capacity),
         rotation_key=rotation_key,
+        family_cap=max_family_attempts_per_parent,
     )
     allocations = tuple(
         SignalImprovementAllocation(
@@ -386,6 +396,7 @@ def _round_robin_roots(
     capacity: int,
     sc_capacity: int,
     rotation_key: str,
+    family_cap: int | None = None,
 ) -> tuple[tuple[str, str, OptimizationTarget | None, str], ...]:
     roots = tuple(
         sorted(
@@ -443,6 +454,7 @@ def _round_robin_roots(
         tuple[str, str, str, tuple[str, ...], str]
     ] = set()
     sc_selected = 0
+    cycle_family_counts: dict[tuple[str, str], int] = {}
     while len(selected) < capacity:
         # Spend existing improvement slots on eligible SC repairs first, rotating
         # across roots. This is the research priority, not a learned quality score.
@@ -604,6 +616,11 @@ def _round_robin_roots(
                 if prefer_sc_repair or selected_family in SELF_CORRELATION_REPAIR_FAMILIES:
                     sc_selected += 1
                 remaining_by_family[(branch_task_id, selected_family)] -= 1
+                if family_cap is not None and selected_family not in _UNCAPPED_FAMILIES:
+                    family_key = (branch_task_id, selected_family)
+                    cycle_family_counts[family_key] = cycle_family_counts.get(family_key, 0) + 1
+                    if cycle_family_counts[family_key] >= family_cap:
+                        remaining_by_family[family_key] = 0
                 remaining_by_parent[branch_task_id] -= 1
                 if (_quality_allocation(source, selected_target)
                         and source.quality_budget_key is not None):
@@ -635,6 +652,10 @@ def _round_robin_roots(
         if not progressed:
             break
     return tuple(selected)
+
+
+# Self-correlation repair keeps its own trial budgets.
+_UNCAPPED_FAMILIES = frozenset((*SELF_CORRELATION_REPAIR_FAMILIES, *SELF_CORRELATION_RESEARCH_FAMILIES))
 
 
 def _allocation_reason(
