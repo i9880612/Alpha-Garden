@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -23,9 +24,16 @@ from execution.backtests import (
 )
 from execution.submission_queue import synchronize_submission_queue
 from execution.pnl import PnlAccountRequestError, capture_pnl_series
+from execution.progress import LOGGER_NAME
 from execution.backtest_reconciliation import expire_unknown_backtest_submissions
 from execution.runs import submission_rate_limited
-from persistence.backtests import BacktestSnapshot, get_backtest_task, list_active_backtest_tasks
+from persistence.backtests import (
+    BacktestSnapshot,
+    get_backtest_task,
+    list_active_backtest_tasks,
+    replace_backtest_task,
+)
+from persistence.platform_retries import platform_retry_used, record_platform_retry
 from persistence.database import DATABASE_LOCK_TIMEOUT_SECONDS, open_database
 from persistence.runs import (
     AutomatedRunRecord,
@@ -243,6 +251,14 @@ def _advance_real_backtest_once(
         )
     if task.platform_alpha_id is None:
         observation = client.poll_backtest(task.remote_id)
+        resent = _resend_after_platform_error(database_path, context.snapshot, observation,
+                                              observed_at=observed_at)
+        if resent is not None:
+            return RealBacktestAdvance(
+                action="platform_error_resubmitted",
+                snapshot=resent,
+                platform_request_performed=True,
+            )
         try:
             with open_database(database_path) as connection:
                 snapshot = apply_backtest_poll_observation(
@@ -690,3 +706,45 @@ def _load_context(
         formula=snapshot.task.formula,
         settings=BacktestSettings.from_platform_dict(raw_settings),
     )
+
+
+def _resend_after_platform_error(
+    database_path: str | Path,
+    snapshot: BacktestSnapshot,
+    observation,
+    *,
+    observed_at: str,
+) -> BacktestSnapshot | None:
+    """Put a task back in the send queue once after the platform's internal ERROR.
+
+    Only for a task of a running research run: the same task (same idea or mutation
+    record, same run and cycle) is sent again when a slot is free. A second ERROR, or
+    one met while recovering a stopped run, is recorded as the failure it is.
+    """
+    if (observation.state != "failed"
+            or (observation.platform_status or "").strip().lower() != "error"):
+        return None
+    task = snapshot.task
+    with open_database(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        current = get_backtest_task(connection, task.task_id)
+        if current is None or current.task.status != "pending" or current.task.remote_id != task.remote_id:
+            return None
+        link = get_automated_run_backtest_by_task(connection, task.task_id)
+        owner = get_automated_run(connection, link.run_id) if link is not None else None
+        if owner is None or owner.status != "running" or platform_retry_used(connection, task.task_id):
+            return None
+        record_platform_retry(
+            connection, task_id=task.task_id, first_remote_id=task.remote_id,
+            failure_message=observation.failure_message or "platform ERROR",
+            retried_at=observed_at,
+        )
+        replace_backtest_task(connection, replace(
+            current.task, status="created", remote_id=None, platform_alpha_id=None,
+            submission_started_at=None, last_observed_at=None, retry_not_before=None,
+            finished_at=None, failure_code=None, failure_message=None,
+        ), expected_status="pending")
+        logging.getLogger(LOGGER_NAME).warning(
+            "[重试] %s 平台运行出错（%s），已放回待发送队列，仅此一次",
+            task.task_id, (observation.failure_message or "ERROR")[:80])
+        return get_backtest_task(connection, task.task_id)

@@ -13,6 +13,7 @@ from persistence.qualified_archive import initialize_qualified_archive_schema
 from persistence.pnl import initialize_pnl_schema
 from persistence.submission_checks import initialize_submission_check_schema
 from persistence.formula_ideas import initialize_formula_idea_schema
+from persistence.platform_retries import initialize_platform_retry_schema
 from persistence.quality_research import initialize_quality_research_schema
 
 
@@ -218,6 +219,7 @@ def initialize_backtest_schema(connection: sqlite3.Connection) -> None:
     initialize_mutation_reference_schema(connection)
     initialize_quality_research_schema(connection)
     initialize_formula_idea_schema(connection)
+    initialize_platform_retry_schema(connection)
 
 
 def initialize_mutation_reference_schema(connection: sqlite3.Connection) -> None:

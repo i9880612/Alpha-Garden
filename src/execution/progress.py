@@ -194,6 +194,8 @@ def _backtest_message(snapshot: BacktestSnapshot, action: str) -> tuple[str, str
         if task.failure_message:
             detail += "：" + " ".join(task.failure_message.split())
         return "异常", detail
+    if task.status == "created" and action == "platform_error_resubmitted":
+        return "重试", "平台运行出错，已放回待发送队列（仅重试一次）"
     if task.status == "submission_unknown":
         return "", (
             "回测请求发送中，尚未确认接收" if action == "submission_in_progress"

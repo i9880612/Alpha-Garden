@@ -1420,6 +1420,46 @@ class AutomatedRunnerTests(unittest.TestCase):
             None,
         )
 
+    def test_platform_error_is_resent_once_then_completes(self):
+        run_id = self._prepare_running_task(max_pending_seconds=600)
+        error = BacktestPollObservation("failed", None, "ERROR", None,
+                                        "There was an error while running the simulation.")
+        client = RunnerClient(self._accepted("simulation-1"), self._accepted("simulation-2"),
+                              polls=(error,))
+        fake_time = FakeTime("2026-08-30T00:01:31+08:00")
+        completion = run_automated_run(self.database_path, client, run_id,
+                                       clock=fake_time.now, waiter=fake_time.wait)
+        self.assertEqual(completion.run.status, "completed")
+        self.assertEqual(client.calls.count("submit"), 2)
+        with open_database(self.database_path) as connection:
+            status = connection.execute("SELECT status, remote_id FROM backtest_tasks").fetchone()
+            retry = connection.execute(
+                "SELECT first_remote_id FROM backtest_platform_retries").fetchone()
+        self.assertEqual(tuple(status), ("completed", "https://api.worldquantbrain.com/simulations/simulation-2"))
+        self.assertEqual(retry[0], "https://api.worldquantbrain.com/simulations/simulation-1")
+
+    def test_second_platform_error_is_a_failure(self):
+        run_id = self._prepare_running_task(max_pending_seconds=600)
+        error = BacktestPollObservation("failed", None, "ERROR", None, "There was an error.")
+        client = RunnerClient(self._accepted("simulation-1"), self._accepted("simulation-2"),
+                              polls=(error, error))
+        fake_time = FakeTime("2026-08-30T00:01:31+08:00")
+        run_automated_run(self.database_path, client, run_id,
+                          clock=fake_time.now, waiter=fake_time.wait)
+        self.assertEqual(client.calls.count("submit"), 2)
+        with open_database(self.database_path) as connection:
+            row = connection.execute("SELECT status, failure_code FROM backtest_tasks").fetchone()
+        self.assertEqual(tuple(row), ("failed", "platform_error"))
+
+    def test_other_platform_failures_are_not_resent(self):
+        run_id = self._prepare_running_task(max_pending_seconds=600)
+        failed = BacktestPollObservation("failed", None, "FAILED", None, "Invalid expression")
+        client = RunnerClient(self._accepted("simulation-1"), polls=(failed,))
+        fake_time = FakeTime("2026-08-30T00:01:31+08:00")
+        run_automated_run(self.database_path, client, run_id,
+                          clock=fake_time.now, waiter=fake_time.wait)
+        self.assertEqual(client.calls.count("submit"), 1)
+
     # A run parked by the old rule with all planned work done completes on resume.
 
     def test_resume_completes_a_finished_run_left_failed_for_reconciliation(self):

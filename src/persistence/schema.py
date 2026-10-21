@@ -20,6 +20,7 @@ from persistence.formula_ideas import (
     initialize_formula_idea_schema,
     initialize_run_idea_policy_schema,
 )
+from persistence.platform_retries import initialize_platform_retry_schema
 
 
 PROJECT_TABLE_NAMES = frozenset(
@@ -53,8 +54,10 @@ PROJECT_TABLE_NAMES = frozenset(
         "quality_research_tasks",
         "formula_ideas",
         "automated_run_idea_policies",
+        "backtest_platform_retries",
     }
 )
+_RETRY_TABLE = "backtest_platform_retries"
 _IDEA_TABLES = ("formula_ideas", "automated_run_idea_policies")
 
 
@@ -427,6 +430,26 @@ def _omit_missing_idea_storage(expected, actual) -> None:
     if not any(key[2] in _IDEA_TABLES for key in actual):
         for table in _IDEA_TABLES:
             expected.pop(("table", table, table), None)
+    # ... and before the platform-retry upgrade.
+    if not any(key[2] == _RETRY_TABLE for key in actual):
+        expected.pop(("table", _RETRY_TABLE, _RETRY_TABLE), None)
+
+
+def add_platform_retry_storage(connection: sqlite3.Connection) -> None:
+    """Explicit additive migration: one table for platform-error resends; history untouched."""
+    expected = _migration_schema_objects(connection)
+    key = ("table", _RETRY_TABLE, _RETRY_TABLE)
+    expected[key] = _reference_schema_objects()[key]
+    actual = _schema_objects(connection)
+    if actual == expected:
+        return
+    previous = {item: value for item, value in expected.items() if item[2] != _RETRY_TABLE}
+    if actual != previous:
+        raise ValueError("platform_retry_migration_schema_mismatch")
+    if not connection.in_transaction:
+        raise ValueError("platform_retry_migration_requires_transaction")
+    initialize_platform_retry_schema(connection)
+    _require_current_schema(connection, expected)
 
 
 def _omit_missing_catalog_download_storage(expected, actual) -> None:
