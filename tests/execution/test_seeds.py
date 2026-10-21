@@ -111,6 +111,71 @@ class SignalSeedExecutionTests(unittest.TestCase):
             self.assertEqual(load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids, ())
             self.assertEqual(load_signal_frontiers(connection).active_branch_task_ids, (child.task.task_id,))
 
+    def _share_pnl(self, connection, *snapshots):
+        """Give the snapshots one identical daily PnL curve (correlation 1)."""
+        import random
+        rng = random.Random("shared")
+        increments = [rng.gauss(0, 1) for _ in range(300)]
+        for snapshot in snapshots:
+            alpha = snapshot.task.platform_alpha_id
+            connection.execute("DELETE FROM platform_pnl_series WHERE platform_alpha_id=?", (alpha,))
+            save_pnl_series(connection, series(alpha, increments, snapshot.task.account_scope))
+
+    def test_qualified_alpha_outside_seed_lineages_gets_its_own_quality_lineage(self):
+        from tests.execution.test_qualified_archive import prepare_candidate, complete_candidate
+
+        with open_database(self.database_path) as connection:
+            combo = complete_candidate(connection, prepare_candidate(connection), grade="AVERAGE")
+            frontier = load_signal_frontiers(connection, optimization_only=True)
+            self.assertEqual(frontier.active_branch_task_ids, (combo.task.task_id,))
+            self.assertEqual(frontier.records[0].root_task_id, combo.task.task_id)
+            # Ordinary research still only follows seed lineages.
+            self.assertEqual(load_signal_frontiers(connection).active_branch_task_ids, ())
+            child = complete_candidate(connection, prepare_candidate(connection, parent=combo),
+                                       sharpe=1.8, grade="AVERAGE")
+            frontier = load_signal_frontiers(connection, optimization_only=True)
+            self.assertEqual(frontier.active_branch_task_ids, (child.task.task_id,))
+            # Same lineage as its parent, so the quality budget is shared, not renewed.
+            self.assertEqual(frontier.records[0].root_task_id, combo.task.task_id)
+
+    def test_only_strongest_of_correlated_outside_alphas_is_optimized(self):
+        from tests.execution.test_qualified_archive import prepare_candidate, complete_candidate
+
+        with open_database(self.database_path) as connection:
+            weaker = complete_candidate(connection, prepare_candidate(connection), sharpe=1.6, grade="AVERAGE")
+            stronger = complete_candidate(connection, prepare_candidate(connection), sharpe=2.0, grade="AVERAGE")
+            other = complete_candidate(connection, prepare_candidate(connection), sharpe=1.4, grade="AVERAGE")
+            self._share_pnl(connection, weaker, stronger)
+            self.assertEqual(set(load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids),
+                             {stronger.task.task_id, other.task.task_id})
+
+    def test_outside_alpha_never_duplicates_a_seed_lineage_in_optimization(self):
+        from tests.execution.test_qualified_archive import prepare_candidate, complete_candidate
+
+        with open_database(self.database_path) as connection:
+            seeded = complete_candidate(connection, prepare_candidate(connection), sharpe=1.4, grade="AVERAGE")
+            synchronize_signal_seeds(connection)
+            outside = complete_candidate(connection, prepare_candidate(connection), sharpe=2.0, grade="AVERAGE")
+            self._share_pnl(connection, seeded, outside)
+            self.assertEqual(load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids,
+                             (seeded.task.task_id,))
+
+    def test_outside_alpha_blocked_by_submitted_alpha_is_not_optimized(self):
+        from tests.execution.test_qualified_archive import prepare_candidate, complete_candidate
+
+        with open_database(self.database_path) as connection:
+            submitted = complete_candidate(connection, prepare_candidate(connection), sharpe=2.0, grade="AVERAGE")
+            outside = complete_candidate(connection, prepare_candidate(connection), sharpe=1.5, grade="AVERAGE")
+            self._share_pnl(connection, submitted, outside)
+            record_platform_submitted_alphas(connection, (PlatformSubmittedAlphaRecord(
+                submitted.task.account_scope, submitted.task.platform_alpha_id, submitted.task.formula, "ACTIVE",
+                "2026-09-01T00:00:00+00:00", False,
+                {"id": submitted.task.platform_alpha_id, "status": "ACTIVE", "hidden": False,
+                 "dateSubmitted": "2026-09-01T00:00:00+00:00", "regular": {"code": submitted.task.formula},
+                 "is": {"sharpe": 2.0}},
+                "2026-09-09T00:00:00+00:00"),))
+            self.assertEqual(load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids, ())
+
     def test_optimization_excludes_submitted_formula_without_retiring_normal_research(self):
         from tests.execution.test_qualified_archive import prepare_candidate, complete_candidate
 

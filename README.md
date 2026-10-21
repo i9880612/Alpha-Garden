@@ -223,7 +223,7 @@ Candidate bytes measure JSON payload, not immediately reclaimable disk space. De
 
 ## Research rules
 
-**Normal research** combines exploration, mutation and self-correlation repair. **Focused optimization** works on fully checked active parents below the target grade with attempts remaining. The target is the platform's **Spectacular** grade; optimization explores the possibility of improvement, without guaranteeing it.
+**Normal research** combines exploration, mutation and self-correlation repair. **Focused optimization** works on fully checked active parents below the target grade with attempts remaining. The target is the platform's **Spectacular** grade; optimization explores the possibility of improvement, without guaranteeing it. A qualified formula outside every seed lineage (for example a combo) opens its own optimization lineage, strongest first, unless it correlates at 0.7 or more with a formula already being optimized in another lineage or is blocked by a submitted alpha.
 
 **Idea templates**: by default 90% of exploration slots (run config `ideaPercent`) come from 18 idea templates expanded over the field profiles (`data/field-profiles.json`, kept out of Git); random exploration fills the rest. A missing or broken profile file hands the whole share back to random exploration without stopping the run. **Combo templates** take at most 30% of template slots and add strong parents from different families whose daily returns correlate at most 0.5; parents correlated above 0.7 count as one idea sharing one pair budget, and the calmer side is weighted up by the daily PnL swing ratio. The former one-time cold-start mothers are retired; their price/volume ideas live on as templates.
 

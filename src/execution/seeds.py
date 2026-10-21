@@ -242,11 +242,18 @@ def load_signal_frontiers(
     facts = {record.task_id: record for record in evidence.records}
     grades = {snapshot.task.task_id: snapshot.result.grade for snapshot in completed}
     archived = {record.task_id for record in list_qualified_alpha_archive(connection)}
+    optimizable = [decision for decision in decisions if not decision.retired and decision.task_id not in archived
+                   and grades[decision.task_id] in BELOW_TARGET_GRADES]
+    root_by_task.update(_independent_quality_roots(
+        connection, [decision.task_id for decision in optimizable if decision.task_id not in root_by_task],
+        admitted=[task_id for task_id in (decision.task_id for decision in optimizable) if task_id in root_by_task],
+        snapshots={snapshot.task.task_id: snapshot for snapshot in completed},
+        mutations=mutations, seed_roots=frozenset(roots),
+    ))
     selected = []
-    for decision in decisions:
+    for decision in optimizable:
         task_id = decision.task_id
-        if (decision.retired or task_id in archived or task_id not in root_by_task
-                or grades[task_id] not in BELOW_TARGET_GRADES):
+        if task_id not in root_by_task:
             continue
         fact = facts[task_id]
         branch = SignalFrontierBranch(
@@ -260,6 +267,64 @@ def load_signal_frontiers(
             qualified_parent_task_id=task_id,
         ))
     return SignalFrontierSet(records=tuple(selected))
+
+
+def _independent_quality_roots(
+    connection: sqlite3.Connection,
+    candidate_task_ids: list[str],
+    *,
+    admitted: list[str],
+    snapshots: dict[str, BacktestSnapshot],
+    mutations: tuple[BacktestMutationRecord, ...],
+    seed_roots: frozenset[str],
+) -> dict[str, str]:
+    """Give a qualified alpha outside every seed lineage its own quality lineage.
+
+    Seed admission keeps near-copies of an idea from splitting one mutation budget,
+    so a passing combo that resembles an unqualified seed never becomes a root.
+    Quality optimization is a different job: it may improve the grade of any
+    qualified alpha, as long as that alpha is not a near-copy of one already being
+    optimized (another lineage) and is not blocked by a submitted alpha. Strongest
+    first, so the best version of an idea is the one optimized. The root is the
+    same one the quality budget charges, so attempts stay counted per lineage.
+    """
+    parents = {mutation.child_task_id: mutation.parent_task_id for mutation in mutations}
+
+    def lineage_root(task_id: str) -> str:
+        visited = set()
+        while task_id not in seed_roots and task_id in parents and task_id not in visited:
+            visited.add(task_id)
+            task_id = parents[task_id]
+        return task_id
+
+    candidates = []
+    for task_id in candidate_task_ids:
+        root = lineage_root(task_id)
+        # Inside a seed lineage the frontier already decided; never second-guess it here.
+        if root not in seed_roots:
+            candidates.append((snapshots[task_id], root))
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda item: (-abs(item[0].result.sharpe), item[0].task.finished_at, item[0].task.task_id))
+    kept = [(snapshots[task_id], None) for task_id in admitted]
+    accounts = {snapshot.task.account_scope for snapshot, _ in candidates}
+    references = tuple(ref for account in sorted(accounts)
+                       for ref in list_platform_submitted_alphas(connection, account_scope=account))
+    series = tuple(record for account in sorted(accounts) for record in list_pnl_series(
+        connection, account_scope=account, platform_alpha_ids=frozenset(
+            [s.task.platform_alpha_id for s, _ in (*candidates, *kept) if s.task.account_scope == account]
+            + [ref.platform_alpha_id for ref in references if ref.account_scope == account])))
+    correlations = PnlCorrelations(series)
+    selected: dict[str, str] = {}
+    for snapshot, root in candidates:
+        if assess_seed_correlation(snapshot, references, series, correlations=correlations).state != "passed":
+            continue
+        others = tuple(other for other, other_root in kept if other_root != root)
+        if assess_seed_redundancy(snapshot, others, correlations=correlations) != "passed":
+            continue
+        kept.append((snapshot, root))
+        selected[snapshot.task.task_id] = root
+    return selected
 
 
 def signal_seed_evidence_task_ids(connection: sqlite3.Connection) -> tuple[str, ...]:

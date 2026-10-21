@@ -403,6 +403,29 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         with open_database(self.database_path) as connection:
             self.assertEqual(connection.execute("SELECT count(*) FROM automated_run_backtests").fetchone()[0], 0)
 
+    def test_optimization_plans_qualified_alpha_outside_seed_lineages(self):
+        from persistence.seeds import list_signal_seeds
+        from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
+        combo_id = self._completed_backtest("rank(ts_rank(close,22)+ts_zscore(open,66))", sharpe=1.5,
+            fitness=1.2, sharpe_status="PASS", fitness_status="PASS", time_offset=1)
+        with open_database(self.database_path) as connection:
+            self.assertEqual(list_signal_seeds(connection), ())
+            connection.execute("UPDATE backtest_results SET grade='AVERAGE' WHERE task_id=?", (combo_id,))
+            connection.execute("INSERT INTO backtest_yearly_stats(task_id,stage,year,sharpe) VALUES (?, 'IS', 2023, 1.5)", (combo_id,))
+            save_submission_check(connection, SubmissionCheckRecord(combo_id, "2026-08-30T00:03:00+08:00",
+                canonical_submission_json({"is": {"checks": [{"name": name, "result": "PASS"}
+                                                               for name in STANDARD_REGULAR_CHECK_NAMES]}}), None))
+        run_id = self._start_run(generation_count=6, backtest_count=4, max_cycles=1,
+                                 max_backtests=4, optimization_only=True)
+        plan = plan_automated_cycle(self.database_path, run_id=run_id,
+                                    created_at="2026-08-30T00:04:00+08:00")
+        self.assertEqual(len(plan.backtests), 2)
+        self.assertTrue(all(item.parent_task_id == combo_id
+                            for item in plan.planned_source_allocation.signal_improvements))
+        with open_database(self.database_path) as connection:
+            roots = {row[0] for row in connection.execute("SELECT root_task_id FROM quality_research_tasks")}
+        self.assertEqual(roots, {combo_id})
+
     def _optimization_parent(self):
         from persistence.submission_checks import SubmissionCheckRecord, save_submission_check
         parent_id = self._signal_seed("rank(ts_rank(close,22)+ts_zscore(open,66))",
