@@ -386,15 +386,17 @@ def plan_automated_cycle(
         ))
         quality_allowances = load_quality_budgets(connection,
             tuple(completed_by_task_id[task] for task in eligible_parent_task_ids), mutations=planning_mutations)
-        enhancement_leaves = load_combo_enhancement_leaves(
+        enhancement = load_combo_enhancement_leaves(
             connection, catalog, account_scope=run.account_scope,
             parents=tuple(completed_by_task_id[record.parent_task_id] for record in improvement_stages.records
                           if record.stage == QUALIFIED_EVOLUTION_STAGE),
             mutations=planning_mutations,
         )
-        if enhancement_leaves:
+        enhancement_leaves = enhancement.leaves
+        if enhancement_leaves or enhancement.skipped_as_duplicates:
             phase(cycle_number, 1, f"组合增强：{len(enhancement_leaves)} 个合格父代找到 "
-                  f"{sum(map(len, enhancement_leaves.values()))} 个低相关补充信号")
+                  f"{sum(map(len, enhancement_leaves.values()))} 个低相关补充信号；"
+                  f"跳过 {enhancement.skipped_as_duplicates} 个预计与其他谱系重复的组合")
         improvement_pools = build_improvement_candidate_pools(
             catalog,
             settings_policy,

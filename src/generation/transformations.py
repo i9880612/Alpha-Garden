@@ -527,9 +527,11 @@ def collapse_stacked_reshapers(expression: Expression, *, _scale_free: bool = Tr
                     CallArgument(_sole_argument(first)), *expression.arguments[1:])),
                     _scale_free=_scale_free)
         inner = _sole_argument(expression)
+        # rank(group_rank(...)) re-ranks values that are already ranks: on 10-21 it
+        # backtested exactly like its parent. Its scale differs, so only where scale cancels.
         if isinstance(inner, Call) and inner.operator in _GROUP_ORDER_RESHAPERS and (
                 expression.operator == "winsorize"
-                or (_scale_free and expression.operator in _AFFINE_RESHAPERS)):
+                or (_scale_free and expression.operator in _AFFINE_RESHAPERS | _ORDER_RESHAPERS)):
             return inner
         if isinstance(inner, Call) and _sole_argument(inner) is not None:
             outer_name, inner_name = expression.operator, inner.operator

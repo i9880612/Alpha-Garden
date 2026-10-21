@@ -14,7 +14,7 @@ the PnL curves are the weights the platform sees.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 
 from generation.catalog import GenerationCatalog
@@ -73,6 +73,8 @@ class ComboEnhancementLeaf:
     change: TransformationChange
     companion_alpha_id: str
     expected_gain: float
+    sign: int = 1
+    weight: float = 1.0
     family: str = COMBO_ENHANCEMENT
 
 
@@ -142,8 +144,13 @@ def iter_combo_enhancement_leaves(
     catalog: GenerationCatalog,
     *,
     limit: int = MAX_LEAVES_PER_PARENT,
+    accept: Callable[[EnhancementPlan, EnhancementSignal], bool] | None = None,
 ) -> Iterator[ComboEnhancementLeaf]:
-    """Up to ``limit`` locally valid children, largest expected gain first."""
+    """Up to ``limit`` locally valid children, largest expected gain first.
+
+    ``accept`` may veto a pair before it counts toward the limit, so a vetoed pair hands
+    its place to the next best one instead of leaving the parent with fewer children.
+    """
     plans = []
     for companion in companions:
         if companion.alpha_id == parent.alpha_id:
@@ -158,6 +165,8 @@ def iter_combo_enhancement_leaves(
     for plan, companion in plans:
         if produced >= limit:
             return
+        if accept is not None and not accept(plan, companion):
+            continue
         term = companion_marker(companion.expression)
         weighted = term if plan.weight == 1 else f"{plan.weight:g}*{term}"
         formula = f"zscore({before}){'+' if plan.sign > 0 else '-'}{weighted}"
@@ -172,6 +181,8 @@ def iter_combo_enhancement_leaves(
                                         after=render_formula(expression)),
             companion_alpha_id=companion.alpha_id,
             expected_gain=plan.expected_gain,
+            sign=plan.sign,
+            weight=plan.weight,
         )
 
 

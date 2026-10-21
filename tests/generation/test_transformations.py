@@ -112,7 +112,8 @@ class StructuralTransformationTests(unittest.TestCase):
         from generation.transformations import collapse_stacked_reshapers, same_signal
         parent = parse_formula("group_rank(rank(close),sector)").expression
         for formula in ("group_rank(normalize(close),sector)", "winsorize(group_rank(rank(close),sector))",
-                        "zscore(group_rank(quantile(close),sector))", "group_rank(close,sector)"):
+                        "zscore(group_rank(quantile(close),sector))", "group_rank(close,sector)",
+                        "rank(group_rank(close,sector))"):
             self.assertTrue(same_signal(parent, parse_formula(formula).expression), formula)
         for formula in ("group_zscore(rank(close),sector)", "group_rank(rank(open),sector)"):
             self.assertFalse(same_signal(parent, parse_formula(formula).expression), formula)

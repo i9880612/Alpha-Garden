@@ -116,3 +116,15 @@ def test_a_fast_companion_that_costs_fitness_through_turnover_is_skipped():
     assert kept is not None and kept.expected_gain >= MIN_EXPECTED_GAIN
     # Same PnL curve, so the same Sharpe gain; only the turnover differs.
     assert plan_enhancement(parent, fast) is None
+
+
+def test_a_vetoed_pair_hands_its_place_to_the_next_best():
+    catalog = _catalog()
+    parent_expression = parse_formula("rank(close)").expression
+    parent = EnhancementSignal("p", parent_expression, _daily(0.12, _noise(1)))
+    companions = (_signal("a", "rank(open)", 0.06, _noise(6)), _signal("b", "rank(-ts_delta(open,5))", 0.09, _noise(7)))
+    best = list(iter_combo_enhancement_leaves(parent_expression, parent, companions, catalog, limit=1))
+    assert [leaf.companion_alpha_id for leaf in best] == ["b"]
+    vetoed = list(iter_combo_enhancement_leaves(parent_expression, parent, companions, catalog, limit=1,
+                                                accept=lambda plan, companion: companion.alpha_id != "b"))
+    assert [leaf.companion_alpha_id for leaf in vetoed] == ["a"]
