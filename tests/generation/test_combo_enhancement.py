@@ -22,7 +22,6 @@ from generation.combo_enhancement import (
     COMBO_ENHANCEMENT,
     MIN_EXPECTED_GAIN,
     EnhancementSignal,
-    companion_marker,
     iter_combo_enhancement_leaves,
     plan_enhancement,
 )
@@ -96,8 +95,9 @@ def test_leaves_are_valid_ordered_and_keep_both_sides_on_one_scale():
     assert all(leaf.family == COMBO_ENHANCEMENT for leaf in leaves)
     assert all(leaf.expected_gain >= MIN_EXPECTED_GAIN for leaf in leaves)
     first = leaves[0].change.after
+    # A sum keeps its zscore; a single rank term is written with the sqrt(12) weight instead.
     assert first.startswith("zscore(rank(close)+1.3*rank(volume))+")
-    assert companion_marker(companions[1].expression) in first
+    assert first.endswith("*rank(-ts_delta(open,5))") and "zscore(rank(-ts_delta" not in first
     assert all(validate_formula(leaf.expression, catalog).is_valid for leaf in leaves)
     assert len({leaf.leaf_id for leaf in leaves}) == len(leaves)
     assert list(iter_combo_enhancement_leaves(parent_expression, parent, companions, catalog, limit=1))[0] \
@@ -128,3 +128,19 @@ def test_a_vetoed_pair_hands_its_place_to_the_next_best():
     vetoed = list(iter_combo_enhancement_leaves(parent_expression, parent, companions, catalog, limit=1,
                                                 accept=lambda plan, companion: companion.alpha_id != "b"))
     assert [leaf.companion_alpha_id for leaf in vetoed] == ["a"]
+
+
+def test_a_rank_parent_and_rank_companion_drop_the_zscore_layer_with_matching_weights():
+    from generation.combo_enhancement import RANK_ZSCORE_SCALE
+    catalog = _catalog()
+    parent_expression = parse_formula("rank(close)").expression
+    parent = EnhancementSignal("p", parent_expression, _daily(0.12, _noise(1)))
+    zscore_companion = _signal("z", "ts_delta(open,5)", 0.09, _noise(7))
+    rank_companion = _signal("r", "rank(-ts_delta(open,5))", 0.09, _noise(7))
+    (plain,) = iter_combo_enhancement_leaves(parent_expression, parent, (rank_companion,), catalog)
+    (scaled,) = iter_combo_enhancement_leaves(parent_expression, parent, (zscore_companion,), catalog)
+    weight = plan_enhancement(parent, rank_companion).weight
+    # Both rank sides share the sqrt(12) factor, so the companion keeps its weight.
+    assert plain.change.after == f"rank(close)+{weight:g}*rank(-ts_delta(open,5))"
+    # A zscore companion against a rank parent divides by it.
+    assert scaled.change.after == f"rank(close)+{float(f'{weight / RANK_ZSCORE_SCALE:.2g}'):g}*zscore(ts_delta(open,5))"

@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 
 from generation.catalog import GenerationCatalog
-from generation.formula import Expression, formula_fingerprint, render_formula
+from generation.formula import Call, Expression, formula_fingerprint, render_formula
 from generation.logic import prepare_formula_logic
 from generation.parser import FormulaSyntaxError, parse_formula
 from generation.structure_limits import fits_formula_structure_limits
@@ -78,9 +78,29 @@ class ComboEnhancementLeaf:
     family: str = COMBO_ENHANCEMENT
 
 
+# rank output is uniform on [0, 1] every day, so its cross-sectional spread is the constant
+# 1/sqrt(12): zscore(rank(x)) is sqrt(12) * rank(x) plus a constant the platform's
+# neutralization removes. Writing the rank term with that weight saves a nesting level.
+RANK_ZSCORE_SCALE = math.sqrt(12.0)
+
+
+def _term(expression: Expression) -> tuple[str, float]:
+    """A side of the sum on the common zscore scale: (text, weight that puts it there)."""
+    text = render_formula(expression)
+    if isinstance(expression, Call) and expression.operator == "rank" and len(expression.arguments) == 1:
+        return text, RANK_ZSCORE_SCALE
+    return f"zscore({text})", 1.0
+
+
+def companion_markers(expression: Expression) -> tuple[str, ...]:
+    """Texts a companion leaves in a child formula built with it (current and older forms)."""
+    text = render_formula(expression)
+    return (f"zscore({text})", f"*{text}", f"+{text}", f"-{text}")
+
+
 def companion_marker(expression: Expression) -> str:
-    """The text a companion leaves in every child formula built with it."""
-    return f"zscore({render_formula(expression)})"
+    """The zscore form older children were written in."""
+    return companion_markers(expression)[0]
 
 
 def plan_enhancement(parent: EnhancementSignal, companion: EnhancementSignal) -> EnhancementPlan | None:
@@ -167,9 +187,12 @@ def iter_combo_enhancement_leaves(
             return
         if accept is not None and not accept(plan, companion):
             continue
-        term = companion_marker(companion.expression)
-        weighted = term if plan.weight == 1 else f"{plan.weight:g}*{term}"
-        formula = f"zscore({before}){'+' if plan.sign > 0 else '-'}{weighted}"
+        parent_term, parent_scale = _term(parent_expression)
+        companion_term, companion_scale = _term(companion.expression)
+        # Both sides on the zscore scale, then the parent's weight set to 1.
+        weight = float(f"{plan.weight * companion_scale / parent_scale:.2g}")
+        weighted = companion_term if weight == 1 else f"{weight:g}*{companion_term}"
+        formula = f"{parent_term}{'+' if plan.sign > 0 else '-'}{weighted}"
         expression = _prepare(formula, catalog)
         if expression is None:
             continue

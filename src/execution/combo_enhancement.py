@@ -30,7 +30,7 @@ from generation.combo_enhancement import (
     MIN_COMPANION_ABS_SHARPE,
     ComboEnhancementLeaf,
     EnhancementSignal,
-    companion_marker,
+    companion_markers,
     iter_combo_enhancement_leaves,
 )
 from generation.ideas import COMBO_TEMPLATE_ID
@@ -75,12 +75,13 @@ def load_combo_enhancement_leaves(
     parent_pnl = _daily_series(connection, account_scope,
                                frozenset(p.task.platform_alpha_id for p in parents))
     used: dict[str, set[str]] = defaultdict(set)
-    markers = {companion.alpha_id: companion_marker(companion.expression) for companion in companions}
+    markers = {companion.alpha_id: companion_markers(companion.expression) for companion in companions}
     for mutation in mutations:
         if mutation.action != COMBO_ENHANCEMENT:
             continue
-        for alpha_id, marker in markers.items():
-            if marker in mutation.after:
+        for alpha_id, texts in markers.items():
+            # Added by this step: in the child but not already in the parent.
+            if any(text in mutation.after and text not in mutation.before for text in texts):
                 used[alpha_id].add(mutation.parent_task_id)
     lineage = _lineage_roots(mutations)
     references = _reference_curves(connection, account_scope, lineage)

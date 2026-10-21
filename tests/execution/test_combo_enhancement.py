@@ -140,3 +140,17 @@ class ComboEnhancementCompanionTests(unittest.TestCase):
             captured = self._accept(connection, parent)
             plan = EnhancementPlan(sign=1, weight=1.0, expected_gain=1.2, correlation=0.0, sharpe_gain=1.2)
             self.assertTrue(captured["accept"](plan, captured["companions"][companion.task.platform_alpha_id]))
+
+    def test_companion_use_is_counted_in_the_shorter_rank_form_too(self):
+        with open_database(self.database_path) as connection:
+            parent = complete_candidate(connection, prepare_candidate(connection), grade="AVERAGE")
+            companion = self._companion(connection)
+            other = self._companion(connection, sharpe=0.9)
+            for _ in range(MAX_LINEAGES_PER_COMPANION):
+                user = complete_candidate(connection, prepare_candidate(connection), grade="AVERAGE")
+                child = prepare_candidate(connection)
+                create_backtest_mutation(connection, BacktestMutationRecord(
+                    child.task.task_id, user.task.task_id, COMBO_ENHANCEMENT, "formula",
+                    user.task.formula, f"{user.task.formula}+1.2*{companion.task.formula}"))
+            offered = self._offered(connection, (parent,))
+        self.assertEqual(offered[parent.task.platform_alpha_id], [other.task.platform_alpha_id])

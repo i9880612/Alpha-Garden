@@ -438,8 +438,8 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
             enhanced = [m for m in list_backtest_mutations(connection)
                         if m.child_task_id in planned and m.action == COMBO_ENHANCEMENT]
         self.assertTrue(enhanced)
-        self.assertTrue(enhanced[0].after.startswith("zscore(rank(ts_rank(close,22)+ts_zscore(open,66)))+"))
-        self.assertIn("zscore(rank(volume))", enhanced[0].after)
+        self.assertTrue(enhanced[0].after.startswith("rank(ts_rank(close,22)+ts_zscore(open,66))+"))
+        self.assertTrue(enhanced[0].after.endswith("rank(volume)"))
         self.assertTrue(all(m.parent_task_id == parent_id for m in enhanced))
 
     def test_optimization_plans_qualified_alpha_outside_seed_lineages(self):
