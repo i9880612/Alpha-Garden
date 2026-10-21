@@ -19,7 +19,9 @@ from execution.runs import retire_previous_automated_runs
 from persistence.backtests import get_backtest_task, list_active_backtest_tasks
 from persistence.database import open_database
 from persistence.runs import get_automated_run, list_active_automated_runs
-from execution.submission_queue import list_submission_candidates, require_selected_submission
+from execution.submission_queue import (
+    list_ranked_submission_candidates, list_submission_candidates, require_selected_submission,
+)
 from persistence.submissions import (
     FORMAL_SUBMISSION_ACTIVE_STATUSES,
     FORMAL_SUBMISSION_UNRESOLVED_STATUSES,
@@ -81,6 +83,7 @@ def submit_queued_alphas(
     source: str = "queue",
     grade: str | None = None,
     selected_task_id: str | None = None,
+    only_task_ids: frozenset[str] | None = None,
 ) -> SubmissionQueueCompletion:
     _validate_max_submissions(max_submissions)
     _validate_selection(source, selected_task_id, max_submissions, grade)
@@ -101,7 +104,8 @@ def submit_queued_alphas(
                 item.task_id for item in list_submission_candidates(
                     connection, account_scope=settings.account_scope, source=source, grade=grade,
                 )
-                if selected_task_id is None or item.task_id == selected_task_id
+                if (selected_task_id is None or item.task_id == selected_task_id)
+                and (only_task_ids is None or item.task_id in only_task_ids)
             )
             needs_recovery = bool(list_active_automated_runs(connection)) or any(
                 task.account_scope == settings.account_scope
@@ -450,6 +454,77 @@ def _expired_reconciliation_task_ids(
             if elapsed >= run.max_pending_seconds:
                 expired.add(attempt.task_id)
     return expired
+
+
+def submit_ranked_alphas(
+    database_path: str | Path,
+    environment_path: str | Path,
+    *,
+    max_submissions: int,
+    minimum_grade: str = "GOOD",
+    poll_interval_seconds: float = 1.0,
+    clock: Clock | None = None,
+    waiter: Waiter | None = None,
+    client_factory: ClientFactory | None = None,
+) -> SubmissionQueueCompletion:
+    """Submit the best currently submittable formula, ask again, until enough succeed.
+
+    One submission at a time, each through the source it belongs to, so every one
+    still gets the platform's own check right before it is posted. Candidates are
+    re-read after each step because a confirmed submission changes which others may
+    follow. Ends early when nothing at or above minimum_grade is left.
+    """
+    _validate_max_submissions(max_submissions)
+    if max_submissions is None:
+        raise ValueError("提交数量必须为正整数。")
+    settings = load_worldquant_connection_settings(environment_path)
+    make_client = client_factory or _default_client_factory
+    client = make_client(settings)
+    shared = {"poll_interval_seconds": poll_interval_seconds, "clock": clock, "waiter": waiter,
+              "client_factory": lambda _settings: client}
+    tried: set[str] = set()
+    totals = None
+    succeeded = 0
+    while succeeded < max_submissions:
+        with open_database(database_path) as connection:
+            ranked = list_ranked_submission_candidates(
+                connection, account_scope=settings.account_scope, minimum_grade=minimum_grade)
+        candidate = next((item for item in ranked if item.record.task_id not in tried), None)
+        if candidate is None:
+            break
+        task_id = candidate.record.task_id
+        tried.add(task_id)
+        logging.getLogger("execution.progress").info(
+            "按评级从高到低提交：下一条 %s（评级 %s，来源 %s）", task_id, candidate.grade, candidate.source)
+        if candidate.source == "queue":
+            completion = submit_queued_alphas(database_path, environment_path, max_submissions=1,
+                                              source="queue", only_task_ids=frozenset({task_id}), **shared)
+        else:
+            completion = submit_queued_alphas(database_path, environment_path, max_submissions=1,
+                                              source=candidate.source, selected_task_id=task_id, **shared)
+        succeeded += completion.submitted_count - completion.already_active_count
+        totals = completion if totals is None else replace(
+            completion,
+            initial_queue_count=totals.initial_queue_count + completion.initial_queue_count,
+            step_count=totals.step_count + completion.step_count,
+            platform_request_count=totals.platform_request_count + completion.platform_request_count,
+            authentication_performed=totals.authentication_performed or completion.authentication_performed,
+            submission_claimed_count=totals.submission_claimed_count + completion.submission_claimed_count,
+            submitted_count=totals.submitted_count + completion.submitted_count,
+            already_active_count=totals.already_active_count + completion.already_active_count,
+            ineligible_count=totals.ineligible_count + completion.ineligible_count,
+            failed_count=totals.failed_count + completion.failed_count,
+            unresolved_count=totals.unresolved_count + completion.unresolved_count,
+        )
+        if completion.unresolved_count:
+            break  # An uncertain post must be settled before anything else is sent.
+    if totals is None:
+        return SubmissionQueueCompletion(
+            account_scope=settings.account_scope, initial_queue_count=0, step_count=0,
+            platform_request_count=0, authentication_performed=False, submission_claimed_count=0,
+            submitted_count=0, already_active_count=0, ineligible_count=0, failed_count=0,
+            unresolved_count=0, remaining_queue_count=0, max_submissions=max_submissions)
+    return replace(totals, max_submissions=max_submissions)
 
 
 def _validate_max_submissions(value: int | None) -> None:

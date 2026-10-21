@@ -12,7 +12,7 @@ from execution.qualified_candidates import load_submittable_qualified_candidates
 from execution.console_settings import read_settings
 from execution.launch import run_resume_rejection
 from execution.seeds import load_signal_frontiers
-from execution.submission_queue import list_submission_candidates
+from execution.submission_queue import list_ranked_submission_candidates, list_submission_candidates
 from generation.direction import DIRECTION_REVERSAL
 from generation.self_correlation import SELF_CORRELATION_REPAIR_FAMILIES
 from learning.frontiers import PARENT_ATTEMPT_BUDGET, count_parent_attempts
@@ -105,6 +105,15 @@ class ConsoleReader:
                 rows = [row for row in rows if row["task_id"] in ids]
                 for row in rows:
                     row["can_submit"] = True
+            elif category == "candidates" and grade.startswith("RANKED_"):
+                ranked = list_ranked_submission_candidates(connection, account_scope=account,
+                                                           minimum_grade=grade.removeprefix("RANKED_"))
+                order = {item.record.task_id: index for index, item in enumerate(ranked)}
+                sources = {item.record.task_id: item.source for item in ranked}
+                rows = sorted((row for row in rows if row["task_id"] in order), key=lambda row: order[row["task_id"]])
+                for row in rows:
+                    row["submission_source"] = sources[row["task_id"]]
+                grade = ""  # The ranked list already applied its grade floor.
             elif category == "candidates":
                 ids = {item.task_id for item in list_submission_candidates(connection, account_scope=account,
                     source="queue" if grade in {"", "SPECTACULAR"} else "qualified_archive",

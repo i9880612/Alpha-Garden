@@ -17,12 +17,27 @@ def curves(*names):
     return tuple(series(name, [math.sin(i) for i in range(300)]) for name in names)
 
 
-def test_preserves_earlier_step_instead_of_blocking_the_active_successor():
+def test_preserves_a_stronger_active_successor_but_offers_the_best_first():
     a, b, c = formula("a", 1.5), formula("b", 1.6), formula("c", 1.7)
     data = curves("a", "b", "c")
+    # b would block the stronger c that is still being optimized; a stays 10% below it.
     assert select_submission_opportunities((a, b), (c,), (), data) == ("a",)
-    assert select_submission_opportunities((a, b, c), (), (), data) == ("a",)
+    # Among candidates the strongest goes first; its weaker near-copies wait.
+    assert select_submission_opportunities((a, b, c), (), (), data) == ("c",)
     assert select_submission_opportunities((b, c), (c,), (reference("a"),), data) == ("c",)
+
+
+def test_a_weaker_protected_formula_does_not_hold_back_a_stronger_candidate():
+    strong, weak = formula("strong", 1.6, grade="EXCELLENT"), formula("weak", 1.55, grade="GOOD")
+    assert select_submission_opportunities((strong,), (weak,), (), curves("strong", "weak")) == ("strong",)
+    assert select_submission_opportunities((weak,), (strong,), (), curves("strong", "weak")) == ()
+
+
+def test_higher_grade_goes_first_even_when_it_blocks_more():
+    excellent = formula("excellent", 1.6, grade="EXCELLENT")
+    average_one, average_two = formula("average_one", 1.7, grade="AVERAGE"), formula("average_two", 1.7, grade="AVERAGE")
+    data = curves("excellent", "average_one", "average_two")
+    assert select_submission_opportunities((average_one, average_two, excellent), (), (), data)[0] == "excellent"
 
 
 def test_equal_quality_or_less_than_ten_percent_does_not_create_a_ladder():
@@ -35,7 +50,7 @@ def test_equal_quality_or_less_than_ten_percent_does_not_create_a_ladder():
 def test_independent_candidate_survives_while_high_correlation_peers_are_sequenced():
     a, b, independent = formula("a", 1.5), formula("b", 1.7), formula("independent", 1.8)
     data = (*curves("a", "b"), series("independent", [math.cos(i) for i in range(300)]))
-    assert set(select_submission_opportunities((a, b, independent), (), (), data)) == {"a", "independent"}
+    assert set(select_submission_opportunities((a, b, independent), (), (), data)) == {"b", "independent"}
 
 
 def test_missing_pair_and_missing_reference_sharpe_do_not_imply_permission():

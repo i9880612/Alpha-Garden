@@ -50,7 +50,7 @@ export interface Settings {
   limits: Record<string, number | boolean>;
 }
 export interface Submission { task_id: string; alpha_id: string; grade: string | null; status: string; source: string; updated_at: string; failure_code: string | null }
-export type JobRequest = { kind: "run"; mode: string; cycles: number } | { kind: "resume"; run_id: string } | { kind: "submit"; grade: string; count: number } | { kind: "submit"; task_id: string; source?: "qualified_archive" };
+export type JobRequest = { kind: "run"; mode: string; cycles: number } | { kind: "resume"; run_id: string } | { kind: "submit"; grade: string; count: number } | { kind: "submit"; grade: "RANKED"; count: number; minimum_grade: string } | { kind: "submit"; task_id: string; source?: "qualified_archive" };
 export interface Job {
   id: string; request_id: string; request: JobRequest; status: string; run_id: string | null; created_at: string;
   result: { submitted_count?: number; new_submitted_count?: number; already_active_count?: number; ineligible_count?: number; failed_count?: number; unresolved_count?: number; completed: boolean; stop_reason?: string } | null;

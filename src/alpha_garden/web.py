@@ -189,7 +189,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path == "/api/submissions":
                 return reader.submissions(page=page, page_size=page_size)
             grade = _query(query, "grade").upper()
-            if grade and grade not in GRADES | {"UNKNOWN"}:
+            if grade and grade not in GRADES | {"UNKNOWN"} | {f"RANKED_{value}" for value in GRADES}:
                 raise ValueError("console_grade_invalid")
             search = _query(query, "search")
             if len(search) > 128:
@@ -307,6 +307,10 @@ def _job_request(payload):
         return {"kind": kind, "task_id": _identity(payload["task_id"])}
     if kind == "run" and set(payload) == {"kind", "cycles", "mode"} and isinstance(payload["mode"], str) and payload["mode"] in {"normal", "optimization"}:
         return {"kind": kind, "cycles": _positive_int(payload["cycles"]), "mode": payload["mode"]}
+    if (kind == "submit" and set(payload) == {"kind", "grade", "count", "minimum_grade"} and payload["grade"] == "RANKED"
+            and isinstance(payload["minimum_grade"], str) and payload["minimum_grade"] in GRADES):
+        return {"kind": kind, "grade": "RANKED", "count": _positive_int(payload["count"]),
+                "minimum_grade": payload["minimum_grade"]}
     if kind == "submit" and set(payload) == {"kind", "grade", "count"} and isinstance(payload["grade"], str) and payload["grade"] in GRADES:
         return {"kind": kind, "grade": payload["grade"], "count": _positive_int(payload["count"])}
     if kind == "resume" and set(payload) == {"kind", "run_id"}:

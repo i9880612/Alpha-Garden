@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from execution.qualified_archive import consume_qualified_alpha_archive
 from execution.qualified_candidates import load_submittable_qualified_candidates, load_submission_opportunity_ids
-from execution.seeds import load_signal_frontiers
+from persistence.qualified_archive import list_qualified_alpha_archive
 
 from persistence.backtests import (
     BacktestMutationRecord,
@@ -155,13 +155,18 @@ def list_submission_candidates(
         raise ValueError("formal_submission_source_invalid")
     parents = _parent_map(list_backtest_mutations(connection))
     candidates = []
-    snapshots = (
-        tuple(_required_snapshot(connection, task_id) for task_id in
-              load_signal_frontiers(connection, optimization_only=True).active_branch_task_ids)
-        if source == "optimization" else load_submittable_qualified_candidates(connection, account_scope=account_scope)
-    )
-    allowed = (set(load_submission_opportunity_ids(connection, account_scope=account_scope, include_optimization=True))
-               if source == "optimization" else {s.task.task_id for s in snapshots})
+    if source == "optimization":
+        # Every checked formula still in research, not only frontier branches: a near-copy
+        # of another lineage is kept out of optimization but must stay submittable, or the
+        # best alpha of an idea can end up reachable from nowhere.
+        settled = ({record.task_id for record in list_qualified_alpha_archive(connection)}
+                   | {record.task_id for record in list_formal_submission_queue(connection, account_scope=account_scope)})
+        allowed = set(load_submission_opportunity_ids(connection, account_scope=account_scope,
+                                                      include_optimization=True)) - settled
+        snapshots = tuple(_required_snapshot(connection, task_id) for task_id in sorted(allowed))
+    else:
+        snapshots = load_submittable_qualified_candidates(connection, account_scope=account_scope)
+        allowed = {s.task.task_id for s in snapshots}
     for snapshot in snapshots:
         if snapshot.task.account_scope != account_scope or snapshot.task.task_id not in allowed:
             continue
@@ -178,6 +183,50 @@ def list_submission_candidates(
             normalized_formula=normalize_submitted_formula(task.formula), enqueued_at=task.finished_at,
         ))
     return tuple(candidates)
+
+
+RANKED_GRADES = ("SPECTACULAR", "EXCELLENT", "GOOD", "AVERAGE", "INFERIOR")
+# Formulas still being optimized join a ranked submission only from this grade up: a GOOD
+# one still has room to climb, an EXCELLENT one rarely does.
+RANKED_OPTIMIZATION_MINIMUM_GRADE = "EXCELLENT"
+
+
+@dataclass(frozen=True, slots=True)
+class RankedSubmissionCandidate:
+    record: FormalSubmissionQueueRecord
+    source: str
+    grade: str
+
+
+def list_ranked_submission_candidates(
+    connection: sqlite3.Connection, *, account_scope: str, minimum_grade: str = "GOOD",
+) -> tuple[RankedSubmissionCandidate, ...]:
+    """Every currently submittable formula at or above minimum_grade, best first.
+
+    Sources: the Spectacular queue, the qualified archive, and formulas still being
+    optimized from RANKED_OPTIMIZATION_MINIMUM_GRADE up. Each list already holds only
+    independent next steps; the caller submits the first and asks again, because one
+    confirmed submission changes what the others may do.
+    """
+    if minimum_grade not in RANKED_GRADES:
+        raise ValueError("formal_submission_grade_filter_invalid")
+    allowed = set(RANKED_GRADES[:RANKED_GRADES.index(minimum_grade) + 1])
+    optimization_allowed = allowed & set(RANKED_GRADES[:RANKED_GRADES.index(RANKED_OPTIMIZATION_MINIMUM_GRADE) + 1])
+    found: dict[str, RankedSubmissionCandidate] = {}
+    for source, grades in (("queue", allowed), ("qualified_archive", allowed), ("optimization", optimization_allowed)):
+        if not grades:
+            continue
+        for record in list_submission_candidates(connection, account_scope=account_scope, source=source):
+            snapshot = _required_snapshot(connection, record.task_id)
+            if record.task_id in found or snapshot.result is None or snapshot.result.grade not in grades:
+                continue
+            found[record.task_id] = RankedSubmissionCandidate(record, source, snapshot.result.grade)
+
+    def rank(item: RankedSubmissionCandidate):
+        result = _required_snapshot(connection, item.record.task_id).result
+        return (RANKED_GRADES.index(item.grade), -result.fitness, -result.sharpe, item.record.task_id)
+
+    return tuple(sorted(found.values(), key=rank))
 
 
 def require_selected_submission(connection: sqlite3.Connection, *, account_scope: str, task_id: str,

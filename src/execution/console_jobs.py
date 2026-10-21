@@ -16,7 +16,7 @@ from execution.progress import LOGGER_NAME
 from execution.run_config import load_automated_run_limits
 from execution.console_settings import save_settings
 from execution.runs import AutomatedRunPaused
-from execution.submission_runner import submit_queued_alphas
+from execution.submission_runner import submit_queued_alphas, submit_ranked_alphas
 
 
 class ConsoleJobs:
@@ -168,6 +168,11 @@ class ConsoleJobs:
     def _execute(self, job):
         paths, request = self.reader.paths, job["request"]
         common = {"clock": self._clock, "waiter": self._wait}
+        if request["kind"] == "submit" and request.get("grade") == "RANKED":
+            completion = submit_ranked_alphas(paths.database, paths.environment, max_submissions=request["count"],
+                                              minimum_grade=request["minimum_grade"], **common)
+            return {**asdict(completion), "new_submitted_count": completion.submitted_count - completion.already_active_count,
+                    "completed": completion.completed}
         if request["kind"] == "submit":
             grade = request.get("grade")
             selection = ({"source": request.get("source", "optimization"), "selected_task_id": request["task_id"], "max_submissions": 1}

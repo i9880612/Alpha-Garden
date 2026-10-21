@@ -329,6 +329,9 @@ class ConsoleHTTPTests(unittest.TestCase):
                 {"kind": "submit", "task_id": "task-one", "count": 2},
                 {"kind": "submit", "task_id": "task-one", "grade": "GOOD"},
                 {"kind": "submit", "task_id": "task-one", "source": "queue"},
+                {"kind": "submit", "grade": "RANKED", "count": 2},
+                {"kind": "submit", "grade": "RANKED", "count": 2, "minimum_grade": "BAD"},
+                {"kind": "submit", "grade": "GOOD", "count": 2, "minimum_grade": "GOOD"},
                 {"kind": "resume", "run_id": "../test"},
             ]:
                 self.assertEqual(self.request("/api/jobs", "POST", request, headers)[0], 400)

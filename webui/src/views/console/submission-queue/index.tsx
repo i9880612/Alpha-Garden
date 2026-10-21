@@ -17,7 +17,9 @@ export default function SubmissionPage() {
   const zh = locale === "zh-CN";
   const { canOperate, pending, start } = useConsole();
   const [modal, modalContext] = Modal.useModal();
-  const [grade, setGrade] = useState("SPECTACULAR");
+  const [grade, setGrade] = useState("RANKED");
+  const [minimumGrade, setMinimumGrade] = useState("GOOD");
+  const ranked = grade === "RANKED";
   const [count, setCount] = useState(2);
   const [logsOpen, setLogsOpen] = useState(false);
   const [taskId, setTaskId] = useState<string>();
@@ -31,24 +33,27 @@ export default function SubmissionPage() {
   const [pageSize, setPageSize] = useState(10);
   const [historyPage, setHistoryPage] = useState(1);
   const [historyPageSize, setHistoryPageSize] = useState(10);
-  const candidates = useApi<Page<Formula>>(`/api/formulas?category=candidates&grade=${grade}&page=${page}&page_size=${pageSize}`);
+  const candidateGrade = ranked ? `RANKED_${minimumGrade}` : grade;
+  const candidates = useApi<Page<Formula>>(`/api/formulas?category=candidates&grade=${candidateGrade}&page=${page}&page_size=${pageSize}`);
+  const scopeName = ranked ? (zh ? `${gradeName(minimumGrade)} 及以上（从高到低）` : `${gradeName(minimumGrade)} and above, best first`) : gradeName(grade);
   const history = useApi<Page<Submission>>(`/api/submissions?page=${historyPage}&page_size=${historyPageSize}`);
   const submit = () => modal.confirm({
     title: zh ? "提交公式到 WorldQuant BRAIN" : "Submit Alphas to WorldQuant BRAIN",
-    content: zh ? `从 ${gradeName(grade)} 候选中复检并提交，成功 ${count} 条后停止；先恢复未完成项，检查失败跳过，候选不足则提前结束。` : `Recheck and submit ${gradeName(grade)} candidates until ${count} submissions succeed. Unfinished submissions are resumed first; failed checks are skipped and an empty queue ends processing.`,
+    content: zh ? `从 ${scopeName} 候选中复检并提交，成功 ${count} 条后停止；先恢复未完成项，检查失败跳过，候选不足则提前结束。` : `Recheck and submit ${scopeName} candidates until ${count} submissions succeed. Unfinished submissions are resumed first; failed checks are skipped and an empty queue ends processing.`,
     okText: zh ? "确认提交" : "Confirm submission", cancelText: zh ? "取消" : "Cancel",
-    onOk: () => start({ kind: "submit", grade, count }),
+    onOk: () => start(ranked ? { kind: "submit", grade: "RANKED", count, minimum_grade: minimumGrade } : { kind: "submit", grade, count }),
   });
   return <ModulePage>
     {modalContext}
     <Card className="ag-list-controls" title={zh ? "提交参数" : "Submission configuration"} extra={<Button type="link" className="ag-table-action" onClick={() => setLogsOpen(true)}>{zh ? "操作日志" : "Logs"}</Button>}>
       <Form layout="inline" size="large" className="ag-run-form">
-        <Form.Item label={zh ? "公式评级" : "Alpha grade"}><Select value={grade} onChange={value => { setGrade(value); setPage(1); }} aria-label={zh ? "公式评级" : "Alpha grade"} style={{ width: 200 }} options={grades.map(value => ({ value, label: gradeName(value) }))} /></Form.Item>
+        <Form.Item label={zh ? "公式评级" : "Alpha grade"}><Select value={grade} onChange={value => { setGrade(value); setPage(1); }} aria-label={zh ? "公式评级" : "Alpha grade"} style={{ width: 220 }} options={[{ value: "RANKED", label: zh ? "全部评级（从高到低）" : "All grades, best first" }, ...grades.map(value => ({ value, label: gradeName(value) }))]} /></Form.Item>
+        {ranked && <Form.Item label={zh ? "最低评级" : "Minimum grade"}><Select value={minimumGrade} onChange={value => { setMinimumGrade(value); setPage(1); }} aria-label={zh ? "最低评级" : "Minimum grade"} style={{ width: 160 }} options={["SPECTACULAR", "EXCELLENT", "GOOD"].map(value => ({ value, label: gradeName(value) }))} /></Form.Item>}
         <Form.Item label={zh ? "成功提交数量" : "Successful submissions"}><InputNumber aria-label={zh ? "成功提交数量" : "Successful submissions"} value={count} onChange={value => setCount(value ?? 1)} min={1} max={1000} precision={0} /></Form.Item>
         <Form.Item><Button type="primary" disabled={!canOperate || !candidates.data} loading={pending} onClick={submit}>{zh ? "开始提交" : "Start submitting"}</Button></Form.Item>
       </Form>
       <Typography.Paragraph type="secondary">{zh ? "未完成的提交会先恢复；如有中断的回测，会先收尾。没有待处理项时直接结束。" : "Unfinished submissions are resumed first. Interrupted research is settled before submission; no pending work ends processing."}</Typography.Paragraph>
-      <Typography.Text type="secondary">{grade === "SPECTACULAR" ? (zh ? "从 Spectacular 队列中选择当前可提交的候选。" : "Currently eligible candidates from the Spectacular queue.") : (zh ? "从合格归档中选择该评级当前可提交的公式，按相关性和 10% 改善条件保护提交顺序。" : "Currently eligible archived formulas at this grade, ordered to preserve correlation and 10% improvement opportunities.")}</Typography.Text>
+      <Typography.Text type="secondary">{ranked ? (zh ? "按评级、综合分、夏普从高到低逐条提交，每交一条重新计算候选；正在专项优化的公式只纳入 Excellent 及以上。" : "Submits one at a time by grade, then Fitness, then Sharpe, re-reading candidates after each; formulas still being optimized join only from Excellent up.") : grade === "SPECTACULAR" ? (zh ? "从 Spectacular 队列中选择当前可提交的候选。" : "Currently eligible candidates from the Spectacular queue.") : (zh ? "从合格归档中选择该评级当前可提交的公式，按相关性和 10% 改善条件保护提交顺序。" : "Currently eligible archived formulas at this grade, ordered to preserve correlation and 10% improvement opportunities.")}</Typography.Text>
     </Card>
     <Tabs items={[
       { key: "queue", label: zh ? "待提交候选" : "Candidates", children: <div className="ag-list-table"><FormulaTable {...candidates} zh={zh} page={page} pageSize={pageSize} onOpen={setTaskId} onPage={(nextPage, nextSize) => { setPage(nextSize === pageSize ? nextPage : 1); setPageSize(nextSize); }} /></div> },

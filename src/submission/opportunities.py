@@ -20,10 +20,15 @@ def select_submission_opportunities(
 ) -> tuple[str, ...]:
     """Return independent next steps; recompute after each confirmed submission.
 
-    Prefer the step that blocks the fewest currently eligible formulas, breaking
-    ties by quality. This is a deterministic local ordering, not a claim of global
-    portfolio optimality. Correlation is pairwise, never a transitive family group.
-    The caller must partition accounts and apply UI/source filters afterwards.
+    Quality comes first: higher grade, then Fitness, then Sharpe, and only then the
+    step that blocks the fewest other eligible formulas. Submitting weaker alphas
+    first would bank more of them through the platform's 10% rule, but weak
+    submissions lower quality-weighted scores and can block a stronger alpha for
+    good. For the same reason a protected formula (still being optimized) holds a
+    candidate back only if it is at least as good. This is a deterministic local
+    ordering, not a claim of global portfolio optimality. Correlation is pairwise,
+    never a transitive family group. The caller must partition accounts and apply
+    UI/source filters afterwards.
 
     When lineage_roots maps task ids to their research lineage root, only the peak
     formula of each lineage is ever submitted. Weaker rungs stay in the qualified
@@ -47,10 +52,18 @@ def select_submission_opportunities(
                                  candidate.result.sharpe, submitted.result.sharpe)
 
     protected_states = {}
+    grades = ("INFERIOR", "AVERAGE", "GOOD", "EXCELLENT", "SPECTACULAR")
+
+    def quality(snapshot):
+        result = snapshot.result
+        grade = grades.index(result.grade) if result.grade in grades else -1
+        return (grade, result.fitness, result.sharpe)
 
     def preserves(candidate, other):
         if other.task.task_id == candidate.task.task_id or after(other, candidate) == "passed":
             return True
+        if quality(other) < quality(candidate):
+            return True  # A weaker formula never holds back a stronger one.
         # Only inspect the other's submitted-reference eligibility when this
         # candidate would block it. Unknown evidence remains protected.
         task_id = other.task.task_id
@@ -66,7 +79,6 @@ def select_submission_opportunities(
     eligible = [s for s in eligible if all(other.task.task_id == s.task.task_id
                 or correlation(s.task.task_id, other.task.task_id) is not None for other in eligible)]
     result = []
-    grades = ("INFERIOR", "AVERAGE", "GOOD", "EXCELLENT", "SPECTACULAR")
     if lineage_roots:
         # Peak over candidates, protected, and already submitted: a weaker rung
         # waits in the archive while a better formula of the same lineage is
@@ -80,22 +92,22 @@ def select_submission_opportunities(
             if snapshot.result is None or snapshot.result.grade not in grades:
                 continue  # Unknown quality never suppresses a qualified candidate.
             root = lineage_roots.get(task_id, task_id)
-            quality = (grades.index(snapshot.result.grade), snapshot.result.sharpe,
-                       snapshot.result.fitness)
+            peak_key = (grades.index(snapshot.result.grade), snapshot.result.sharpe,
+                        snapshot.result.fitness)
             # Earlier finish wins ties, matching the standing order preference.
             tiebreak = (snapshot.task.finished_at or "", task_id)
             incumbent = peaks.get(root)
-            if (incumbent is None or quality > incumbent[0]
-                    or (quality == incumbent[0] and tiebreak < incumbent[1])):
-                peaks[root] = (quality, tiebreak, snapshot)
+            if (incumbent is None or peak_key > incumbent[0]
+                    or (peak_key == incumbent[0] and tiebreak < incumbent[1])):
+                peaks[root] = (peak_key, tiebreak, snapshot)
         peak_ids = {snapshot.task.task_id for _, _, snapshot in peaks.values()}
         eligible = [snapshot for snapshot in eligible if snapshot.task.task_id in peak_ids]
     while eligible:
         def order(s):
             blocked = sum(other.task.task_id != s.task.task_id and after(other, s) != "passed"
                           for other in eligible)
-            return (blocked, -grades.index(s.result.grade), -s.result.sharpe, -s.result.fitness,
-                    s.task.finished_at, s.task.task_id)
+            grade, fitness, sharpe = quality(s)
+            return (-grade, -fitness, -sharpe, blocked, s.task.finished_at, s.task.task_id)
         chosen = min(eligible, key=order)
         result.append(chosen.task.task_id)
         # Related successors wait for this step to be confirmed. Incompatible
