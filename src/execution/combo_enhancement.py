@@ -94,7 +94,10 @@ def _companions(connection: sqlite3.Connection, account_scope: str) -> tuple[Enh
            JOIN backtest_results r ON r.task_id = i.task_id
            WHERE t.account_scope = ? AND t.status = 'completed'
              AND t.platform_alpha_id IS NOT NULL AND i.template_id != ?
-             AND abs(r.sharpe) >= ?""",
+             AND abs(r.sharpe) >= ?
+             -- A signal piling its book into a few names passes that flaw to every mix.
+             AND NOT EXISTS (SELECT 1 FROM backtest_checks k WHERE k.task_id = t.task_id
+                             AND k.check_name = 'CONCENTRATED_WEIGHT' AND k.status = 'FAIL')""",
         (account_scope, COMBO_TEMPLATE_ID, MIN_COMPANION_ABS_SHARPE),
     ).fetchall()
     rows = sorted(rows, key=lambda row: (-abs(row[2]), row[1]))

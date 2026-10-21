@@ -31,3 +31,15 @@ def test_default_run_config_survives_a_long_network_drop():
     root = Path(__file__).resolve().parents[2] / "config"
     limits = load_automated_run_limits(root / "run.default.json", cycles=1)
     assert request_outage_tolerance_seconds(limits.max_request_failures) >= 2 * 60 * 60
+
+
+def test_formal_check_rate_limit_waits_like_the_pnl_limit():
+    from execution.request_failures import is_slow_rate_limit
+    from worldquant.client import WorldQuantRequestError
+
+    def error(code, status):
+        return WorldQuantRequestError(code, status_code=status, retryable=True, outcome_unknown=False)
+
+    assert is_slow_rate_limit(error("worldquant_formal_check_http_error", 429))
+    assert not is_slow_rate_limit(error("worldquant_formal_check_http_error", 503))
+    assert not is_slow_rate_limit(error("worldquant_submission_http_error", 429))

@@ -78,3 +78,13 @@ class ComboEnhancementCompanionTests(unittest.TestCase):
             save_pnl_series(connection, series(copy.task.platform_alpha_id, increments, "group-account"))
             offered = self._offered(connection, (parent,))
         self.assertEqual(offered[parent.task.platform_alpha_id], [strong.task.platform_alpha_id])
+
+    def test_a_concentrated_signal_is_never_a_companion(self):
+        with open_database(self.database_path) as connection:
+            parent = complete_candidate(connection, prepare_candidate(connection), grade="AVERAGE")
+            concentrated = self._companion(connection, sharpe=1.3)
+            clean = self._companion(connection, sharpe=0.9)
+            connection.execute("UPDATE backtest_checks SET status='FAIL' WHERE task_id=? "
+                               "AND check_name='CONCENTRATED_WEIGHT'", (concentrated.task.task_id,))
+            offered = self._offered(connection, (parent,))
+        self.assertEqual(offered[parent.task.platform_alpha_id], [clean.task.platform_alpha_id])

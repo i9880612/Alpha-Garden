@@ -18,6 +18,10 @@ from worldquant.client import WorldQuantRequestError
 # maps to an outage length: 30 consecutive faults wait about 2 hours before stopping.
 _FIRST_RETRY_DELAY_SECONDS = 5.0
 _MAX_RETRY_DELAY_SECONDS = 300.0
+# Rate-limited endpoints that refill slowly: the formal check allows a burst of about six
+# reads and then about one a minute, so 5-40 second retries were mostly refused again.
+FORMAL_CHECK_RATE_LIMIT_CODE = "worldquant_formal_check_http_error"
+_SLOW_RATE_LIMIT_DELAY_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,9 +54,8 @@ def handle_automated_request_failure(
         return AutomatedRequestFailure(stopped, None)
 
     local_retry_delay = request_retry_delay_seconds(run.request_failure_count)
-    if (isinstance(error, PnlAccountRequestError) and error.status_code == 429
-            and error.retry_after_seconds is None):
-        local_retry_delay = max(60.0, local_retry_delay)
+    if (is_slow_rate_limit(error) and error.retry_after_seconds is None):
+        local_retry_delay = max(_SLOW_RATE_LIMIT_DELAY_SECONDS, local_retry_delay)
     retry_delay = max(
         local_retry_delay,
         error.retry_after_seconds or 0.0,
@@ -71,6 +74,12 @@ def handle_automated_request_failure(
             None if updated.status == "failed" else retry_delay
         ),
     )
+
+
+def is_slow_rate_limit(error: WorldQuantRequestError) -> bool:
+    """429 from an endpoint whose allowance refills about once a minute."""
+    return error.status_code == 429 and (
+        isinstance(error, PnlAccountRequestError) or error.code == FORMAL_CHECK_RATE_LIMIT_CODE)
 
 
 def request_retry_delay_seconds(previous_failures: int) -> float:

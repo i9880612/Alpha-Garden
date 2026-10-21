@@ -112,7 +112,11 @@ class RunProgress:
             logging.getLogger(LOGGER_NAME).info("结果列：状态 | 平台评级 | 轮次/序号 | 探索/SC治理/变异/反转 | Alpha ID | S=夏普 F=适应度 T=换手率；通过/未通过/待定仅表示基础检查，评级缺失显示未知，异常见行末原因")
         if advance.task_id and advance.backtest_action not in {None, "cycle_terminal"}:
             self.backtest(advance.task_id, action=advance.backtest_action)
-        if advance.action == "request_retry_scheduled":
+        if advance.action == "request_retry_scheduled" and (
+                advance.run.last_request_status_code == 429
+                and advance.run.last_request_failure_code == "worldquant_formal_check_http_error"):
+            self.notice(f"入队检查被平台限速，{advance.retry_after_seconds:g} 秒后再查（回测结果不受影响）")
+        elif advance.action == "request_retry_scheduled":
             self.notice(
                 f"请求暂未成功（{advance.run.last_request_failure_code}），"
                 f"{advance.retry_after_seconds:g} 秒后重试"
