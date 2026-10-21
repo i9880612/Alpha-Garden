@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from evaluation.correlation import (
     CORRELATION_CALENDAR_YEARS, CORRELATION_CUTOFF, MIN_CORRELATION_INTERVALS, correlation_check,
-    submitted_sharpe,
+    sharpe_improves, submitted_sharpe,
 )
 
 from learning.pnl import PnlCorrelations
@@ -50,6 +50,32 @@ def assess_seed_redundancy(
     if "failed" in states:
         return "failed"
     return "pending" if "pending" in states else "passed"
+
+
+def blocking_seeds(
+    snapshot: BacktestSnapshot,
+    seeds: tuple[BacktestSnapshot, ...],
+    *, correlations: PnlCorrelations,
+) -> tuple[BacktestSnapshot, ...]:
+    """The seeds this candidate overlaps at or above MAX_SEED_CORRELATION."""
+    key = (snapshot.task.account_scope, snapshot.task.platform_alpha_id)
+    return tuple(
+        seed for seed in seeds
+        if seed.task.task_id != snapshot.task.task_id
+        and seed.task.account_scope == snapshot.task.account_scope
+        and seed_overlap_check(correlations.correlation(
+            key, (seed.task.account_scope, seed.task.platform_alpha_id),
+            minimum_intervals=MIN_SEED_CORRELATION_INTERVALS,
+            calendar_years=CORRELATION_CALENDAR_YEARS)) == "failed"
+    )
+
+
+def clearly_stronger(candidate: BacktestSnapshot, seed: BacktestSnapshot) -> bool:
+    """At least 10% more Sharpe (the platform's own bar) and no worse Fitness."""
+    if candidate.result is None or seed.result is None:
+        return False
+    return bool(sharpe_improves(abs(candidate.result.sharpe), abs(seed.result.sharpe))) and (
+        abs(candidate.result.fitness) >= abs(seed.result.fitness))
 
 
 def seed_overlap_check(correlation: float | None) -> str:

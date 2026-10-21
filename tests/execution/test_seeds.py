@@ -241,7 +241,7 @@ class SignalSeedExecutionTests(unittest.TestCase):
             self.assertEqual(load_signal_frontiers(connection), before)
             self.assertEqual(list_backtest_mutations(connection), mutations)
 
-    def test_highly_correlated_candidate_does_not_create_redundant_seed_root(self):
+    def test_highly_correlated_candidate_replaces_an_unresearched_seed_or_is_rejected(self):
         import math
         from tests.learning.test_seed_correlation import series
         with open_database(self.database_path) as connection:
@@ -249,13 +249,36 @@ class SignalSeedExecutionTests(unittest.TestCase):
             self.assertEqual(len(synchronize_signal_seeds(connection)), 1)
             # Same signal as the seed: redundant.
             duplicate = self._completed(connection, "rank(open)", "2", 2.0, 1.1, capture_pnl=False)
-            # Same signal with a fifteen percent better Sharpe: still the same idea. The
-            # platform would let it be submitted, but it gets no second mutation budget.
+            # Same signal with a fifteen percent better Sharpe: still the same idea, so
+            # it never becomes a second root. The seed has no research yet, so the
+            # stronger version takes its place as the idea's one seed.
             improved = self._completed(connection, "rank(volume)", "3", 2.3, 1.1, capture_pnl=False)
             pnl = [math.sin(i) for i in range(300)]
             for alpha in ("alpha_1", "alpha_2", "alpha_3"):
                 save_pnl_series(connection, series(alpha, pnl, "group-account"))
-            self.assertEqual(synchronize_signal_seeds(connection), ())
+            created = synchronize_signal_seeds(connection)
+            self.assertEqual([record.root_task_id for record in created], [improved.task.task_id])
+            self.assertEqual(
+                [record.root_task_id for record in list_signal_seeds(connection)],
+                [improved.task.task_id],
+            )
+            self.assertNotIn(duplicate.task.task_id,
+                             [record.root_task_id for record in list_signal_seeds(connection)])
+
+    def test_researched_seed_keeps_its_place_against_a_stronger_copy(self):
+        import math
+        from tests.learning.test_seed_correlation import series
+        with open_database(self.database_path) as connection:
+            seed = self._completed(connection, "rank(close)", "1", 2.0, 1.1)
+            self.assertEqual(len(synchronize_signal_seeds(connection)), 1)
+            self._child(connection, seed.task.task_id, "rank(ts_mean(close,5))", "2",
+                        sharpe=1.5, fitness=0.9)
+            improved = self._completed(connection, "rank(volume)", "3", 2.6, 1.3, capture_pnl=False)
+            pnl = [math.sin(i) for i in range(300)]
+            for alpha in ("alpha_1", "alpha_3"):
+                save_pnl_series(connection, series(alpha, pnl, "group-account"))
+            self.assertEqual(synchronize_signal_seeds(
+                connection, candidate_task_ids=(improved.task.task_id,)), ())
             self.assertEqual(
                 [record.root_task_id for record in list_signal_seeds(connection)],
                 [seed.task.task_id],

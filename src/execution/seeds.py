@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime
+from execution.progress import LOGGER_NAME
 from execution.self_correlation import load_self_correlation_references
 from execution.qualified_candidates import load_qualified_evolution
 from generation.direction import DIRECTION_REVERSAL, reverse_direction_candidate
@@ -17,7 +19,13 @@ from learning.frontiers import (
 )
 from learning.seeds import assess_signal_seed
 from learning.pnl import PnlCorrelations
-from learning.seed_correlation import assess_seed_correlation, assess_seed_redundancy
+from learning.seed_correlation import (
+    assess_seed_correlation,
+    assess_seed_redundancy,
+    blocking_seeds,
+    clearly_stronger,
+    submitted_seed,
+)
 from learning.recovery import recovery_task_ids
 from execution.recovery import load_recovery_comparisons
 from persistence.pnl import list_pnl_series
@@ -31,6 +39,7 @@ from persistence.backtests import (
     list_completed_backtests,
 )
 from persistence.seeds import (
+    delete_signal_seed,
     SignalSeedRecord,
     create_signal_seed,
     list_signal_seeds,
@@ -92,6 +101,7 @@ def synchronize_signal_seeds(
     # Newly admitted seeds block later candidates in the same batch, so batch
     # admission matches sequential admission.
     admitted_snapshots = list(seed_snapshots)
+    parented = {mutation.parent_task_id for mutation in mutation_children.values()}
     for snapshot in candidates:
         mutation = mutation_children.get(snapshot.task.task_id)
         if mutation is not None:
@@ -120,7 +130,32 @@ def synchronize_signal_seeds(
         if (assess_seed_correlation(snapshot, references, series, correlations=correlations).state not in {"passed", "submitted"}
                 and snapshot.task.task_id not in repair_roots):
             continue
-        if assess_seed_redundancy(snapshot, tuple(admitted_snapshots), correlations=correlations) != "passed":
+        redundancy = assess_seed_redundancy(snapshot, tuple(admitted_snapshots), correlations=correlations)
+        if redundancy == "failed":
+            # A clearly stronger version of an idea whose seed has not been researched
+            # yet replaces it, so each idea is represented by its best formula instead of
+            # whichever version finished first. Researched seeds keep their lineage.
+            blockers = blocking_seeds(snapshot, tuple(admitted_snapshots), correlations=correlations)
+            replaceable = bool(blockers) and all(
+                blocker.task.task_id in (seed_ids | {record.root_task_id for record in created})
+                and blocker.task.task_id not in parented
+                and blocker.task.task_id not in repair_roots
+                and not submitted_seed(blocker, references)
+                and clearly_stronger(snapshot, blocker)
+                for blocker in blockers
+            )
+            remaining = tuple(item for item in admitted_snapshots if item not in blockers)
+            if not replaceable or assess_seed_redundancy(
+                    snapshot, remaining, correlations=correlations) != "passed":
+                continue
+            for blocker in blockers:
+                delete_signal_seed(connection, blocker.task.task_id)
+                created = [record for record in created if record.root_task_id != blocker.task.task_id]
+                logging.getLogger(LOGGER_NAME).info(
+                    "[种子] %s 由更强的同类公式 %s 接替（原种子尚未研究，回测结果保留）",
+                    blocker.task.platform_alpha_id, snapshot.task.platform_alpha_id)
+            admitted_snapshots = list(remaining)
+        elif redundancy != "passed":
             continue
         assert snapshot.task.finished_at is not None
         created.append(
