@@ -27,15 +27,21 @@ from generation.structure_limits import fits_formula_structure_limits
 from generation.unit_validation import find_coarse_unit_issues
 from generation.validation import validate_formula
 
-FAMILIES = ("price_action", "valuation", "quality", "growth_financing", "analyst", "alternative")
+FAMILIES = ("price_action", "valuation", "quality", "growth_financing", "analyst", "alternative", "linked")
 FAMILY_LABELS = {
     "price_action": "价格行为", "valuation": "估值", "quality": "质量",
     "growth_financing": "成长与融资", "analyst": "分析师", "alternative": "另类数据",
+    "linked": "关联公司",
 }
 # Operators templates must never produce (data-availability signals, not economic ones).
 FORBIDDEN_OPERATORS = frozenset({"ts_count_nans", "days_from_last_change"})
 STRATEGY_LABEL_PREFIX = "idea:"
 _BACKFILL_LOOKBACK = {"quarterly": 66, "event": 22}
+# The platform already carries fundamental values forward between filings: without
+# ts_backfill three fundamental alphas backtested the same (daily PnL correlation
+# 0.996-0.997), while an analyst-estimate alpha lost 4% of its Sharpe (2026-10-21). Only
+# fundamentals drop the layer.
+_UNFILLED_KINDS = frozenset({"fundamental"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +62,9 @@ class IdeaVariant:
     expression: Expression
     # Every field hand-reviewed; such variants are drawn before rule-profiled ones.
     reviewed: bool = True
+    # The same variant as written before fundamentals dropped ts_backfill, if different:
+    # a variant tested in that form is not tested again.
+    legacy_fingerprint: str | None = None
 
     @property
     def formula(self) -> str:
@@ -98,10 +107,12 @@ class IdeaBatch:
 # --- Field selection --------------------------------------------------------------
 
 class _FieldPool:
-    def __init__(self, catalog: GenerationCatalog, profiles: tuple[FieldProfile, ...]) -> None:
+    def __init__(self, catalog: GenerationCatalog, profiles: tuple[FieldProfile, ...], *,
+                 backfill_fundamentals: bool = False) -> None:
         self.catalog = catalog
         self.profiles = profiles
         self.by_id = {profile.field_id: profile for profile in profiles}
+        self.backfill_fundamentals = backfill_fundamentals
 
     def select(self, predicate: Callable[[FieldProfile], bool]) -> tuple[FieldProfile, ...]:
         return tuple(profile for profile in self.profiles if predicate(profile))
@@ -115,7 +126,7 @@ class _FieldPool:
         if profile.field_type == "VECTOR":
             text = f"vec_avg({text})"
         lookback = _BACKFILL_LOOKBACK.get(profile.cadence or "")
-        if lookback is not None:
+        if lookback is not None and (self.backfill_fundamentals or profile.kind not in _UNFILLED_KINDS):
             text = f"ts_backfill({text},lookback={lookback})"
         return text
 
@@ -161,34 +172,41 @@ def _metric_pairs(
 
 # --- Templates ----------------------------------------------------------------------
 
+# Price-volume templates were the only ones that kept producing seeds, and with two
+# price fields and two or three windows each they ran out after 25 variants. They now
+# span open as well and a fuller window ladder (2026-10-21).
 def _price_fields(pool: _FieldPool) -> tuple[str, ...]:
-    return tuple(name for name in ("close", "vwap") if pool.has(name))
+    return tuple(name for name in ("close", "vwap", "open") if pool.has(name))
 
 
 def _reversal(pool):
     for name in _price_fields(pool):
-        for w in (3, 5, 10):
+        for w in (1, 2, 3, 5, 10, 15, 22):
             yield (name,), w, f"-({name}/ts_delay({name},{w})-1)"
 
 
 def _mean_deviation(pool):
     for name in _price_fields(pool):
-        for w in (10, 22, 66):
+        for w in (5, 10, 22, 44, 66):
             yield (name,), w, f"-({name}-ts_mean({name},{w}))/ts_std_dev({name},{w})"
 
 
 def _momentum(pool):
     if pool.has("close"):
-        for w in (60, 120, 230):
-            yield ("close",), w, f"ts_delay(close,20)/ts_delay(close,{w + 20})-1"
+        for skip in (5, 20):
+            for w in (60, 120, 230):
+                yield ("close",), w, f"ts_delay(close,{skip})/ts_delay(close,{w + skip})-1"
 
 
 def _price_volume(pool):
     if not pool.has("volume"):
         return
     for name in _price_fields(pool):
-        for w in (10, 22):
+        for w in (5, 10, 22, 44):
             yield (name, "volume"), w, f"-ts_corr({name},volume,{w})"
+    if pool.has("returns") and pool.has("adv20"):
+        for w in (5, 10, 22, 44):
+            yield ("returns", "volume", "adv20"), w, f"-ts_corr(returns,volume/adv20,{w})"
 
 
 def _low_vol(pool):
@@ -206,15 +224,91 @@ def _intraday_position(pool):
     # high==low forces close==high, so the ratio is 0/0 (NaN), never x/0.
     position = "(high-close)/(high-low)"
     yield ("high", "low", "close"), None, position
-    for w in (5, 10):
+    for w in (3, 5, 10, 15, 22):
         yield ("high", "low", "close"), w, f"ts_mean({position},{w})"
 
 
 def _abnormal_volume(pool):
     if not pool.has("volume"):
         return
-    for w in (10, 20, 60):
+    for w in (5, 10, 20, 40, 60):
         yield ("volume",), w, f"volume/ts_mean(volume,{w})"
+    if pool.has("adv20"):
+        yield ("volume", "adv20"), None, "volume/adv20"
+
+
+def _smoothed(fields, body, windows, *, sign=""):
+    """The raw daily value, then its average over each window."""
+    yield fields, None, f"{sign}({body})"
+    for w in windows:
+        yield fields, w, f"{sign}ts_mean({body},{w})"
+
+
+def _overnight_gap(pool):
+    if pool.has("open") and pool.has("close"):
+        # Written as a difference over the price, not a ratio minus one: a constant next
+        # to a ratio of two fields fails the local unit check.
+        yield from _smoothed(("open", "close"), "(open-ts_delay(close,1))/ts_delay(close,1)",
+                             (3, 5, 10, 22), sign="-")
+
+
+def _intraday_return(pool):
+    if pool.has("open") and pool.has("close"):
+        yield from _smoothed(("open", "close"), "(close-open)/open", (3, 5, 10, 22), sign="-")
+
+
+def _close_vs_vwap(pool):
+    if pool.has("close") and pool.has("vwap"):
+        yield from _smoothed(("close", "vwap"), "(close-vwap)/vwap", (3, 5, 10), sign="-")
+
+
+def _daily_range(pool):
+    if all(pool.has(name) for name in ("high", "low", "close")):
+        for w in (5, 10, 22, 66):
+            yield ("high", "low", "close"), w, f"-ts_mean((high-low)/close,{w})"
+
+
+def _share_turnover(pool):
+    if pool.has("volume") and pool.has("sharesout"):
+        for w in (5, 22, 66, 120):
+            yield ("volume", "sharesout"), w, f"-ts_mean(volume/sharesout,{w})"
+
+
+def _year_high(pool):
+    # Where today's price sits within its recent range: near the top tends to keep going.
+    if pool.has("close"):
+        for w in (120, 250):
+            yield ("close",), w, f"ts_rank(close,{w})"
+
+
+def _dividend_yield(pool):
+    if pool.has("dividend") and pool.has("close"):
+        yield ("dividend", "close"), 250, "ts_sum(dividend,250)/close"
+
+
+def _linked_fields(pool):
+    return pool.select(lambda p: p.kind == "relationship" and p.scale == "ratio")
+
+
+def _linked_momentum(pool):
+    # News about customers, suppliers and competitors reaches a stock's price late.
+    for profile in _linked_fields(pool):
+        atom = pool.atom(profile)
+        for w in (5, 10, 22, 66):
+            yield (profile.field_id,), w, _signed(profile, f"ts_mean({atom},{w})")
+
+
+def _linked_gap(pool):
+    if not pool.has("returns"):
+        return
+    # Only the averaged returns of linked companies are on the same scale as returns;
+    # a sign field minus a return means nothing.
+    for profile in _linked_fields(pool):
+        if not profile.field_id.startswith("rel_ret_"):
+            continue
+        atom = pool.atom(profile)
+        for w in (5, 10, 22, 66):
+            yield (profile.field_id, "returns"), w, _signed(profile, f"ts_mean({atom}-returns,{w})")
 
 
 def _value(pool):
@@ -364,8 +458,15 @@ TEMPLATES: tuple[IdeaTemplate, ...] = (
     IdeaTemplate("low_vol", "price_action", "低波动、低贝塔的股票长期表现更好", _low_vol),
     IdeaTemplate("intraday_position", "price_action", "收盘离当日高点越远，之后越容易反弹", _intraday_position),
     IdeaTemplate("abnormal_volume", "price_action", "成交量异常放大的股票之后表现更好", _abnormal_volume),
+    IdeaTemplate("overnight_gap", "price_action", "开盘相对前收跳得太多，之后会回落", _overnight_gap),
+    IdeaTemplate("intraday_return", "price_action", "开盘到收盘的涨跌会部分回吐", _intraday_return),
+    IdeaTemplate("close_vs_vwap", "price_action", "收盘偏离当日均价，之后会回归", _close_vs_vwap),
+    IdeaTemplate("daily_range", "price_action", "日内振幅小的股票之后表现更好", _daily_range),
+    IdeaTemplate("share_turnover", "price_action", "换手率低的股票有流动性溢价", _share_turnover),
+    IdeaTemplate("year_high", "price_action", "价格接近一段时间的高点，之后更容易继续涨", _year_high),
     IdeaTemplate("value", "valuation", "同样的基本面，价格越低越好", _value),
     IdeaTemplate("forward_value", "valuation", "预期盈利相对价格越高越好", _forward_value),
+    IdeaTemplate("dividend_yield", "valuation", "股息率高的股票长期表现更好", _dividend_yield),
     IdeaTemplate("quality", "quality", "资产回报率高的公司更好", _quality),
     IdeaTemplate("accruals", "quality", "利润主要来自账面而非现金的公司更差", _accruals),
     IdeaTemplate("fundamental_growth", "growth_financing", "基本面改善的公司更好", _fundamental_growth),
@@ -375,6 +476,8 @@ TEMPLATES: tuple[IdeaTemplate, ...] = (
     IdeaTemplate("earnings_surprise", "analyst", "业绩超预期的股票之后继续上涨", _earnings_surprise),
     IdeaTemplate("sentiment_shift", "alternative", "情绪相对自身常态的变化有信息", _sentiment_shift),
     IdeaTemplate("option_signal", "alternative", "期权市场的看法领先股价", _option_signal),
+    IdeaTemplate("linked_momentum", "linked", "客户、供应商、竞争对手的涨跌会延迟传到股价", _linked_momentum),
+    IdeaTemplate("linked_gap", "linked", "关联公司涨了而自身没跟上，之后会补涨", _linked_gap),
 )
 COMBO_TEMPLATE_ID = "combo"
 COMBO_HYPOTHESIS = "两个独立想法叠加更稳"
@@ -400,11 +503,16 @@ def build_idea_variant_pool(
         if profile.field_id in enabled_field_ids and _in_catalog(catalog, profile.field_id)
     )
     pool = _FieldPool(catalog, usable)
+    legacy_pool = _FieldPool(catalog, usable, backfill_fundamentals=True)
     exclusions: Counter[str] = Counter()
     seen: set[str] = set()
     variants: list[IdeaVariant] = []
     for template in templates:
-        for field_ids, window, body in template.expand(pool):
+        expanded = tuple(template.expand(pool))
+        legacy = tuple(template.expand(legacy_pool))
+        if len(legacy) != len(expanded):
+            legacy = (None,) * len(expanded)
+        for (field_ids, window, body), legacy_item in zip(expanded, legacy):
             outcome = _prepare_expression(f"rank({body})", catalog)
             if isinstance(outcome, str):
                 exclusions[f"{template.template_id}:{outcome}"] += 1
@@ -414,11 +522,17 @@ def build_idea_variant_pool(
                 exclusions[f"{template.template_id}:duplicate"] += 1
                 continue
             seen.add(fingerprint)
+            legacy_fingerprint = None
+            if legacy_item is not None and legacy_item[2] != body:
+                legacy_outcome = _prepare_expression(f"rank({legacy_item[2]})", catalog)
+                if not isinstance(legacy_outcome, str):
+                    legacy_fingerprint = formula_fingerprint(legacy_outcome)
             variants.append(IdeaVariant(
                 template_id=template.template_id, family=template.family,
                 hypothesis=template.hypothesis, field_ids=field_ids, window=window,
                 expression=outcome,
                 reviewed=all(_is_reviewed(profiles, field_id) for field_id in field_ids),
+                legacy_fingerprint=legacy_fingerprint,
             ))
     return IdeaVariantPool(tuple(variants), tuple(sorted(exclusions.items())))
 
@@ -442,7 +556,8 @@ def plan_idea_batch(
     random = Random(seed)
     remaining: dict[str, dict[str, list[IdeaVariant]]] = defaultdict(dict)
     for template_id, variants in sorted(pool.by_template().items()):
-        open_variants = [v for v in variants if v.fingerprint not in excluded_fingerprints]
+        open_variants = [v for v in variants if v.fingerprint not in excluded_fingerprints
+                         and v.legacy_fingerprint not in excluded_fingerprints]
         random.shuffle(open_variants)
         # pop() takes from the end: reviewed variants go last so they are used up first.
         open_variants.sort(key=lambda variant: variant.reviewed)

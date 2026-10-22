@@ -132,7 +132,7 @@ class IdeaPoolLoadingTests(unittest.TestCase):
         pool = self._load()
         self.assertEqual(set(pool.by_template()),
                          {"reversal", "mean_deviation", "momentum", "price_volume", "low_vol",
-                          "abnormal_volume"})
+                          "abnormal_volume", "close_vs_vwap"})
 
     def test_catalog_changes_are_reconciled_and_rule_fields_extend_the_pool(self):
         write_profiles(self.database_path, [

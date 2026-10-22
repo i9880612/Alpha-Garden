@@ -53,7 +53,8 @@ def _catalog(fields=None, drop_operators=()):
         _operator("abs", x), _operator("vec_avg", x),
         _operator("ts_backfill", x, ("lookback", "window", True), ("k", "int", True)),
         _operator("ts_corr", x, ("y", "expr", False), d),
-        *(_operator(name, x, d) for name in ("ts_delay", "ts_delta", "ts_mean", "ts_std_dev")),
+        *(_operator(name, x, d) for name in ("ts_delay", "ts_delta", "ts_mean", "ts_std_dev", "ts_sum",
+                                             "ts_rank")),
     )
     operators = tuple(op for op in operators if op.name not in drop_operators)
     fields = fields if fields is not None else tuple(
@@ -74,6 +75,10 @@ def _p(field_id, kind, cadence, scale, direction="unknown", role=None, metric=No
 _PROFILES = (
     _p("close", "price", "daily", "price", dataset="pv1"),
     _p("vwap", "price", "daily", "price", dataset="pv1"),
+    _p("open", "price", "daily", "price", dataset="pv1"),
+    _p("adv20", "volume", "daily", "count", dataset="pv1"),
+    _p("dividend", "fundamental", "event", "per_share", "+", dataset="pv1"),
+    _p("rel_ret_comp", "relationship", "daily", "ratio", "+", dataset="pv13"),
     _p("high", "price", "daily", "price", dataset="pv1"),
     _p("low", "price", "daily", "price", dataset="pv1"),
     _p("returns", "price", "daily", "ratio", dataset="pv1"),
@@ -142,8 +147,9 @@ def test_directions_shape_the_sign_and_unknown_is_generated_positive():
     assert "rank(-iv30)" in formulas
     assert "rank(-pcr30)" in formulas
     assert "rank(snt-ts_mean(snt,22))" in formulas
-    assert "rank(ts_backfill(eps,lookback=66)/close)" in formulas
-    assert "rank(ts_backfill(income,lookback=66)/cap)" in formulas
+    # Fundamentals are used as the platform carries them; no ts_backfill layer.
+    assert "rank(eps/close)" in formulas
+    assert "rank(income/cap)" in formulas
     assert not any("debt,lookback=66)/cap" in f for f in formulas)  # value skips known-bad items
 
 
@@ -193,13 +199,13 @@ def test_missing_operator_only_removes_templates_that_need_it():
 
 def test_batch_is_deterministic_and_spreads_evenly_over_families():
     pool = _pool()
-    first = plan_idea_batch(pool, target_count=12, seed=3)
-    again = plan_idea_batch(pool, target_count=12, seed=3)
+    first = plan_idea_batch(pool, target_count=2 * len(FAMILIES), seed=3)
+    again = plan_idea_batch(pool, target_count=2 * len(FAMILIES), seed=3)
     assert [c.candidate.formula for c in first.candidates] == [
         c.candidate.formula for c in again.candidates]
     counts = Counter(c.variant.family for c in first.candidates)
     assert set(counts) == set(FAMILIES) and set(counts.values()) == {2}
-    other = plan_idea_batch(pool, target_count=12, seed=4)
+    other = plan_idea_batch(pool, target_count=2 * len(FAMILIES), seed=4)
     assert [c.candidate.formula for c in other.candidates] != [
         c.candidate.formula for c in first.candidates]
     assert all(c.candidate.strategy_label == "idea:" + c.variant.template_id
@@ -296,7 +302,7 @@ def test_combo_planning_spreads_parents_and_needs_enough_shared_days():
     t = _pool(catalog=catalog).by_template()
     star = _parent(t["reversal"][0], 2.0, 0.11)
     others = [_parent(v, 1.0, 0.37 + k * 0.29) for k, v in
-              enumerate(t["value"] + t["forward_value"] + t["quality"])]
+              enumerate(t["value"][:1] + t["forward_value"][:1] + t["quality"][:1])]
     combos = plan_combo_variants([star, *others], catalog)
     assert sum("reversal" in v.hypothesis for v in combos) == COMBO_MAX_USES_PER_PARENT
     short = ComboParent(t["momentum"][0], 1.5, dict(list(star.daily_pnl.items())[:100]))
@@ -310,7 +316,7 @@ def test_near_duplicate_parents_share_one_idea_budget():
     twins = [_parent(v, 1.5 - 0.1 * k, 0.11, noise=0.05 * k)
              for k, v in enumerate(t["reversal"][:2] + t["mean_deviation"][:1])]
     others = [_parent(v, 1.0, 0.37 + k * 0.29) for k, v in
-              enumerate(t["value"] + t["forward_value"] + t["quality"])]
+              enumerate(t["value"][:1] + t["forward_value"][:1] + t["quality"][:1])]
     combos = plan_combo_variants([*twins, *others], catalog)
     price_side = [v for v in combos if "reversal" in v.hypothesis or "mean_deviation" in v.hypothesis]
     assert len(price_side) == COMBO_MAX_USES_PER_PARENT  # one budget for the three twins
@@ -345,3 +351,26 @@ def test_combo_needs_two_families_and_stays_valid():
     assert validate_formula(combo.expression, catalog).is_valid
     assert build_combo_variant(value, reversal, catalog).formula == combo.formula
     assert build_combo_variant(combo, value, catalog) is None
+
+
+def test_new_price_and_linked_templates_are_generated():
+    t = _pool().by_template()
+    assert "rank(-((open-ts_delay(close,1))/ts_delay(close,1)))" in {v.formula for v in t["overnight_gap"]}
+    assert {v.window for v in t["reversal"]} == {1, 2, 3, 5, 10, 15, 22}
+    assert {f for v in t["reversal"] for f in v.field_ids} == {"close", "vwap", "open"}
+    assert {v.formula for v in t["linked_momentum"]} >= {"rank(ts_mean(rel_ret_comp,5))"}
+    assert all(v.family == "linked" for v in t["linked_momentum"] + t["linked_gap"])
+
+
+def test_fundamentals_drop_backfill_but_remember_their_older_form():
+    pool = _pool()
+    by_formula = {v.formula: v for v in pool.variants}
+    variant = by_formula["rank(income/cap)"]
+    assert variant.legacy_fingerprint is not None
+    # Analyst fields keep the layer and have no older form.
+    analyst = [v for v in pool.variants if "est_ebit" in v.field_ids]
+    assert analyst and all("ts_backfill(est_ebit" in v.formula and v.legacy_fingerprint is None for v in analyst)
+    # A variant tested in its older form is not offered again.
+    batch = plan_idea_batch(pool, target_count=len(pool.variants), seed=1,
+                            excluded_fingerprints=frozenset({variant.legacy_fingerprint}))
+    assert "rank(income/cap)" not in {c.variant.formula for c in batch.candidates}
