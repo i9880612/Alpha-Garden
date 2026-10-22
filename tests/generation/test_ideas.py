@@ -360,6 +360,11 @@ def test_new_price_and_linked_templates_are_generated():
     assert {f for v in t["reversal"] for f in v.field_ids} == {"close", "vwap", "open"}
     assert {v.formula for v in t["linked_momentum"]} >= {"rank(ts_mean(rel_ret_comp,5))"}
     assert all(v.family == "linked" for v in t["linked_momentum"] + t["linked_gap"])
+    # `returns` carries a price unit on the platform and rel_ret_* none: never subtract them.
+    assert t["linked_gap"]
+    assert all("returns" not in v.formula for v in t["linked_gap"])
+    assert "rank(ts_mean(rel_ret_comp-(close/ts_delay(close,1)-1),22))" in {
+        v.formula for v in t["linked_gap"]}
 
 
 def test_fundamentals_drop_backfill_but_remember_their_older_form():

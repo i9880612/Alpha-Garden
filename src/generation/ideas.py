@@ -299,16 +299,21 @@ def _linked_momentum(pool):
 
 
 def _linked_gap(pool):
-    if not pool.has("returns"):
+    if not pool.has("close"):
         return
-    # Only the averaged returns of linked companies are on the same scale as returns;
-    # a sign field minus a return means nothing.
+    # Only the averaged returns of linked companies are on the same scale as a daily
+    # return; a sign field minus a return means nothing. The platform gives `returns`
+    # a price unit while rel_ret_* have none, so rel_ret_x-returns fails unit
+    # verification; close/ts_delay(close,1)-1 is the same daily return without a unit.
+    close = pool.atom_by_id("close")
+    own_return = f"({close}/ts_delay({close},1)-1)"
     for profile in _linked_fields(pool):
         if not profile.field_id.startswith("rel_ret_"):
             continue
         atom = pool.atom(profile)
         for w in (5, 10, 22, 66):
-            yield (profile.field_id, "returns"), w, _signed(profile, f"ts_mean({atom}-returns,{w})")
+            yield (profile.field_id, "close"), w, \
+                _signed(profile, f"ts_mean({atom}-{own_return},{w})")
 
 
 def _value(pool):
