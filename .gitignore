@@ -35,7 +35,7 @@ coverage.xml
 htmlcov/
 
 artifacts/
-/docs/
+/docs/private/
 logs/
 submitted-formulas.md
 models/

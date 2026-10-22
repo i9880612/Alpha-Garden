@@ -4,286 +4,135 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-Alpha Garden is a local research workspace for **WorldQuant BRAIN**, combining a Python research engine with a bilingual web console. Set your research budget and run limits, explore new formulas, test mutations, inspect the evidence, and manage qualified results in one place.
+Alpha Garden is a local research workspace for **WorldQuant BRAIN**. A Python engine explores, mutates, backtests and checks formulas in bulk; a bilingual web console lets you watch and steer it. You set the budget and limits, and the system keeps producing formulas unattended, with a strong focus on controlling self-correlation (SC) and submitting the highest-graded results first.
 
 **Python · React · TypeScript · Ant Design · ECharts · SQLite**
 
-[Features](#features) · [Interface tour](#interface-tour) · [Quick start](#quick-start) · [Research rules](#research-rules) · [Development](#development)
-
-> Screenshots show the current frontend. The time-series and yearly/check screenshots use authorized, saved platform backtest data with formula identifiers omitted and original values preserved. Other screens use independent synthetic examples, including expressions, lineage and logs. Those example expressions did not produce the historical curve. The regular application reads your configured research database; it does not substitute demo data.
+[Features](#features) · [Quick start](#quick-start) · [How research works](#how-research-works) · [Commands](#commands) · [Development](#development) · [More docs](#more-docs)
 
 ![Alpha Garden dashboard in English: research totals, 15-day backtest activity, grades and batch progress](assets/screenshots/dashboard.en-US.jpg)
+
+> The time-series and yearly/check screenshots use authorized, saved platform backtest data with formula identifiers omitted. Expressions, lineage and logs on other screens are synthetic examples.
 
 ## Features
 
 | Workspace | What you can do |
 | --- | --- |
-| **Dashboard** | Follow 15-day backtest activity, submitted grades, available optimization attempts, batch progress and recent results. |
-| **Runs** | Start normal research or focused optimization, choose the number of cycles, inspect live logs, pause and resume an existing plan. |
-| **Seed pool & optimization** | Browse admitted seeds and active branches, follow lineage, and track each formula's remaining mutation attempts. |
-| **Formulas** | Search started backtests, inspect grades and checks, and open formula details without losing your place in the list. Unsent candidates stay in run details. |
-| **Backtest analysis** | Diagnose quality through Sharpe/Fitness, turnover, failed checks and separate platform/local correlation evidence. Drill into the matching formulas. |
-| **Qualified archive & submissions** | Review currently eligible archived formulas, submit individually or by grade and successful count, and inspect submission history. |
-| **Data catalog & operators** | Search synchronized fields and operators, inspect descriptions, coverage, definitions and parameters. |
-| **Settings** | Customize backtest defaults, research allocation, budgets, concurrency and failure limits. |
+| **Dashboard** | 15-day backtest activity, grade distribution, remaining optimization attempts, batch progress. |
+| **Runs** | Start normal research or focused optimization, set cycles, follow live logs, pause and resume. |
+| **Seed pool & optimization** | Browse seeds and research branches, lineage and remaining mutation attempts. |
+| **Formulas** | Search backtested formulas, grades and checks, and open details. |
+| **Backtest analysis** | Diagnose Sharpe / Fitness, turnover, failed checks and correlation. |
+| **Qualified archive & submissions** | Submit one at a time, by grade, or "All grades, best first". |
+| **Data catalog & operators** | Search synchronized fields and operators. |
+| **Settings** | Edit backtest defaults, research allocation, budgets, concurrency and failure limits. |
 
-The console supports **Chinese and English**, **dark and light themes**, and live progress updates. Both the web interface and CLI use the same research engine and local records.
-
-## Interface tour
-
-### Run logs
-
-A black terminal view keeps timestamps, check outcomes, platform grades, sources and metrics aligned. Colored messages distinguish results and research phases; the latest in-flight progress appears above the log.
+<details>
+<summary>More screenshots</summary>
 
 ![Run logs with colored results, aligned metrics and progress](assets/screenshots/run-logs.en-US.jpg)
-
-The console retains up to **500 lines per operation** for the current web-service session. These logs are temporary; restarting the service clears them without removing persisted research results. Log statuses, sources, stages and live progress follow the selected Chinese or English language. Platform error messages and error codes retain their original text.
-
-### Formula details
-
-Inspect the expression, backtest metrics, recorded checks, annual results and mutation history. PnL, Sharpe and Turnover curves have separate tabs. Parent and descendant links open another detail layer, preserving the current drawer and list state.
-
 ![Formula detail drawer with expression, lineage, remaining attempts and metrics](assets/screenshots/formula-details.en-US.jpg)
-
-In normal service mode, opening a detail requests PnL; the other curves load when selected. Read-only mode shows saved evidence and does not fetch platform curves. Missing data stays unavailable rather than becoming a fabricated result.
-
-**Time series**
-
-An actual saved PnL series: 1,236 observations from January 2019 to December 2023, preserving the original dates and values.
-
 ![Formula time series with the original saved historical PnL](assets/screenshots/formula-timeseries.en-US.jpg)
-
-**Yearly performance and checks**
-
-Five annual records and the saved backtest-check snapshot from the same formula. Pending checks retain their recorded status.
-
 ![Five years of performance and the corresponding platform check results](assets/screenshots/formula-yearly-checks.en-US.jpg)
-
-**Research settings, mutation and descendants**
-
-An independent example shows field and operator references, replacement of `ts_mean` with `ts_decay_linear` inside a nested expression, and three direct descendants. These illustrative expressions and descendant metrics are separate from the historical backtest above.
-
 ![Research settings, an operator replacement and direct descendant formulas](assets/screenshots/formula-research-lineage.en-US.jpg)
-
-### Quality diagnosis
-
-Filter by time, research mode, run, source and backtest configuration. Toggle scatter groups, inspect turnover ranges, and open the formulas behind a failed check. Platform self-correlation and local return correlation remain separate, with pending and unavailable evidence clearly identified.
-
 ![Quality diagnosis with Sharpe/Fitness scatter and turnover distribution](assets/screenshots/analysis.en-US.jpg)
-
-<details>
-<summary>View failed checks and correlation evidence</summary>
-
 ![Failed-check breakdown and separate platform and local correlation panels](assets/screenshots/analysis-checks.en-US.jpg)
-
-A formula can fail more than one check, so failure counts are not additive. Reference lines use recorded platform thresholds and are omitted when thresholds are missing or inconsistent. Analysis summarizes saved results; it does not start research or submit formulas.
-
-</details>
-
-### Editable run settings
-
-Backtest settings and research/run settings have separate forms. Saved defaults apply to new runs; resuming a run keeps its original plan. While an operation is active, changes can be edited and saved after it pauses or finishes.
-
-<details>
-<summary>View the settings interface</summary>
-
 ![Editable backtest settings for data scope and signal processing](assets/screenshots/settings.en-US.jpg)
 
 </details>
 
 ## Quick start
 
-### 1. Prepare the environment
+You need **Python 3.11+**, **Node.js 24 + pnpm 11** and a **WorldQuant BRAIN account**. Run the commands below in PowerShell from the repository root.
 
-- **Python 3.11+** for the research engine.
-- **Node.js 24 and pnpm 11** for the frontend build.
-- A **WorldQuant BRAIN account** with access to the data and operations you intend to use.
-
-The following examples use PowerShell from the repository root. A Python virtual environment is recommended.
+**1. Install and configure**
 
 ```powershell
 python -m pip install --no-deps -e .
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-### 2. Configure and initialize
+Fill in `WQB_ACCOUNT_SCOPE` and your credentials following [.env.example](.env.example). Never commit credentials. Defaults live in [config/](config/).
 
-Edit `.env` using [.env.example](.env.example): set a stable `WQB_ACCOUNT_SCOPE` and the required authentication values (`WQB_EMAIL` / `WQB_PASSWORD`, or `WQB_SESSION_TOKEN`). Keep credentials out of Git.
-
-Review [backtest defaults](config/backtest.default.json) and [research defaults](config/run.default.json), then initialize:
+**2. Initialize and sync submitted alphas**
 
 ```powershell
-alpha-garden init
+alpha-garden init             # create the database, sync fields and operators (resumable)
+alpha-garden sync-submitted   # baseline of submitted alphas and PnL; SC checks rely on it
 ```
 
-Initialization prepares the local database and research definitions. If a complete matching data catalog is unavailable, it authenticates with WorldQuant BRAIN and synchronizes fields and operators. It does not start backtests or submit formulas. Keep existing configuration and research data when updating the project.
-
-Each downloaded field page is committed to SQLite staging. After a network failure, exhausted retries or interruption, rerun `alpha-garden init` with the same `--database`, `--settings` and `--env` options to resume. Recovery verifies the last saved page before requesting unsaved pages. Checkpoints are isolated by account, platform URL, instrument type, region, universe and delay. Only a complete, validated field and operator catalog atomically replaces the published catalog and clears its checkpoint; partial downloads leave the previous catalog intact. A changed total, changed checkpoint-page field order or duplicate pagination stops the sync and clears that download so the next attempt starts from the first page.
-
-For the immediately preceding database schema, run `alpha-garden init --upgrade-catalog-storage` to explicitly add the checkpoint table and continue initialization while preserving research history. Older databases need their existing schema upgrades first. New databases use `alpha-garden init` directly.
-
-When operator access or the platform list changes, run `alpha-garden sync-operators` to update only the current account's operator catalog, without downloading fields or migrating the database. Field records and their observation times stay intact; operator records receive the new observation time, while the last full-catalog sync time stays unchanged. Authentication, read or validation failures preserve the previous catalog. Active runs and reconciliation runs with unfinished tasks or unresolved submissions block catalog replacement. Historical stop markers with no outstanding work do not block refresh, and their records remain unchanged. The command accepts `--database` and `--env` and starts no backtests or formal submissions.
-
-### 3. Build and open the console
-
-Before starting research, build the account's submitted-alpha and PnL baseline:
-
-```powershell
-alpha-garden sync-submitted
-```
-
-This reads every visible and hidden page using `status!=UNSUBMITTED` and `order=-dateSubmitted`, verifies full details, and captures PnL, including decommissioned submissions. It imports no historical seeds or backtests and submits no formulas. Inconsistent snapshots, missing pages, conflicting identities, and unsupported alpha types fail explicitly. Pending PnL keeps its retry time and completed captures; rerun the command to continue. Completion means all reference curves were captured, not that they satisfy local SC requirements: insufficient overlap, flat curves, or missing required Sharpe remain unknown under the existing rules.
-
-Authentication failures and HTTP 429 throttles that exhaust bounded retries stop all subsequent requests. Wait for the reported `Retry-After` before rerunning. Starting or resuming research requires a completed baseline for the configured account. A verified zero-submission account can cold-start exploration. Keep `WQB_ACCOUNT_SCOPE` bound to the actual account. The command uses the existing `--env` file and `--database` options; process environment variables do not replace the file. For the immediately preceding database schema, this explicit command adds only the completeness metadata table and preserves research history. Other old schemas require their corresponding migrations. A fresh database still needs `init` first.
-
-Identical submitted-reference content retains its original `observed_at`; the sync completion record separately tracks the latest complete scan. This preserves evidence that existed before an older unbound SC repair. Changed content receives a new evidence time and is never backdated. Evidence times already overwritten by older versions cannot be reconstructed without historical bindings. If a read's 401 refresh fails temporarily, authentication is restored within that same read's bounded retry budget; rejected authentication and exhausted retries still stop the sync.
+**3. Build and open the console**
 
 ```powershell
 pnpm --dir webui install --frozen-lockfile
 pnpm --dir webui build
-alpha-garden web
+alpha-garden web              # add --read-only to only view data
 ```
 
-Open **[http://127.0.0.1:8787](http://127.0.0.1:8787/)** and sign in with the local console account **`admin` / `123123`**. This account is separate from your WorldQuant credentials.
+Open <http://127.0.0.1:8787> and sign in with the local console account `admin` / `123123` (unrelated to your WorldQuant account; loopback only).
 
-The Python service serves both the built frontend and API. Starting the service or signing in does not start research or submit formulas. The console binds to loopback and is intended for local, single-account use.
+**4. Start researching**
 
-To browse without enabling operations or requesting platform curves:
+Check budgets in **Settings** → start normal research or focused optimization in **Runs** → inspect results in **Formulas / Backtest analysis** → submit from **Qualified archive & submissions**. Runs started from the web **never submit automatically**. Closing the browser does not stop a run; use Pause to stop at a safe boundary and Resume later.
 
-```powershell
-alpha-garden web --read-only
+## How research works
+
+```text
+Explore (idea templates + random) → qualified formulas become seeds → mutations / combo enhancement
+→ focused optimization → local queue checks → submit best grade first (platform re-check before submitting)
 ```
 
-### 4. Start researching
+- **Exploration**: most exploration slots come from 27 idea templates in 7 families; the rest are random.
+- **Seeds and lineages**: independent qualified formulas become seeds and are researched along their lineage. Each formula has up to 20 mutation attempts; each root lineage has up to 80 quality-research backtests.
+- **Mutation and diagnosis**: the parent's weak spot (turnover, returns, Sharpe) picks which mutations to try first.
+- **Combo enhancement**: a qualified parent is combined with a low-correlation companion signal at the Sharpe-optimal weight.
+- **SC control**: seed admission, companion choice, queue checks and submissions all compare locally with the platform rule (correlation ≥0.7 fails unless Sharpe is at least 10% higher).
+- **Submission**: ordered by grade → Fitness → Sharpe; only the peak formula of each lineage is submitted.
 
-1. Review **Settings** and choose your research budget and limits.
-2. Open **Runs**, choose normal research or focused optimization, and set the number of cycles.
-3. Follow **Logs** and inspect results in **Formulas** or **Backtest analysis**.
-4. Review eligible results in **Qualified archive** or **Submissions** before submitting.
+Full details: [Research rules](docs/research-rules.md).
 
-New runs started from the console have **automatic submission disabled**. Closing the browser does not stop a run; use Pause to stop at an execution boundary and Resume to continue the saved plan.
-
-## CLI workflow
+## Commands
 
 | Action | Command |
 | --- | --- |
-| Sync all submitted alphas and PnL | `alpha-garden sync-submitted` |
-| Run one cycle | `alpha-garden run` |
-| Run five cycles | `alpha-garden run 5` |
-| Optimize qualified formulas | `alpha-garden run -opt` |
-| Preview six SC trials locally | `alpha-garden sc-plan <parent_task_id>` |
-| Run three focused SC batches | `alpha-garden run 3 --sc-parent <parent_task_id> --sc-plan-key <preview_fingerprint>` |
-| Resume an existing plan | `alpha-garden resume <run_id>` |
-| Submit two formulas from the Spectacular queue | `alpha-garden submit 2` |
-| Submit two currently eligible Good formulas | `alpha-garden submit good 2` |
-| Open the local console | `alpha-garden web` |
+| One cycle / five cycles | `alpha-garden run` / `alpha-garden run 5` |
+| Focused optimization | `alpha-garden run -opt` |
+| Resume a run | `alpha-garden resume <run_id>` |
+| Submit two from the Spectacular queue | `alpha-garden submit 2` |
+| Submit two of a grade | `alpha-garden submit good 2` |
+| Sync submitted alphas and PnL | `alpha-garden sync-submitted` |
+| Refresh operators only | `alpha-garden sync-operators` |
+| Research feedback for a run | `alpha-garden research-status <run_id>` |
+| Local storage usage | `alpha-garden storage inspect` |
+| Open the console | `alpha-garden web` |
 
-Grade-based submission also supports `average`, `excellent` and `inferior`. Omitting the count processes eligible candidates selected at launch. Counts mean **successful submissions**: fresh-check failures are skipped, insufficient candidates end the operation early, and uncertain outcomes are reconciled before another request is sent.
+SC-directed research, database upgrades, rate limits and the storage retention preview are covered in the [Operations guide](docs/operations.md).
 
-Backtesting does not submit by default. CLI runs can explicitly enable automatic submission; inspect `alpha-garden run --help` before choosing run options.
+## Development
 
-Focused SC research compares the first two trials of each of the three directions. The parent must fail only SC, have complete current blocker evidence, belong to an existing seed lineage or satisfy new seed admission, and retain at least six attempts; new SC seeds use the existing admission rules. Resume already started trials with `resume` or normal research. Preview reads local history only. Launch freezes all six candidates and their original settings, executes two per batch for at most three batches, and shares the parent's 20-attempt budget. The fixed SC plan ignores normal exploration percentages, disables formal submission, and retains existing timeout, request-fault and account-fault boundaries. An optional `--sc-plan-key` rejects changes since preview. Finish or resume an existing active account run first.
+Research data lives in `data/alpha_garden.sqlite3` and account settings in `.env`. Credentials, databases, logs and the submitted-formula list are kept out of Git.
 
-SC preview checks the parent and all candidates against the local operator catalog. Before sending new backtests on launch or resume, the runner also fetches the current account's operator list and checks the parent and every remaining candidate for `REGULAR` availability. Missing or unsupported operators stop new requests without spending unsent attempts; already sent work is still collected under its existing limits. Frozen formulas, historical results and spent attempts stay intact. Catalog request failures use the existing retry boundary and are not recorded as SC failures. Deferred check collection for a completed run adds no operator request. Catalog availability does not guarantee backtest or SC success; platform results remain authoritative.
-
-Explicit SC targets use current blocker evidence and the original parent budget; Sharpe/Fitness frontier ranking and unresolved historical repair bindings do not replace that decision. Already started trials cannot create a fresh allocation.
-
-SC runs also drain pending backtests from failed runs under those runs' original deadlines, releasing expired local slots without resending old requests. Check eligibility comes from each task's owning run across normal execution, stopped-run recovery and deferred reads, including research children that failed other quality checks. A pending SC result remains retryable despite those failures. Each SC research task allows three initial reads and at most three deferred reads (six total), with at least 600 seconds between deferred reads and longer `Retry-After` honored. Active SC runs only revisit their own deferred tasks; explicit resume may finish saved deferred checks after batch settlement, including when the entire SC run is completed. A completed run collects only its own due checks and returns without waiting for future retries or authenticating when nothing is due. The run's completed state, settlement records and research budgets stay unchanged. Resume becomes unavailable once no retryable checks remain. Backtests and budgets are never reopened, and exhausted evidence stays pending/error rather than becoming a platform pass or failure.
-
-Each batch gathers evidence for its own candidates and all submitted references, without backfilling unrelated historical candidates. SC checks and PnL are still collected when a mutation fails other quality checks, so research outcomes can be assessed; evidence collection does not relax submission eligibility or SC repair seed-admission rules. A `DECOMMISSIONED` reference explicitly reported by the platform remains a valid conflict target.
-
-Existing databases require explicitly authorized additive upgrades: call `persistence.schema.add_mutation_reference_storage`, then `add_sc_research_plan_storage` in the same `BEGIN IMMEDIATE` transaction. They add the conflict-binding table and frozen-plan column while preserving historical tasks, budgets and results. Run commands do not migrate automatically. If the database still uses the earlier formal-submission source constraint, apply the existing `add_optimization_submission_source` upgrade first in that transaction; focused SC submission remains disabled. If the submitted-baseline sync table is still absent, apply `add_submitted_sync_storage` after the SC upgrades, or leave the transaction and run the explicit `sync-submitted` command to add that table and establish the baseline. Focused SC launch and resume also require a completed full baseline sync.
-
-### Research feedback and quality improvement
-
-Focused optimization collects each candidate's PnL after its validated score arrives, including results that failed quality checks. At batch completion it only backfills missing curves for that batch's candidates and all submitted references, without collecting unrelated historical curves.
-
-`alpha-garden research-status RUN_ID --database data/alpha_garden.sqlite3` reads saved facts without platform access or writes. It reports frozen, attempted, qualified, rejected, pending and request-error counts for exploration, mutation, SC repair and quality research, plus quality outcomes from the last 30 days. Counts start at frozen tasks; they do not include discarded generated expressions or infer missing outcomes.
-
-Fully checked parents with a known below-target grade receive an independent `QUALITY_IMPROVEMENT` objective. Children must retain all required checks. A higher grade, or unchanged grade with at least one of Sharpe/platform Fitness improving and neither declining, counts as progress. Turnover and sub-universe checks remain mandatory; Fitness is never calculated locally. Unknown grades, pending evidence and request errors do not count as success. Existing conservative action preferences require at least 10 resolved observations across 5 root lineages within the same account and settings. One exploitation slot uses a supported preference; remaining slots keep exploring.
-
-Quality research has an **80-attempt lifetime allowance per account, settings and root lineage**, alongside the existing 20 attempts per parent. Normal qualified evolution and focused optimization share it. Tiny improvements, descendants and resumed/new runs cannot renew it. Frozen unsent tasks reserve capacity; confirmed unsent cancellations release it, while uncertain submissions remain spent. Reservations alone do not cause retirement. SC repair retains its own existing rules. Historical optimization tasks count; untagged ordinary historical mutations are not retrospectively guessed to be quality research. Previously permitted qualified-stage exploration with incomplete grade/SC evidence remains bounded by this allowance and cannot teach quality success.
-
-Plateau observations are run-scoped and apply only to non-focused continuous runs or runs budgeted for at least 200 backtests. Two consecutive 100-resolved-result windows without a new seed, repaired defect or higher grade indicate stagnation. Cold starts remain separate until the first seed; small metric improvements do not reset these windows. Short runs, focused runs, pending results and request errors do not trigger the plateau rule. This release only reports observations; it does not add recovery budget or stop runs early.
-
-Existing databases additionally need explicitly authorized `persistence.schema.add_quality_research_storage` after earlier upgrades, inside the same `BEGIN IMMEDIATE` transaction. It adds only immutable task purpose/root records, deriving allowance usage from existing task facts without resetting counters or changing history. Failures roll back; runtime and read commands never migrate automatically.
-
-### Local capacity and retention preview
-
-```bash
-alpha-garden storage inspect --daily-curves 1000
-alpha-garden storage prune --dry-run --retention-days 90
-```
-
-Both commands read an existing database, optionally selected with `--database`, without loading account credentials, accessing the platform, initializing or migrating storage. `inspect` distinguishes the database file, WAL, reusable free pages and PnL JSON payload. Growth projections use the measured average captured curve size and the number of new curves captured per day, not generated formulas. Table/index sizes are shown when SQLite provides `dbstat`.
-
-Pruning is currently preview-only. Retention defaults to 90 days (minimum 30). Candidates must have completed tasks with an explicit non-SC check failure, old task observations and curve capture, and no protected dependencies. All submitted references (including hidden and historical states), seeds, mutation lineages, SC recovery references, unfinished runs, qualified archives, submission queues, checks and attempts are protected. Every task sharing an account/Alpha identity must qualify; unlinked or uncertain evidence stays retained. This deliberately conservative preview does not claim to determine exhausted research value.
-
-Candidate bytes measure JSON payload, not immediately reclaimable disk space. Deletion, pruning markers that prevent automatic refetch, and a separate `VACUUM` command are not yet enabled. Preview creates no backup or state snapshot. Routine recovery reads load only curves involved in actual comparisons, and capture-state queries do not decode curves; SC decisions, lineage and budgets remain unchanged.
-
-## Research rules
-
-**Normal research** combines exploration, mutation and self-correlation repair. **Focused optimization** works on fully checked active parents below the target grade with attempts remaining. The target is the platform's **Spectacular** grade; optimization explores the possibility of improvement, without guaranteeing it. A qualified formula outside every seed lineage (for example a combo) opens its own optimization lineage, strongest first, unless it correlates at 0.7 or more with a formula already being optimized in another lineage or is blocked by a submitted alpha.
-
-**Idea templates**: by default 90% of exploration slots (run config `ideaPercent`) come from 27 idea templates in 7 families (added 2026-10-21: overnight gap, intraday return, close vs VWAP, daily range, share turnover, recent high, dividend yield and two linked-company templates) expanded over the field profiles (`data/field-profiles.json`, kept out of Git); random exploration fills the rest. Fundamental fields are used as is (the platform already carries them forward; without ts_backfill backtests barely change), while analyst and event fields keep ts_backfill. A missing or broken profile file hands the whole share back to random exploration without stopping the run. **Combo templates** take at most 30% of template slots and add strong parents from different families whose daily returns correlate at most 0.5; parents correlated above 0.7 count as one idea sharing one pair budget, and the calmer side is weighted up by the daily PnL swing ratio. The former one-time cold-start mothers are retired; their price/volume ideas live on as templates.
-
-**Combo enhancement**: qualified parents (quality optimization and the qualified stage of normal research) first try adding one backtested single-template signal, written `zscore(parent)+w*zscore(companion)`; a side that is a single `rank(...)` drops the zscore and takes a √12 weight instead (rank is uniform every day, so both forms backtest alike), saving a nesting level. The companion's daily PnL must correlate at most 0.5 with the parent's; the weight is the Sharpe-maximising mix of the two curves; Fitness is estimated from the weighted average of returns and turnover, and pairs expected to gain under 5% are skipped. Near-copies of one companion idea count once, and each companion joins at most 3 parents over all history so lineages do not converge. Before any backtest the child's curve is also predicted as parent + weight * companion and compared with other lineages' checked alphas, submitted alphas and this cycle's chosen children; at 0.7 or above the pair is skipped and the slot goes to the lineage's other candidates. Children stay in the parent's lineage and budget; they count as a cure when they beat the parent's Fitness. Estimates come from in-sample curves and are optimistic until real runs confirm them.
-
-**Mutation diagnosis**: ordinary mutation and quality optimization first name the parent's weak metric: high turnover (above 30%, or Fitness is the weak point and turnover is above 12.5%), low turnover, low returns (Fitness is the weak point and turnover is at most 12.5%) or low Sharpe. Matching mutation families go first; per-parent learned action preferences still lead, and about one slot in five ignores the diagnosis. High-turnover parents also get a decay ladder `ts_decay_linear(parent, n)` for n = 3, 6, 10, 15, which works like a higher decay setting without changing run settings. Each cycle relearns which families cure which weakness from the last 30 days of mutations: a cure beats the parent's Fitness, moves the weak metric the right way and is not failed by the platform's self-correlation check. Field swaps stay within profile relatives (every occurrence at once) and operator swaps within one role. These rules still await validation over several real runs.
-
-- Each formula has up to **20 mutation attempts**, shared across both modes. Switching modes does not reset the budget.
-- Qualified-stage quality research also shares an **80-attempt** lifetime limit per account, settings and root lineage.
-- Better qualifying descendants can take over using their own remaining attempts. Replaced formulas and their research history remain recorded.
-- The **qualified archive** lists currently submittable retained formulas. A replaced formula does not have to exhaust all 20 attempts first.
-- Queue checks run locally: the other items come from the backtest, and self-correlation applies the platform's rule (daily PnL correlation of 0.7 or more with a submitted alpha fails unless Sharpe is 10% higher) to local curves, with no platform call; a missing curve leaves the check pending and it is rechecked later without holding up the batch. SC research runs still use the platform's check.
-- Local evidence helps select candidates and preserve improvement opportunities. **Platform checks remain required before formal submission.**
-
-<details>
-<summary>Correlation screening, the 10% improvement rule, and near duplicates</summary>
-
-Local submission screening follows the platform's window: it compares daily PnL increments ending in the **four most recent calendar years** against every recorded submitted Alpha for the same account, using at least **252 matching intervals**. Correlation **≥ 0.7** requires Sharpe at least **10% higher** than that reference. Missing curves, insufficient overlap or a required missing Sharpe keep eligibility pending. After a formula's validated score detail is saved, its next result-processing step collects the daily curve through `/alphas/{id}/recordsets/pnl`, before reading yearly statistics. This applies to ordinary research, focused SC, optimization and interrupted-task recovery, including poor-quality scores, single-candidate exploration and direction validation. Pending simulations, platform failures and invalid or missing scores do not trigger a PnL request. Stored curves are reused; temporary PnL failures retain their retry time and let other result processing continue. Batch boundaries backfill missing historical or deferred curves and submitted references; ordinary research covers the account, while focused SC and optimization keep their existing scope. The total PnL metric in a backtest result cannot replace this daily series.
-
-Automated runs pause for at least **2 seconds** after each PnL capture before the next platform request, using the longer configured polling interval or platform `Retry-After` when applicable. Ready peers cannot shorten this pause. A 429 from the shared per-result and historical-backfill collector schedules a run-level cooldown that blocks requests for other tasks; without `Retry-After`, it waits at least **60 seconds**. Restarts preserve the saved cooldown and request-failure limit, without resetting simulation deadlines or budgets. Two seconds is a conservative local interval, not a published platform rate limit or a guarantee against 429. Separate `[PnL采集]` console lines report the start, saved point count or pending reason.
-
-Correlation comparison runs before new seed admission: a candidate needs enough nonconstant daily increments and must satisfy the correlation/Sharpe rule against existing root seeds and current research parents in the account, including descendants that have replaced their roots. Missing evidence for any required comparison keeps independent seed admission pending. Backfill checks only the fetched candidate for admission; deferred seeds are reconciled before research advances. Unready objects retain their retry time without blocking other research, while authentication, permission and account rate-limit errors retain run-level handling. Recovery reuses stored curves and preserves lineage budgets. Local comparison does not replace the final platform SC check.
-
-Ordinary batches merge the latest platform checks available at planning time into parent SC risk, superseding pending or older simulation checks. Latest request errors, pending observations and equal-time conflicts remain pending. Counts include the parent and its direct children with the same account and settings; at least five explicit results are required for risk ordering within a lineage. Risk ordering does not remove parents or deduplicate signals, and leaves exploration shares, existing budgets and frozen batches unchanged.
-
-For a parent failing only SC with complete blocker evidence, the initial research compares three directions within the existing SC allocation: change signal source, turn levels into changes, and update holdings on changes in the original data. Each direction gets two initial trials across normal batches; stored task history survives restarts and new runs. Missing catalog support or budget may leave fewer than six trials. Source changes use catalog-confirmed fundamental, analyst or news-sentiment categories and replace signals at a normalization boundary, with type, coverage and coarse-unit checks. Unknown physical units are not treated as interchangeable raw inputs. Subsequent allocation uses real backtests and full platform checks; a local correlation decrease is not success. Combining independently qualified signals and removing common components are outside this initial SC strategy.
-
-Candidates are ordered by quality: grade, then Fitness, then Sharpe, with how many others a step blocks only breaking ties; a weaker formula, even one still being optimized, never holds back a stronger one. The submission page offers "All grades, best first" with a minimum grade (default Good): it submits the single best formula from the Spectacular queue, the qualified archive and still-researched formulas of Excellent and above, then replans after each one. Candidate ordering also protects fully checked formulas still being optimized. Within one research lineage only the peak formula is ever submitted: for highly correlated Sharpes of **1.50 → 1.60 → 1.70**, the selector offers 1.70 once it qualifies, and weaker rungs wait in the qualified archive even while 1.70 is still being optimized — research keeps climbing the ladder, but submission no longer banks every rung, so weak submissions neither dilute quality-weighted scores nor consume self-correlation headroom for future peaks. It replans after every confirmed submission; local screening never substitutes for live platform checks.
-
-Before generating mutations, ordinary batches converge near-duplicate parents across lineages using PnL already saved by planning time; focused optimization remains within each lineage. Both require the same account and backtest settings, at least **252 matching daily PnL intervals**, and correlation **≥ 0.9999**. Ordinary batches also separate current check states, non-SC check evidence and submitted status, preserving distinct repair needs and priority for unsubmitted parents. High correlation of 0.7 or 0.9 alone does not establish a near duplicate.
-
-Representatives are selected by grade, Sharpe, Fitness, then earliest completion; known and unknown historical grades are not ranked against each other. Each duplicate is compared directly with a retained representative, without transitive merging. Historical and exhausted representatives remain in the comparison pool. Each representative retains its own remaining budget, without transferring or resetting allowances for duplicates. Released ordinary slots follow existing allocation rules and preserve the exploration minimum; progress logs report the number of skipped parents. This step only reads existing curves for relevant research lineages and does not fetch platform evidence. Missing, short, flat or negatively correlated curves do not establish duplicates. Original seeds, formulas, results and mutation history remain intact. Frozen batches are restored without rerunning deduplication, and the focused six-trial SC plan retains its existing flow.
-
-</details>
-
-## Local data and development
-
-Research records live in `data/alpha_garden.sqlite3`; account configuration lives in `.env`. Credentials, local databases, logs, model artifacts and the generated submitted-formula list are excluded from Git. Use independent synthetic examples for private expressions and account records. Share real backtest screenshots only with authorization, omit identifying details, and label their source accurately.
-
-| Area | Location |
+| Content | Location |
 | --- | --- |
-| Python research engine, platform client and local web API | [src/](src/) |
-| React console and frontend development guide | [webui/](webui/README.md) |
-| Backtest policy and research defaults | [config/](config/) |
-| Python verification suites | [tests/](tests/) |
-| Bilingual interface screenshots | [assets/screenshots/](assets/screenshots/) |
+| Research engine, platform client, web API | [src/](src/) |
+| React frontend | [webui/](webui/README.md) |
+| Default configuration | [config/](config/) |
+| Tests | [tests/](tests/) |
 
-<a id="development"></a>
-For frontend development, run the read-only backend in one terminal and the Vite development server in another:
+For frontend work, use two terminals:
 
 ```powershell
-# Terminal 1 — repository root
-alpha-garden web --read-only
-
-# Terminal 2 — repository root
-pnpm --dir webui dev
+alpha-garden web --read-only   # terminal 1
+pnpm --dir webui dev           # terminal 2, then open http://127.0.0.1:5173
 ```
 
-Open **[http://127.0.0.1:5173](http://127.0.0.1:5173/)**. Vite proxies `/api` to the local backend on port 8787. Run `pnpm --dir webui lint` and `pnpm --dir webui build` for frontend checks. See the [frontend guide](webui/README.md) for API boundaries, configuration and detailed behavior.
+## More docs
+
+- [Research rules](docs/research-rules.md): exploration, seeds, mutations, combo enhancement, SC control and submission order.
+- [Operations guide](docs/operations.md): catalog sync, runs and recovery, SC-directed research, database upgrades, rate limits and storage.
+- [Architecture](docs/architecture.md): module responsibilities, main flow and data ownership.
+- [Frontend development](webui/README.md)
 
 ## License
 
-[MIT](LICENSE). The project is shared as-is; ongoing maintenance and support are not guaranteed.
+[MIT](LICENSE). Provided as is, without a commitment to ongoing maintenance or support.
