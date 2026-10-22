@@ -47,6 +47,7 @@ def catalog():
         (
             operator("rank", x, roles=("cross_sectional_normalization",)),
             operator("zscore", x, roles=("cross_sectional_normalization",)),
+            operator("normalize", x, roles=("cross_sectional_normalization",)),
             operator("ts_mean", x, d),
             operator("ts_delta", x, d),
             operator("ts_scale", x, d, OperatorParameter("constant", "float", optional=True)),
@@ -320,3 +321,9 @@ def test_swapping_a_reshaper_that_group_rank_ignores_is_not_an_edit(catalog):
     result = candidates("group_rank(rank(ts_mean(close,22)),sector)", catalog)
     assert "group_rank(zscore(ts_mean(close,22)),sector)" not in {c.formula for c in result}
     assert any(c.change.action == INTERNAL_FIELD_REPLACEMENT for c in result)
+
+
+def test_siblings_with_the_same_signal_are_generated_once(catalog):
+    formulas = {c.formula for c in candidates("rank(close)", catalog)}
+    # normalize(close) and zscore(close) give the same positions: only one is tested.
+    assert len(formulas & {"zscore(close)", "normalize(close)"}) == 1

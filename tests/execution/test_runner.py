@@ -1510,6 +1510,17 @@ class AutomatedRunnerTests(unittest.TestCase):
             self.database_path, run_id, completed_at="2026-08-30T01:00:00+08:00"))
 
 
+
+class ClockTests(unittest.TestCase):
+    def test_a_clock_step_back_holds_the_last_reading(self):
+        from datetime import UTC, datetime, timedelta
+        from execution.runner import _never_backwards
+        start = datetime(2026, 10, 22, 6, 51, 55, tzinfo=UTC)
+        readings = iter((start, start - timedelta(seconds=1), start + timedelta(seconds=2)))
+        clock = _never_backwards(lambda: next(readings))
+        self.assertEqual([clock(), clock(), clock()],
+                         [start, start, start + timedelta(seconds=2)])
+
+
 if __name__ == "__main__":
     unittest.main()
-

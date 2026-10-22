@@ -42,6 +42,11 @@ _BACKFILL_LOOKBACK = {"quarterly": 66, "event": 22}
 # 0.996-0.997), while an analyst-estimate alpha lost 4% of its Sharpe (2026-10-21). Only
 # fundamentals drop the layer.
 _UNFILLED_KINDS = frozenset({"fundamental"})
+# Option data has missing days (e.g. 2022-01-25 in USA TOP3000): on such a day only a few stocks
+# keep a value and the whole book piles into them, failing CONCENTRATED_WEIGHT (20/20
+# option templates, 2026-10-22). A short fill carries the previous day forward.
+_OPTION_KINDS = frozenset({"option_flow", "option_vol", "option_price"})
+_OPTION_BACKFILL_LOOKBACK = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +130,8 @@ class _FieldPool:
         text = profile.field_id
         if profile.field_type == "VECTOR":
             text = f"vec_avg({text})"
-        lookback = _BACKFILL_LOOKBACK.get(profile.cadence or "")
+        lookback = (_OPTION_BACKFILL_LOOKBACK if profile.kind in _OPTION_KINDS
+                    else _BACKFILL_LOOKBACK.get(profile.cadence or ""))
         if lookback is not None and (self.backfill_fundamentals or profile.kind not in _UNFILLED_KINDS):
             text = f"ts_backfill({text},lookback={lookback})"
         return text

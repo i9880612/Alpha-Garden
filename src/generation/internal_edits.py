@@ -20,7 +20,7 @@ from generation.formula import (
 )
 from generation.logic import prepare_formula_logic
 from generation.structure_limits import fits_formula_structure_limits
-from generation.transformations import same_signal
+from generation.transformations import signal_key
 from generation.unit_validation import find_coarse_unit_issues
 from generation.validation import validate_formula
 
@@ -76,6 +76,8 @@ def iter_internal_edit_candidates(
     facts = analyze_formula(expression)
     parent_fingerprint = formula_fingerprint(expression)
     seen = {parent_fingerprint}
+    # Two edits can reach the same signal (normalize(x) and zscore(x)); test it once.
+    seen_signals = {signal_key(expression)}
     edits = _edits(
         expression, catalog, tuple(sorted(set(field_candidates))), "formula",
         families, locations, field_relatives,
@@ -90,9 +92,11 @@ def iter_internal_edit_candidates(
         if child_facts.depth > facts.depth or child_facts.complexity > facts.complexity:
             continue
         fingerprint = formula_fingerprint(transformed)
-        if fingerprint in seen or same_signal(transformed, expression):
+        signal = signal_key(transformed)
+        if fingerprint in seen or signal in seen_signals:
             continue
         seen.add(fingerprint)
+        seen_signals.add(signal)
         yield mutation_candidate(
             transformed,
             parent_task_id=parent_task_id,

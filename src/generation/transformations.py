@@ -586,7 +586,12 @@ def _prepare_leaf(
 
 def same_signal(first: Expression, second: Expression) -> bool:
     """True when the two formulas differ only by reshapers that cannot change the result."""
-    return _canonical_render(first) == _canonical_render(second)
+    return signal_key(first) == signal_key(second)
+
+
+def signal_key(expression: Expression) -> str:
+    """Equal keys mean the same backtest; used to skip parents' and siblings' copies."""
+    return _canonical_render(expression)
 
 
 def _canonical_render(expression: Expression) -> str:
@@ -600,7 +605,22 @@ def _canonical_render(expression: Expression) -> str:
         if isinstance(node, Prefix):
             return Prefix(node.operator, as_rank(node.operand))
         return node
-    return render_formula(collapse_stacked_reshapers(as_rank(expression)))
+    return render_formula(_root_affine_as_zscore(collapse_stacked_reshapers(as_rank(expression))))
+
+
+def _root_affine_as_zscore(node: Expression) -> Expression:
+    """At the root, normalize(x) and zscore(x) differ only by a positive daily scale.
+
+    The platform rescales the whole book every day, so both give the same positions:
+    normalize(sales/cap) and zscore(sales/cap) backtested identically (2026-10-22).
+    Inside a sum the scale weights the term, so only the root is canonicalized.
+    """
+    if isinstance(node, Prefix):
+        return Prefix(node.operator, _root_affine_as_zscore(node.operand))
+    if (isinstance(node, Call) and node.operator == "normalize" and len(node.arguments) == 1
+            and node.arguments[0].name is None):
+        return Call("zscore", node.arguments)
+    return node
 
 
 def _balanced_product_indexes(

@@ -120,6 +120,16 @@ class StructuralTransformationTests(unittest.TestCase):
         self.assertEqual(render_formula(collapse_stacked_reshapers(
             parse_formula("winsorize(group_rank(rank(close),sector))").expression)), "group_rank(close,sector)")
 
+    def test_root_normalize_and_zscore_are_the_same_signal(self) -> None:
+        from generation.transformations import same_signal
+        def same(a, b):
+            return same_signal(parse_formula(a).expression, parse_formula(b).expression)
+        self.assertTrue(same("zscore(close)", "normalize(close)"))
+        self.assertTrue(same("-zscore(close)", "-normalize(close)"))
+        # Inside a sum the daily scale weights the term differently.
+        self.assertFalse(same("zscore(close)+rank(open)", "normalize(close)+rank(open)"))
+        self.assertFalse(same("zscore(close)", "rank(close)"))
+
     def test_affine_layers_inside_a_weighted_sum_are_kept(self) -> None:
         from generation.transformations import collapse_stacked_reshapers
         def collapsed(formula):

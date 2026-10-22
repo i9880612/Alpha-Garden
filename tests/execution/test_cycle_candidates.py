@@ -624,6 +624,19 @@ class ImprovementCandidatePoolTests(unittest.TestCase):
         self.assertIn(SINGLE_WINDOW_MUTATION, families)
         self.assertTrue(families.intersection(STRUCTURAL_TRANSFORMATION_FAMILIES))
 
+    def test_a_barely_trading_parent_is_not_smoothed(self) -> None:
+        from dataclasses import replace
+        def families(turnover):
+            parent = self._parent_snapshot("parent-slow", "rank(ts_delta(close,5))")
+            parent = replace(parent, result=replace(parent.result, turnover=turnover))
+            pool = self._pools(eligible_parent_task_ids=(parent.task.task_id,),
+                               completed_by_task_id={parent.task.task_id: parent})[0]
+            return {candidate.family for candidate in pool.candidates}
+        self.assertIn(TEMPORAL_PERSISTENCE_REFRAME, families(0.10))
+        slow = families(0.02)
+        self.assertNotIn(TEMPORAL_PERSISTENCE_REFRAME, slow)
+        self.assertIn(TEMPORAL_CHANGE_REFRAME, slow)
+
     def test_high_sc_can_use_targeted_edits_while_unknown_sc_remains_ordinary(self):
         parent = self._parent_snapshot("parent-sc", "rank(ts_mean(close,5))")
         def pool(correlation):

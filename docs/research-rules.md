@@ -21,8 +21,9 @@ Both modes share the same attempt budgets; switching modes resets nothing.
   - Linked companies covers the momentum and gaps of related companies.
 - Templates are expanded into concrete formulas using the field profile `data/field-profiles.json` (not stored in the database). If the profile is missing or broken, the cycle falls back to random exploration without stopping.
 - Fundamental fields are referenced directly without `ts_backfill` (the platform already carries them forward; experiments showed nearly identical backtests). Analyst and event fields still use `ts_backfill`.
+- Option fields use `ts_backfill(field, 5)` to fill occasional missing days: on such a day only a few stocks have a value and the book piles into them (CONCENTRATED_WEIGHT failure).
 - Template variants already tested in their old form are not retested in the new form.
-- **Combination templates** take at most 30% of template slots: they add strong parents from different families whose daily returns correlate ≤0.5. Parents correlated >0.7 count as the same idea and share one combination budget.
+- **Combination templates** take at most 30% of template slots: they add strong parents from different families whose daily returns correlate ≤0.5. Parents correlated >0.7 count as the same idea and share one combination budget. Formulas that failed CONCENTRATED_WEIGHT are never combination parents.
 
 ## 3. Seeds and lineages
 
@@ -43,7 +44,8 @@ Both modes share the same attempt budgets; switching modes resets nothing.
 - Each cycle recomputes "weak spot → mutation family" from the last 30 days: a mutation counts as effective only if the child's Fitness beats the parent's, the weak metric moves the right way and the child does not fail SC.
 - Action preferences learned for a parent come first; about one in five slots ignores the diagnosis to keep exploring.
 - Field swaps stay within the same field class of the profile; operator swaps stay within the same role.
-- No-op mutations that don't change the signal (for example a monotone transform inside `group_rank`, or a repeated `rank`) are skipped at generation time.
+- No-op mutations that don't change the signal are skipped at generation time: a monotone transform inside `group_rank`, a repeated `rank`, or a child with the same signal as its parent or a sibling (at the root, `normalize(x)` and `zscore(x)` give the same positions, so only one is tested).
+- Parents with turnover below 5% get no smoothing mutations: the signal barely moves, so smoothing returns the parent.
 
 ## 5. Combo enhancement
 

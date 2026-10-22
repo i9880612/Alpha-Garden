@@ -83,7 +83,7 @@ def run_automated_run(
     waiter: Waiter | None = None,
 ) -> AutomatedRunCompletion:
     validate_automated_run_poll_interval(poll_interval_seconds)
-    current_time = clock or _utc_now
+    current_time = _never_backwards(clock or _utc_now)
     wait = waiter or time.sleep
 
     initial_run = _load_run(database_path, run_id)
@@ -550,3 +550,24 @@ def _aware_time(value: datetime) -> datetime:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _never_backwards(clock: Clock) -> Clock:
+    """Hold the last reading when the system clock steps back (e.g. a time sync).
+
+    Saved observations must stay in order: a Windows clock correction once made the
+    next poll look earlier than the previous one and stopped a run with
+    backtest_observation_out_of_order (2026-10-22). Waiting a moment is harmless;
+    the readings catch up as soon as the clock passes the held value again.
+    """
+    last: datetime | None = None
+
+    def now() -> datetime:
+        nonlocal last
+        current = _aware_time(clock())
+        if last is not None and current < last:
+            return last
+        last = current
+        return current
+
+    return now

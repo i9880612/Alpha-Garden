@@ -111,7 +111,12 @@ def load_combo_variants(
            JOIN backtest_results r ON r.task_id = i.task_id
            WHERE t.account_scope = ? AND t.status = 'completed'
              AND t.platform_alpha_id IS NOT NULL AND i.template_id != ?
-             AND abs(r.sharpe) >= ?""",
+             AND abs(r.sharpe) >= ?
+             -- A parent whose book piles into a few stocks passes that onto every combo:
+             -- all 15 failed combos of 2026-10-22 carried such an option parent.
+             AND NOT EXISTS (SELECT 1 FROM backtest_checks c
+                             WHERE c.task_id = i.task_id AND c.check_name = 'CONCENTRATED_WEIGHT'
+                               AND c.status = 'FAIL')""",
         (account_scope, COMBO_TEMPLATE_ID, COMBO_MIN_ABS_SHARPE),
     ).fetchall()
     if len(rows) < 2:

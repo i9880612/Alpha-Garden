@@ -353,6 +353,9 @@ def build_improvement_candidate_pools(
             ),
         )
         for leaf in leaves:
+            if (parent.result.turnover < SMOOTHING_MIN_PARENT_TURNOVER
+                    and getattr(leaf, "family", None) == TEMPORAL_PERSISTENCE_REFRAME):
+                continue
             if (sc_reference is not None and sc_reference.correlation is not None
                     and not isinstance(leaf, FormulaCandidate) and leaf.family == COMPLEMENTARY_SIGNAL_REFRAME):
                 # Mixing an untested raw field is not evidence for combining two
@@ -837,6 +840,11 @@ def _snapshot_settings(snapshot: BacktestSnapshot) -> BacktestSettings:
         return BacktestSettings.from_platform_dict(payload)
     except (TypeError, ValueError) as exc:
         raise ValueError("automated_cycle_parent_settings_invalid") from exc
+
+
+# Smoothing a signal that barely trades returns the parent: three such children of
+# 1.5-3% turnover fundamentals correlated 0.993-0.9997 with their parents (2026-10-22).
+SMOOTHING_MIN_PARENT_TURNOVER = 0.05
 
 
 def _leaf_preference(leaf: object, diagnosis: ParentDiagnosis | None) -> int:

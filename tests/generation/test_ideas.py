@@ -144,8 +144,8 @@ def test_only_enabled_profiled_catalog_fields_are_used():
 
 def test_directions_shape_the_sign_and_unknown_is_generated_positive():
     formulas = {v.formula for v in _pool().variants}
-    assert "rank(-iv30)" in formulas
-    assert "rank(-pcr30)" in formulas
+    assert "rank(-ts_backfill(iv30,lookback=5))" in formulas
+    assert "rank(-ts_backfill(pcr30,lookback=5))" in formulas
     assert "rank(snt-ts_mean(snt,22))" in formulas
     # Fundamentals are used as the platform carries them; no ts_backfill layer.
     assert "rank(eps/close)" in formulas
@@ -379,3 +379,10 @@ def test_fundamentals_drop_backfill_but_remember_their_older_form():
     batch = plan_idea_batch(pool, target_count=len(pool.variants), seed=1,
                             excluded_fingerprints=frozenset({variant.legacy_fingerprint}))
     assert "rank(income/cap)" not in {c.variant.formula for c in batch.candidates}
+
+
+def test_option_fields_fill_missing_days():
+    # A missing option day leaves a few stocks holding the whole book (CONCENTRATED_WEIGHT).
+    option = [v.formula for v in _pool().by_template()["option_signal"]]
+    assert option and all("ts_backfill(" in f for f in option)
+    assert not any("iv30" in f and "ts_backfill(iv30,lookback=5)" not in f for f in option)
