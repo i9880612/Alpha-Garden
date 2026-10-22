@@ -543,6 +543,8 @@ def collapse_stacked_reshapers(expression: Expression, *, _scale_free: bool = Tr
                 return inner
             if outer_name == "winsorize" and inner_name in _ORDER_RESHAPERS:
                 return inner
+        if expression.operator == "winsorize" and inner is not None and _small_rank_mix(inner):
+            return inner
         return expression
     if isinstance(expression, Binary):
         return Binary(expression.operator, collapse_stacked_reshapers(expression.left, _scale_free=False),
@@ -550,6 +552,37 @@ def collapse_stacked_reshapers(expression: Expression, *, _scale_free: bool = Tr
     if isinstance(expression, Prefix):
         return Prefix(expression.operator, collapse_stacked_reshapers(expression.operand, _scale_free=_scale_free))
     return expression
+
+
+# winsorize clips values beyond 4 standard deviations. A weighted sum of a few rank-like
+# terms (each spread evenly over [0, 1]) reaches at most about sqrt(3 * terms) of them
+# while its terms are not strongly opposed, and the combos that build such sums require
+# companions correlated at most 0.5 with each other. Three winsorize children of such
+# sums backtested exactly like their parents (2026-10-22).
+_MAX_WINSORIZE_FREE_TERMS = 3
+_UNIFORM_TERMS = frozenset({"rank", "group_rank"})
+
+
+def _small_rank_mix(expression: Expression) -> bool:
+    terms: list[Expression] = []
+
+    def collect(node: Expression) -> bool:
+        if isinstance(node, Binary) and node.operator in {"+", "-"}:
+            return collect(node.left) and collect(node.right)
+        if isinstance(node, Binary) and node.operator == "*":
+            if isinstance(node.left, Literal):
+                return collect(node.right)
+            if isinstance(node.right, Literal):
+                return collect(node.left)
+            return False
+        if isinstance(node, Prefix) and node.operator == "-":
+            return collect(node.operand)
+        if isinstance(node, Call) and node.operator in _UNIFORM_TERMS:
+            terms.append(node)
+            return True
+        return False
+
+    return collect(expression) and 1 <= len(terms) <= _MAX_WINSORIZE_FREE_TERMS
 
 
 def _sole_argument(call: Call) -> Expression | None:

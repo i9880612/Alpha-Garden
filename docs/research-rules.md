@@ -46,6 +46,9 @@ Both modes share the same attempt budgets; switching modes resets nothing.
 - Field swaps stay within the same field class of the profile; operator swaps stay within the same role.
 - No-op mutations that don't change the signal are skipped at generation time: a monotone transform inside `group_rank`, a repeated `rank`, or a child with the same signal as its parent or a sibling (at the root, `normalize(x)` and `zscore(x)` give the same positions, so only one is tested).
 - Parents with turnover below 5% get no smoothing mutations: the signal barely moves, so smoothing returns the parent.
+- `winsorize` is not wrapped around a weighted sum of up to 3 rank terms: such a sum never reaches the 4-standard-deviation clip, so nothing changes.
+- Group fields with a single group are not used for group mutations: `market` is one group everywhere, and in a single-country region (such as USA) so are `country` and `currency`.
+- Fields the profile marks as non-signals (codes, market-wide constants, adjustment factors like `adjfactor`) are not used for random exploration or mutations.
 
 ## 5. Combo enhancement
 

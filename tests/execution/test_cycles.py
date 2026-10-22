@@ -2326,5 +2326,28 @@ class AutomatedCyclePlanningTests(unittest.TestCase):
         )
 
 
+
+class GroupAndFieldFilterTests(unittest.TestCase):
+    def test_one_group_fields_and_profiled_non_signals_are_left_out(self):
+        from generation.catalog import (CatalogContext, FieldDefinition, GenerationCatalog,
+                                        OperatorDefinition, OperatorParameter, WindowDefinition)
+        from generation.field_profiles import FieldProfile, FieldProfileSet
+        from execution.cycles import meaningful_groups, profiled_non_signals
+        def catalog(region):
+            return GenerationCatalog(CatalogContext("EQUITY", region, "TOP3000", 1), tuple(
+                FieldDefinition(name, "ds", "Group", "Group", "GROUP", 1.0)
+                for name in ("country", "currency", "market", "sector")),
+                (OperatorDefinition("rank", "test", ("REGULAR",), (OperatorParameter("x", "expr"),),
+                                    ("cross_sectional_normalization",), "signal"),),
+                (WindowDefinition(5, "week"),))
+        self.assertEqual(meaningful_groups(catalog("USA")), ("sector",))
+        self.assertEqual(meaningful_groups(catalog("GLB")), ("country", "currency", "sector"))
+        profiles = FieldProfileSet.from_profiles((
+            FieldProfile("adjfactor", "pv1", "MATRIX", "rule", excluded="mechanical"),
+            FieldProfile("close", "pv1", "MATRIX", "unclassified")))
+        self.assertEqual(profiled_non_signals((profiles, frozenset())), frozenset({"adjfactor"}))
+        self.assertEqual(profiled_non_signals(None), frozenset())
+
+
 if __name__ == "__main__":
     unittest.main()

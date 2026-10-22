@@ -120,6 +120,19 @@ class StructuralTransformationTests(unittest.TestCase):
         self.assertEqual(render_formula(collapse_stacked_reshapers(
             parse_formula("winsorize(group_rank(rank(close),sector))").expression)), "group_rank(close,sector)")
 
+    def test_winsorize_over_a_few_ranks_is_dropped(self) -> None:
+        from generation.transformations import collapse_stacked_reshapers, same_signal
+        def collapsed(formula):
+            return render_formula(collapse_stacked_reshapers(parse_formula(formula).expression))
+        self.assertEqual(collapsed("winsorize(rank(close)+1.9*rank(open))"), "rank(close)+1.9*rank(open)")
+        self.assertEqual(collapsed("winsorize(1.3*rank(close)-rank(open))"), "1.3*rank(close)-rank(open)")
+        self.assertTrue(same_signal(parse_formula("rank(close)-rank(open)").expression,
+                                    parse_formula("winsorize(rank(close)-rank(open))").expression))
+        # Four terms, or a term that is not bounded, can still reach the clip.
+        for kept in ("winsorize(rank(close)+rank(open)+rank(volume)+rank(ts_delta(close,5)))",
+                     "winsorize(close+rank(open))", "winsorize(rank(close)*rank(open))"):
+            self.assertEqual(collapsed(kept), kept)
+
     def test_root_normalize_and_zscore_are_the_same_signal(self) -> None:
         from generation.transformations import same_signal
         def same(a, b):

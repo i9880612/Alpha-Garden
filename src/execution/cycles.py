@@ -269,22 +269,23 @@ def plan_automated_cycle(
             for branch in frontier.branches
             if branch.task_id in frontier.qualified_task_ids
         )
+        not_signals = profiled_non_signals(enabled_profiles)
         exploration_fields = tuple(
             field.field_id
             for field in catalog.fields
             if field.field_type in {"MATRIX", "VECTOR"}
             and field.coverage is not None
             and field.coverage > 0
+            and field.field_id not in not_signals
         )
-        groups = tuple(
-            field.field_id for field in catalog.fields if field.field_type == "GROUP"
-        )
+        groups = meaningful_groups(catalog)
         mutation_fields = tuple(
             field.field_id
             for field in catalog.fields
             if field.field_type == "MATRIX"
             and field.coverage is not None
             and field.coverage > 0
+            and field.field_id not in not_signals
         )
         planning_mutations = list_backtest_mutations(connection)
         prescriptions = _learned_prescriptions(
@@ -794,6 +795,32 @@ def _learned_prescriptions(
                 completed_by_task_id[mutation.child_task_id].result,
                 mutation.action, parent_child_correlation=value)
     return learn_prescriptions(outcomes)
+
+
+# Regions that span several countries; elsewhere country and currency are one group.
+_MULTI_COUNTRY_REGIONS = frozenset({"GLB", "EUR", "ASI", "AMR"})
+# market groups the whole universe in every region.
+_SINGLE_GROUP_FIELDS = frozenset({"market"})
+_COUNTRY_GROUP_FIELDS = frozenset({"country", "currency"})
+
+
+def meaningful_groups(catalog: GenerationCatalog) -> tuple[str, ...]:
+    """Group fields that split the universe: a one-group field makes group_zscore(x, g)
+    the plain zscore(x) (group_zscore(...,country) matched its USA parent at 0.998)."""
+    single = _SINGLE_GROUP_FIELDS | (
+        frozenset() if catalog.context.region in _MULTI_COUNTRY_REGIONS else _COUNTRY_GROUP_FIELDS)
+    return tuple(field.field_id for field in catalog.fields
+                 if field.field_type == "GROUP" and field.field_id not in single)
+
+
+def profiled_non_signals(loaded) -> frozenset[str]:
+    """Fields the profile marks as codes, constants or mechanical factors (adjfactor):
+    as a mutation ingredient such a field adds nothing (2026-10-22: +ts_quantile(adjfactor,5)
+    matched its parent at 1.000). Without profiles nothing is excluded."""
+    if loaded is None:
+        return frozenset()
+    return frozenset(field_id for field_id, profile in loaded[0].profiles.items()
+                     if profile.excluded is not None)
 
 
 def _timestamp(value: object, error: str) -> datetime:
