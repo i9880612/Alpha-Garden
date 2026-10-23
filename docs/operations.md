@@ -55,6 +55,7 @@ All commands default to `data/alpha_garden.sqlite3`, `config/` and `.env`; overr
 - The count is **successful submissions**: candidates that fail the re-check are skipped, the command ends early when candidates run out, and uncertain outcomes are confirmed before continuing.
 - The web "All grades, best first" mode submits one at a time in quality order; see [Research rules §7](research-rules.md#7-queue-checks-and-submission-order).
 - Every formal submission first reads the platform details and runs the latest checks.
+- The SC value from the platform check is reconciled with the local one in an "SC 对账" log line; a gap above 0.05 is logged as a warning and changes nothing else.
 
 ## SC-directed research
 

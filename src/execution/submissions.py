@@ -18,6 +18,8 @@ from persistence.backtests import (
     list_active_backtest_tasks,
 )
 from persistence.database import DATABASE_LOCK_TIMEOUT_SECONDS, open_database
+from persistence.pnl import list_pnl_series
+from learning.seed_correlation import assess_seed_correlation
 from persistence.qualified_archive import archive_qualified_alpha
 from persistence.submission_queue import FormalSubmissionQueueRecord, create_formal_submission_queue_item
 from persistence.submission_checks import SubmissionCheckRecord, get_submission_check, save_submission_check
@@ -493,6 +495,52 @@ def _advance_formal_detail(
     )
 
 
+# Local self-correlation rebuilds the platform rule from saved curves; the platform's
+# check before each submission reports its own value, so every submission doubles as a
+# free reconciliation. A gap above this is logged for a look, nothing else changes.
+SELF_CORRELATION_DRIFT_ALERT = 0.05
+
+
+def report_self_correlation_drift(database_path, snapshot, payload) -> float | None:
+    """Log platform vs local SC for this alpha; returns the gap, or None if not comparable."""
+    try:
+        platform_value = _platform_self_correlation(payload)
+        if platform_value is None:
+            return None
+        with open_database(database_path) as connection:
+            references = list_platform_submitted_alphas(connection, account_scope=snapshot.task.account_scope)
+            series = list_pnl_series(connection, account_scope=snapshot.task.account_scope,
+                                     platform_alpha_ids=frozenset([snapshot.task.platform_alpha_id,
+                                                                   *(r.platform_alpha_id for r in references)]))
+        local_value = assess_seed_correlation(snapshot, references, series).maximum
+        if local_value is None:
+            return None
+        gap = abs(platform_value - local_value)
+        logger = logging.getLogger("execution.progress")
+        message = (f"SC 对账 {snapshot.task.platform_alpha_id}：平台 {platform_value:.3f}，"
+                   f"本地 {local_value:.3f}，相差 {gap:.3f}")
+        if gap > SELF_CORRELATION_DRIFT_ALERT:
+            logger.warning("%s，超过 %.2f，请留意本地 SC 算法是否偏离平台", message,
+                           SELF_CORRELATION_DRIFT_ALERT)
+        else:
+            logger.info(message)
+        return gap
+    except Exception:  # A reconciliation note must never stop a submission.
+        logging.getLogger(__name__).exception("self_correlation_drift_report_failed")
+        return None
+
+
+def _platform_self_correlation(payload) -> float | None:
+    metrics = payload.get("is") if isinstance(payload, dict) else None
+    checks = metrics.get("checks") if isinstance(metrics, dict) else None
+    for check in checks if isinstance(checks, list) else ():
+        if isinstance(check, dict) and check.get("name") == "SELF_CORRELATION":
+            value = check.get("value")
+            if type(value) in (int, float) and math.isfinite(value):
+                return float(value)
+    return None
+
+
 def _advance_formal_check(
     database_path: str | Path,
     client: WorldQuantClient,
@@ -507,6 +555,7 @@ def _advance_formal_check(
     observation = client.fetch_formal_submission_check(
         platform_alpha_id=snapshot.task.platform_alpha_id,
     )
+    report_self_correlation_drift(database_path, snapshot, observation.payload)
     assessment = assess_formal_check_payload(observation.payload)
     check_payload_json = canonical_submission_json(observation.payload)
     with open_database(database_path) as connection:

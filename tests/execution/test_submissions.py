@@ -134,3 +134,45 @@ class AutomatedSubmissionTests(unittest.TestCase):
         self.assertNotIn(client.blocked_alpha, client.formal_submission_ids)
         if blocked_phase == "check":
             self.assertEqual(client.blocked_check_reads, 1)
+
+
+class SelfCorrelationDriftTests(unittest.TestCase):
+    def _report(self, payload, local):
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from execution.submissions import report_self_correlation_drift
+        from persistence.database import open_database
+        from persistence.schema import initialize_database_schema
+        with tempfile.TemporaryDirectory() as directory:
+            path = __import__("pathlib").Path(directory) / "drift.sqlite3"
+            with open_database(path) as connection:
+                initialize_database_schema(connection)
+            snapshot = SimpleNamespace(task=SimpleNamespace(account_scope="a", platform_alpha_id="alpha-x"))
+            with patch("execution.submissions.assess_seed_correlation",
+                       return_value=SimpleNamespace(maximum=local)), \
+                 self.assertLogs("execution.progress", level="INFO") as logs:
+                gap = report_self_correlation_drift(path, snapshot, payload)
+                import logging
+                logging.getLogger("execution.progress").info("end")
+        return gap, logs.output
+
+    @staticmethod
+    def _payload(value):
+        return {"is": {"checks": [{"name": "SELF_CORRELATION", "result": "PASS", "limit": 0.7,
+                                   "value": value}]}}
+
+    def test_a_gap_above_five_hundredths_is_flagged(self):
+        gap, output = self._report(self._payload(0.62), 0.50)
+        self.assertAlmostEqual(gap, 0.12)
+        self.assertTrue(any("WARNING" in line and "SC 对账" in line for line in output))
+
+    def test_a_small_gap_is_only_noted(self):
+        gap, output = self._report(self._payload(0.52), 0.50)
+        self.assertAlmostEqual(gap, 0.02)
+        self.assertFalse(any("WARNING" in line for line in output))
+        self.assertTrue(any("SC 对账" in line for line in output))
+
+    def test_nothing_to_compare_is_silent(self):
+        self.assertIsNone(self._report({"is": {"checks": []}}, 0.5)[0])
+        self.assertIsNone(self._report(self._payload(0.5), None)[0])
