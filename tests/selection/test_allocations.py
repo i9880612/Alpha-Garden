@@ -1253,6 +1253,25 @@ class BacktestSourceAllocationTests(unittest.TestCase):
             all(item.target is None for item in allocation.signal_improvements)
         )
 
+    def test_a_planned_lineage_merge_gets_the_first_slot(self) -> None:
+        from dataclasses import replace
+        roots = tuple(f"root-{index}" for index in range(6))
+        for merging in range(len(roots)):
+            sources = tuple(
+                replace(self._source(root, f"branch-{index}", 2, stage=QUALIFIED_EVOLUTION_STAGE,
+                                     families=QUALIFIED_EVOLUTION_FAMILIES, self_correlation=None),
+                        has_lineage_merge=index == merging)
+                for index, root in enumerate(roots)
+            )
+            allocation = self._allocate(
+                requested_count=3, minimum_exploration_count=2, sources=sources,
+                settings=tuple(self._settings(f"branch-{index}", risk=None) for index in range(len(roots))),
+                targets=tuple(self._branch_targets(f"branch-{index}", ()) for index in range(len(roots))),
+                self_correlation_percent=0,
+            )
+            self.assertEqual([item.parent_task_id for item in allocation.signal_improvements],
+                             [f"branch-{merging}"])
+
     def test_qualified_lineage_cannot_exceed_its_last_remaining_attempt(self) -> None:
         allocation = self._allocate(
             requested_count=8,

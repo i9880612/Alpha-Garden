@@ -29,7 +29,7 @@ import math
 import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from generation.catalog import GenerationCatalog
 from generation.combo_enhancement import (
@@ -168,7 +168,7 @@ def load_combo_enhancement_leaves(
                 skipped += 1
                 return False
 
-            merged = tuple(iter_combo_enhancement_leaves(
+            merged = tuple(replace(leaf, lineage_merge=True) for leaf in iter_combo_enhancement_leaves(
                 expression, parent_signal, partners, catalog, limit=1, accept=merge_ok))
             for leaf in merged:
                 merges += 1

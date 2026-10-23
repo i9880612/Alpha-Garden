@@ -76,6 +76,8 @@ class ComboEnhancementLeaf:
     sign: int = 1
     weight: float = 1.0
     family: str = COMBO_ENHANCEMENT
+    # The companion is a qualified alpha of another lineage (execution/combo_enhancement).
+    lineage_merge: bool = False
 
 
 # rank output is uniform on [0, 1] every day, so its cross-sectional spread is the constant

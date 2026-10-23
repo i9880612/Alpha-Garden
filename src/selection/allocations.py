@@ -95,6 +95,8 @@ class SignalImprovementSource:
     quality_remaining: int | None = None
     # Families aimed at the parent's diagnosed problem (learning/diagnosis.py).
     prescribed_families: tuple[str, ...] = ()
+    # A lineage merge is planned for this parent: its lineage is served first.
+    has_lineage_merge: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,10 +402,21 @@ def _round_robin_roots(
     rotation_key: str,
     family_cap: int | None = None,
 ) -> tuple[tuple[str, str, OptimizationTarget | None, str], ...]:
+    # A planned lineage merge (at most a few per cycle, each expected near EXCELLENT)
+    # must not lose its slot to the rotation: its lineage goes first and the merging
+    # branch leads inside it. On 10-23 one sat in a pool and 63 parents shared 24 slots.
+    def merging(branch_task_id: str) -> bool:
+        return source_by_branch[branch_task_id].has_lineage_merge
+
+    ranked_by_root = {
+        root_task_id: sorted(ranked, key=lambda item: 0 if merging(item[0]) else 1)
+        for root_task_id, ranked in ranked_by_root.items()
+    }
     roots = tuple(
         sorted(
             ranked_by_root,
             key=lambda root_task_id: (
+                0 if any(merging(branch) for branch, _ in ranked_by_root[root_task_id]) else 1,
                 _root_used_parent_attempts(
                     ranked_by_root[root_task_id],
                     source_by_branch,

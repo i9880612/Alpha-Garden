@@ -394,6 +394,8 @@ def plan_automated_cycle(
             mutations=planning_mutations,
         )
         enhancement_leaves = enhancement.leaves
+        merge_leaf_ids = frozenset(leaf.leaf_id for leaves in enhancement_leaves.values()
+                                   for leaf in leaves if leaf.lineage_merge)
         if enhancement_leaves or enhancement.skipped_as_duplicates:
             phase(cycle_number, 1, f"组合增强：{len(enhancement_leaves)} 个合格父代找到 "
                   f"{sum(map(len, enhancement_leaves.values()))} 个低相关补充信号"
@@ -457,6 +459,8 @@ def plan_automated_cycle(
                             if branch.task_id in quality_allowances else None,
                         quality_remaining=quality_allowances[branch.task_id].available if branch.task_id in quality_allowances else None,
                         prescribed_families=pool.prescribed_families if pool is not None else (),
+                        has_lineage_merge=pool is not None and any(
+                            candidate.leaf_id in merge_leaf_ids for candidate in pool.candidates),
                         family_capacities=tuple(
                             SignalImprovementFamilyCapacity(
                                 family=family,

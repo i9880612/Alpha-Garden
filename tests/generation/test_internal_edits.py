@@ -327,3 +327,9 @@ def test_siblings_with_the_same_signal_are_generated_once(catalog):
     formulas = {c.formula for c in candidates("rank(close)", catalog)}
     # normalize(close) and zscore(close) give the same positions: only one is tested.
     assert len(formulas & {"zscore(close)", "normalize(close)"}) == 1
+
+
+def test_a_parent_led_by_a_negative_weight_is_a_valid_parent(catalog):
+    # -1.7*rank(...) parses as a negated literal and normalizes to a negative literal;
+    # it is the same formula and must not stop planning as an invalid parent.
+    assert candidates("-1.7*rank(close)+rank(open)", catalog)

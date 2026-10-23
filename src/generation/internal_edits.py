@@ -147,7 +147,11 @@ def _valid(expression: Expression, catalog: GenerationCatalog) -> bool:
     if find_coarse_unit_issues(expression, catalog):
         return False
     logic = prepare_formula_logic(expression)
-    return logic.issue is None and logic.expression == expression
+    # Compare the written form: a leading negative weight (-1.7*rank(...)) parses as a
+    # negated literal but normalizes to a negative literal, the same formula (10-23:
+    # two such qualified combos stopped a cycle's planning as invalid parents).
+    return logic.issue is None and (logic.expression == expression
+                                    or render_formula(logic.expression) == render_formula(expression))
 
 
 def _edits(

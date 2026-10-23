@@ -76,6 +76,7 @@ zscore(parent) + w * zscore(companion)
 - A merge is checked only against **submitted alphas** and this cycle's children (skipped at ≥ 0.7), not against unsubmitted qualified alphas of other lineages: those are mostly variants of its two sources' ideas, and quality-first submission puts them behind a successful merge.
 - Local edits rarely lift an already tuned GOOD alpha, so this is focused optimization's main route to EXCELLENT; estimates lean optimistic and real backtests decide.
 - When a qualified parent has a planned combo (including a lineage merge), the combo comes before every other mutation, after only that parent's learned action preferences.
+- A parent with a planned lineage merge is served first when slots are handed out, so the merge always gets a slot.
 
 ## 6. Self-correlation (SC) control
 
