@@ -50,6 +50,7 @@ Both modes share the same attempt budgets; switching modes resets nothing.
 - A parent that is already a weighted sum of up to 3 bounded terms (rank, quantile, ts_rank, ts_corr and similar) gets no distribution stabilization: it has no tails, so another zscore or rank barely moves it.
 - With neutralization in the settings, a child that only adds or removes a root `zscore`/`normalize`/`scale` is a no-op: the platform already removes each group's mean and rescales the book, so positions stay the same.
 - Group fields with a single group are not used for group mutations: `market` is one group everywhere, and in a single-country region (such as USA) so are `country` and `currency`.
+- The platform reports a placeholder coverage of exactly 0.5 for every fundamental6 field (real position coverage 73%–100%); risk screening does not treat it as sparse.
 - Fields the profile marks as non-signals (codes, market-wide constants, adjustment factors like `adjfactor`) are not used for random exploration or mutations.
 
 ## 5. Combo enhancement
@@ -74,6 +75,7 @@ zscore(parent) + w * zscore(companion)
 - Each alpha joins at most one merge per cycle, with at most 10 merges per cycle.
 - A merge is checked only against **submitted alphas** and this cycle's children (skipped at ≥ 0.7), not against unsubmitted qualified alphas of other lineages: those are mostly variants of its two sources' ideas, and quality-first submission puts them behind a successful merge.
 - Local edits rarely lift an already tuned GOOD alpha, so this is focused optimization's main route to EXCELLENT; estimates lean optimistic and real backtests decide.
+- When a qualified parent has a planned combo (including a lineage merge), the combo comes before every other mutation, after only that parent's learned action preferences.
 
 ## 6. Self-correlation (SC) control
 

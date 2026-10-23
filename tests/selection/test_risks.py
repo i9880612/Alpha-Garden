@@ -38,6 +38,12 @@ class CandidateRiskTests(unittest.TestCase):
             ("multiple_sparse_inputs_without_fill",),
         )
 
+    def test_the_placeholder_coverage_of_fundamentals_is_not_sparse(self) -> None:
+        # Fundamental fields report exactly 0.5 whatever their real coverage.
+        self.assertTrue(self._assess("rank(fundamental_a+fundamental_b)").eligible)
+        self.assertEqual(self._assess("rank(sparse_a+fundamental_a+sparse_b)").rejection_reasons,
+                         ("multiple_sparse_inputs_without_fill",))
+
     def test_explicit_backfill_keeps_sparse_field_exploration_available(self) -> None:
         assessed = self._assess(
             "rank(ts_backfill(sparse_a,22)+ts_backfill(sparse_b,22))"
@@ -107,6 +113,8 @@ class CandidateRiskTests(unittest.TestCase):
                     self._field("open", 1.0),
                     self._field("sparse_a", 0.4),
                     self._field("sparse_b", 0.6),
+                    self._field("fundamental_a", 0.5),
+                    self._field("fundamental_b", 0.5),
                     self._field("empty", 0.0),
                 ),
                 operators=(

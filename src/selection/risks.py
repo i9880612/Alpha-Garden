@@ -8,6 +8,10 @@ from generation.structure_limits import fits_formula_structure_limits
 
 
 _LOW_COVERAGE_THRESHOLD = 0.70
+# The platform reports exactly 0.5 for every fundamental6 field (886 of them), a
+# placeholder: rank(sales/cap) held 2990 of 3000 stocks and rank(fnd6_drc/cap) 2193
+# (2026-10-22). That value says nothing about coverage, so it is not taken as sparse.
+_PLACEHOLDER_COVERAGE = 0.5
 _COVERAGE_REPAIR_OPERATORS = frozenset({"group_backfill", "kth_element", "ts_backfill"})
 _TAIL_CONTROL_OPERATORS = frozenset(
     {
@@ -78,7 +82,8 @@ def assess_candidate_risk(
                 reasons.add("field_coverage_missing")
             elif field.coverage == 0:
                 reasons.add("field_coverage_zero")
-            elif field.coverage < _LOW_COVERAGE_THRESHOLD and not coverage_repaired:
+            elif (field.coverage < _LOW_COVERAGE_THRESHOLD and not coverage_repaired
+                  and field.coverage != _PLACEHOLDER_COVERAGE):
                 sparse_unfilled_fields.add(field.field_id)
             return
         if isinstance(node, Literal):

@@ -892,7 +892,10 @@ def _candidate_family_order(
         if item.action in preferred and item.resolved_count > 0
     } if target is not None and target.name == "SELF_CORRELATION" and action_strategy is not None else {}
     # Learned preferences outrank the diagnosis; the diagnosis outranks plain rotation,
-    # except on the exploration slots that keep other fixes findable.
+    # except on the exploration slots that keep other fixes findable. A planned combo
+    # (only present for a qualified parent) comes right after learned preferences: it
+    # lifted 9 of 12 qualified parents while local edits of GOOD parents lifted none,
+    # and a lineage merge is the one planned step toward EXCELLENT (2026-10-22).
     aimed = (
         set(prescribed)
         if prescribed and (target is None or target.name != "SELF_CORRELATION")
@@ -908,6 +911,7 @@ def _candidate_family_order(
                     if action in preferred
                     else 2 if action in deprioritized else 1
                 ),
+                0 if action in COMBO_ENHANCEMENT_FAMILIES else 1,
                 0 if action in aimed else 1,
                 -sc_success_rates.get(action, 0.0),
                 comparison_counts.get(action, 0),

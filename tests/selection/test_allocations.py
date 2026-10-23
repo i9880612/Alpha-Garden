@@ -1718,6 +1718,19 @@ class PrescribedFamilyOrderTests(unittest.TestCase):
                 explored += 1
         self.assertTrue(led and explored)
 
+    def test_a_planned_combo_comes_first_on_every_slot(self) -> None:
+        from generation.combo_enhancement import COMBO_ENHANCEMENT
+        from generation.transformations import TEMPORAL_PERSISTENCE_REFRAME
+        from selection.allocations import _candidate_family_order
+        families = (TEMPORAL_CHANGE_REFRAME, TEMPORAL_PERSISTENCE_REFRAME, COMBO_ENHANCEMENT)
+        for slot in range(10):
+            order = _candidate_family_order(
+                None, families, attempted_by_family={}, rotation_key="run|1",
+                parent_task_id="parent", slot=slot, action_strategy=None,
+                use_preference=False, prescribed=(TEMPORAL_PERSISTENCE_REFRAME,),
+            )
+            self.assertEqual(order[0], COMBO_ENHANCEMENT)
+
 
 if __name__ == "__main__":
     unittest.main()
