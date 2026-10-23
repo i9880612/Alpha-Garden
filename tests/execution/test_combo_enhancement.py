@@ -154,3 +154,53 @@ class ComboEnhancementCompanionTests(unittest.TestCase):
                     user.task.formula, f"{user.task.formula}+1.2*{companion.task.formula}"))
             offered = self._offered(connection, (parent,))
         self.assertEqual(offered[parent.task.platform_alpha_id], [other.task.platform_alpha_id])
+
+    def _merge_calls(self, connection, parent):
+        calls = []
+
+        def capture(expression, parent_signal, companions, catalog, **kwargs):
+            calls.append((kwargs.get("limit"), {c.alpha_id: c for c in companions}, kwargs["accept"]))
+            return iter(())
+
+        with patch("execution.combo_enhancement.iter_combo_enhancement_leaves", side_effect=capture):
+            load_combo_enhancement_leaves(connection, None, account_scope="group-account",
+                                          parents=(parent,), mutations=list_backtest_mutations(connection))
+        return [call for call in calls if call[0] == 1]
+
+    def test_a_good_parent_may_merge_with_a_weaker_good_alpha_of_another_lineage(self):
+        with open_database(self.database_path) as connection:
+            parent = complete_candidate(connection, prepare_candidate(connection), sharpe=1.8)
+            weaker = complete_candidate(connection, prepare_candidate(connection), sharpe=1.5)
+            stronger = complete_candidate(connection, prepare_candidate(connection), sharpe=2.0)
+            own = complete_candidate(connection, prepare_candidate(connection, parent=parent), sharpe=1.4)
+            average = complete_candidate(connection, prepare_candidate(connection), sharpe=1.4,
+                                         grade="AVERAGE")
+            [(_, partners, _)] = self._merge_calls(connection, parent)
+        # The stronger alpha leads its own merge; the parent's own lineage and an
+        # AVERAGE alpha are not partners.
+        self.assertIn(weaker.task.platform_alpha_id, partners)
+        for excluded in (stronger, own, average):
+            self.assertNotIn(excluded.task.platform_alpha_id, partners)
+
+    def test_an_average_parent_does_not_merge(self):
+        with open_database(self.database_path) as connection:
+            parent = complete_candidate(connection, prepare_candidate(connection), grade="AVERAGE")
+            complete_candidate(connection, prepare_candidate(connection), sharpe=1.2)
+            self.assertEqual(self._merge_calls(connection, parent), [])
+
+    def test_a_merge_must_reach_excellent_and_may_resemble_stored_lineages(self):
+        from generation.combo_enhancement import EnhancementPlan
+        with open_database(self.database_path) as connection:
+            parent = complete_candidate(connection, prepare_candidate(connection), sharpe=1.8)
+            partner = complete_candidate(connection, prepare_candidate(connection), sharpe=1.5)
+            stored = complete_candidate(connection, prepare_candidate(connection), sharpe=1.2,
+                                        grade="AVERAGE")
+            mixed = [p + c for p, c in zip(self._increments(connection, parent),
+                                           self._increments(connection, partner))]
+            self._replace_curve(connection, stored, mixed)
+            [(_, partners, accept)] = self._merge_calls(connection, parent)
+            source = partners[partner.task.platform_alpha_id]
+            # Fitness 1.6 * 1.3 >= 2.0: a stored lookalike of another lineage does not veto it.
+            self.assertTrue(accept(EnhancementPlan(1, 1.0, 1.3, 0.0, 1.3), source))
+            # Fitness 1.6 * 1.2 < 2.0: not worth a merge.
+            self.assertFalse(accept(EnhancementPlan(1, 1.0, 1.2, 0.0, 1.2), source))

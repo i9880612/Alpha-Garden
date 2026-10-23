@@ -13,6 +13,14 @@ about 0.1), so before any backtest the predicted curve is compared with every ch
 alpha of other lineages, every submitted alpha and the children already chosen this
 cycle; at the platform's self-correlation line or above, the pair is skipped and the
 next best one takes its place.
+
+Lineage merge: a GOOD-or-better parent may also take a GOOD-or-better alpha of another
+lineage as its companion when the pair is expected to reach EXCELLENT (Fitness 2.0).
+Local edits rarely lift an already tuned GOOD alpha (2026-10-22: none of them did),
+while 67 pairs of independent qualified alphas were expected at 2.0 or above. The
+stronger side is the parent, each alpha joins one merge per cycle, and the veto skips
+only submitted alphas and this cycle's children: a merge aims above the stored alphas it
+resembles, which are variants of its own sources' ideas.
 """
 from __future__ import annotations
 
@@ -42,6 +50,9 @@ from persistence.submissions import list_platform_submitted_alphas
 from submission.formal import assess_formal_check_payload
 
 MAX_COMPANIONS = 60
+MERGE_GRADES = frozenset({"GOOD", "EXCELLENT", "SPECTACULAR"})
+MERGE_MIN_FITNESS = 2.0
+MAX_MERGES_PER_CYCLE = 10
 MAX_LINEAGES_PER_COMPANION = 3
 # The platform's self-correlation line: above it two alphas block each other at submission.
 MAX_CROSS_LINEAGE_CORRELATION = 0.7
@@ -55,6 +66,8 @@ class ComboEnhancementPlan:
     leaves: dict[str, tuple[ComboEnhancementLeaf, ...]]
     # Pairs skipped because their predicted curve copies another lineage.
     skipped_as_duplicates: int = 0
+    # Children that merge two qualified lineages (included in leaves).
+    merges: int = 0
 
 
 def load_combo_enhancement_leaves(
@@ -70,7 +83,9 @@ def load_combo_enhancement_leaves(
     if not parents:
         return ComboEnhancementPlan({})
     companions = _companions(connection, account_scope)
-    if not companions:
+    lineage = _lineage_roots(mutations)
+    merge_sources = _merge_sources(connection, account_scope, lineage)
+    if not companions and not merge_sources:
         return ComboEnhancementPlan({})
     parent_pnl = _daily_series(connection, account_scope,
                                frozenset(p.task.platform_alpha_id for p in parents))
@@ -83,9 +98,18 @@ def load_combo_enhancement_leaves(
             # Added by this step: in the child but not already in the parent.
             if any(text in mutation.after and text not in mutation.before for text in texts):
                 used[alpha_id].add(mutation.parent_task_id)
-    lineage = _lineage_roots(mutations)
+    for mutation in mutations:
+        if mutation.action != COMBO_ENHANCEMENT:
+            continue
+        for alpha_id, (source, _) in merge_sources.items():
+            if any(text in mutation.after and text not in mutation.before
+                   for text in companion_markers(source.expression)):
+                used[alpha_id].add(mutation.parent_task_id)
     references = _reference_curves(connection, account_scope, lineage)
     companion_by_id = {companion.alpha_id: companion for companion in companions}
+    companion_by_id.update({alpha_id: source for alpha_id, (source, _) in merge_sources.items()})
+    merged_alphas: set[str] = set()
+    merges = 0
     offered: Counter[str] = Counter()
     skipped = 0
     leaves: dict[str, tuple[ComboEnhancementLeaf, ...]] = {}
@@ -121,9 +145,48 @@ def load_combo_enhancement_leaves(
         for leaf in found:
             references.add(_predicted(daily, companion_by_id[leaf.companion_alpha_id].daily_pnl,
                                       leaf.sign, leaf.weight), root)
+        if (merges < MAX_MERGES_PER_CYCLE and (result.grade or "").upper() in MERGE_GRADES
+                and parent.task.platform_alpha_id not in merged_alphas):
+            parent_signal = EnhancementSignal(parent.task.platform_alpha_id, expression, daily,
+                BacktestMetrics(result.sharpe, result.fitness, result.returns, result.turnover))
+            partners = tuple(
+                source for alpha_id, (source, source_root) in sorted(merge_sources.items())
+                if source_root != root and alpha_id not in merged_alphas
+                and alpha_id != parent.task.platform_alpha_id
+                and parent.task.task_id not in used[alpha_id]
+                # The stronger side is the parent, so a pair is planned once.
+                and _stronger(parent_signal.metrics, alpha_id, source.metrics,
+                              parent.task.platform_alpha_id))
+
+            def merge_ok(plan, source, daily=daily, root=root, fitness=abs(result.fitness)) -> bool:
+                nonlocal skipped
+                if plan.expected_gain * fitness < MERGE_MIN_FITNESS:
+                    return False
+                if references.distinct(_predicted(daily, source.daily_pnl, plan.sign, plan.weight),
+                                       root, merge=True):
+                    return True
+                skipped += 1
+                return False
+
+            merged = tuple(iter_combo_enhancement_leaves(
+                expression, parent_signal, partners, catalog, limit=1, accept=merge_ok))
+            for leaf in merged:
+                merges += 1
+                merged_alphas.update({parent.task.platform_alpha_id, leaf.companion_alpha_id})
+                references.add(_predicted(daily, companion_by_id[leaf.companion_alpha_id].daily_pnl,
+                                          leaf.sign, leaf.weight), root)
+            found = merged + found
         if found:
             leaves[parent.task.task_id] = found
-    return ComboEnhancementPlan(leaves, skipped)
+    return ComboEnhancementPlan(leaves, skipped, merges)
+
+
+def _stronger(first: BacktestMetrics | None, second_id: str, second: BacktestMetrics | None,
+              first_id: str) -> bool:
+    """The higher-Sharpe side leads, so its partner joins at a weight of about 1 or less."""
+    if first is None or second is None:
+        return False
+    return (abs(first.sharpe), second_id) > (abs(second.sharpe), first_id)
 
 
 def _predicted(parent: Mapping[str, float], companion: Mapping[str, float], sign: int,
@@ -135,19 +198,27 @@ class _ReferenceCurves:
     """Daily PnL curves tagged with their lineage, for a bounded correlation scan."""
 
     def __init__(self) -> None:
-        self._curves: list[tuple[str, dict[str, float], float]] = []
+        self._curves: list[tuple[str, dict[str, float], float, bool]] = []
 
-    def add(self, daily: Mapping[str, float], root: str) -> None:
+    def add(self, daily: Mapping[str, float], root: str, *, submitted: bool = True) -> None:
+        """``submitted`` marks a curve that binds a merge too: submitted alphas and the
+        children chosen this cycle (stored alphas of other lineages pass False)."""
         if len(daily) < _MIN_OVERLAP_DAYS:
             return
         mean = sum(daily.values()) / len(daily)
         centered = {day: value - mean for day, value in daily.items()}
         norm = math.sqrt(sum(v * v for v in centered.values()))
         if norm > 0:
-            self._curves.append((root, centered, norm))
+            self._curves.append((root, centered, norm, submitted))
 
-    def distinct(self, daily: Mapping[str, float], root: str) -> bool:
-        """False if any curve of another lineage correlates at the line or above."""
+    def distinct(self, daily: Mapping[str, float], root: str, *, merge: bool = False) -> bool:
+        """False if any curve of another lineage correlates at the line or above.
+
+        A merge is held only to submitted alphas and this cycle's children: it aims above
+        every stored alpha it resembles (EXCELLENT), and the stored lineages it would
+        overlap are variants of its own sources' ideas, which quality-first submission
+        then leaves behind. The platform's check still guards submission.
+        """
         if len(daily) < _MIN_OVERLAP_DAYS:
             return True
         mean = sum(daily.values()) / len(daily)
@@ -155,8 +226,8 @@ class _ReferenceCurves:
         norm = math.sqrt(sum(v * v for v in centered.values()))
         if norm == 0:
             return True
-        for other_root, other, other_norm in self._curves:
-            if other_root == root:
+        for other_root, other, other_norm, submitted in self._curves:
+            if other_root == root or (merge and not submitted):
                 continue
             dot = sum(value * other.get(day, 0.0) for day, value in centered.items())
             if dot / (norm * other_norm) >= MAX_CROSS_LINEAGE_CORRELATION:
@@ -184,6 +255,7 @@ def _lineage_roots(mutations: tuple[BacktestMutationRecord, ...]):
 def _reference_curves(connection: sqlite3.Connection, account_scope: str, lineage) -> _ReferenceCurves:
     """Every alpha whose submission check passed, and every submitted alpha."""
     checked = {}
+    submitted: set[str] = set()
     for record in list_submission_checks(connection, account_scope=account_scope):
         payload = json.loads(record.payload_json) if record.payload_json else None
         if assess_formal_check_payload(payload).state == "passed":
@@ -192,6 +264,7 @@ def _reference_curves(connection: sqlite3.Connection, account_scope: str, lineag
             if row is not None and row[0]:
                 checked[row[0]] = lineage(record.task_id)
     for reference in list_platform_submitted_alphas(connection, account_scope=account_scope):
+        submitted.add(reference.platform_alpha_id)
         if reference.platform_alpha_id not in checked:
             row = connection.execute(
                 "SELECT task_id FROM backtest_tasks WHERE account_scope=? AND platform_alpha_id=?",
@@ -200,8 +273,49 @@ def _reference_curves(connection: sqlite3.Connection, account_scope: str, lineag
                                                      else f"submitted:{reference.platform_alpha_id}")
     curves = _ReferenceCurves()
     for alpha_id, daily in _daily_series(connection, account_scope, frozenset(checked)).items():
-        curves.add(daily, checked[alpha_id])
+        curves.add(daily, checked[alpha_id], submitted=alpha_id in submitted)  # stored alphas
     return curves
+
+
+def _merge_sources(connection: sqlite3.Connection, account_scope: str,
+                   lineage) -> dict[str, tuple[EnhancementSignal, str]]:
+    """Qualified GOOD-or-better alphas that are not submitted: alpha id -> (signal, lineage root)."""
+    submitted = {reference.platform_alpha_id
+                 for reference in list_platform_submitted_alphas(connection, account_scope=account_scope)}
+    rows = []
+    for record in list_submission_checks(connection, account_scope=account_scope):
+        payload = json.loads(record.payload_json) if record.payload_json else None
+        if assess_formal_check_payload(payload).state != "passed":
+            continue
+        row = connection.execute(
+            """SELECT t.task_id, t.formula, t.platform_alpha_id, r.sharpe, r.fitness, r.returns,
+                      r.turnover, r.grade
+               FROM backtest_tasks t JOIN backtest_results r ON r.task_id = t.task_id
+               WHERE t.task_id = ? AND t.account_scope = ?""",
+            (record.task_id, account_scope)).fetchone()
+        if (row is not None and row[2] and row[2] not in submitted
+                and (row[7] or "").upper() in MERGE_GRADES and None not in row[3:7]):
+            rows.append(row)
+    series = _daily_series(connection, account_scope, frozenset(row[2] for row in rows))
+    # One alpha per idea: the best Fitness, then the plainest formula (a near-copy such
+    # as zscore(zscore(normalize(x))+...) adds nothing but length to a merge).
+    rows.sort(key=lambda row: (-abs(row[4]), len(row[1]), row[2]))
+    sources: dict[str, tuple[EnhancementSignal, str]] = {}
+    for task_id, formula, alpha_id, sharpe, fitness, returns, turnover, _ in rows:
+        daily = series.get(alpha_id)
+        if not daily:
+            continue
+        if any((value := _correlation(daily, kept.daily_pnl)) is not None and value > SAME_IDEA_CORRELATION
+               for kept, _ in sources.values()):
+            continue
+        try:
+            expression = parse_formula(formula).expression
+        except FormulaSyntaxError:
+            continue
+        sources[alpha_id] = (EnhancementSignal(alpha_id, expression, daily,
+                                               BacktestMetrics(sharpe, fitness, returns, turnover)),
+                             lineage(task_id))
+    return sources
 
 
 def _companions(connection: sqlite3.Connection, account_scope: str) -> tuple[EnhancementSignal, ...]:

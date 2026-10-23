@@ -396,7 +396,8 @@ def plan_automated_cycle(
         enhancement_leaves = enhancement.leaves
         if enhancement_leaves or enhancement.skipped_as_duplicates:
             phase(cycle_number, 1, f"组合增强：{len(enhancement_leaves)} 个合格父代找到 "
-                  f"{sum(map(len, enhancement_leaves.values()))} 个低相关补充信号；"
+                  f"{sum(map(len, enhancement_leaves.values()))} 个低相关补充信号"
+                  f"（其中谱系合并 {enhancement.merges} 个）；"
                   f"跳过 {enhancement.skipped_as_duplicates} 个预计与其他谱系重复的组合")
         improvement_pools = build_improvement_candidate_pools(
             catalog,

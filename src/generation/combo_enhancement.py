@@ -89,6 +89,8 @@ def _term(expression: Expression) -> tuple[str, float]:
     text = render_formula(expression)
     if isinstance(expression, Call) and expression.operator == "rank" and len(expression.arguments) == 1:
         return text, RANK_ZSCORE_SCALE
+    if isinstance(expression, Call) and expression.operator == "zscore" and len(expression.arguments) == 1:
+        return text, 1.0  # already on the zscore scale
     return f"zscore({text})", 1.0
 
 
