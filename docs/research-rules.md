@@ -39,7 +39,7 @@ Both modes share the same attempt budgets; switching modes resets nothing.
 ## 4. Mutations and weak-spot diagnosis
 
 - Both normal mutations and focused optimization first diagnose the parent's weak spot and try the matching mutations first:
-  - **High turnover**: turnover >30%, or Fitness is the weak spot and turnover >12.5%. A decay ladder `ts_decay_linear(parent, n)` with n = 3, 6, 10, 15 is also available.
+  - **High turnover**: turnover >30%, or Fitness is the weak spot and turnover >12.5%. Above 30% turnover a decay ladder `ts_decay_linear(parent, n)` with n = 3, 6, 10, 15 is also available (around 20% turnover it almost always lowered Fitness).
   - **Low turnover**, **low returns** (Fitness is the weak spot and turnover ≤12.5%), **low Sharpe**.
 - Each cycle recomputes "weak spot → mutation family" from the last 30 days: a mutation counts as effective only if the child's Fitness beats the parent's, the weak metric moves the right way and the child does not fail SC.
 - Action preferences learned for a parent come first; about one in five slots ignores the diagnosis to keep exploring.
@@ -47,6 +47,8 @@ Both modes share the same attempt budgets; switching modes resets nothing.
 - No-op mutations that don't change the signal are skipped at generation time: a monotone transform inside `group_rank`, a repeated `rank`, or a child with the same signal as its parent or a sibling (at the root, `normalize(x)` and `zscore(x)` give the same positions, so only one is tested).
 - Parents with turnover below 5% get no smoothing mutations: the signal barely moves, so smoothing returns the parent.
 - `winsorize` is not wrapped around a weighted sum of up to 3 rank terms: such a sum never reaches the 4-standard-deviation clip, so nothing changes.
+- A parent that is already a weighted sum of up to 3 bounded terms (rank, quantile, ts_rank, ts_corr and similar) gets no distribution stabilization: it has no tails, so another zscore or rank barely moves it.
+- With neutralization in the settings, a child that only adds or removes a root `zscore`/`normalize`/`scale` is a no-op: the platform already removes each group's mean and rescales the book, so positions stay the same.
 - Group fields with a single group are not used for group mutations: `market` is one group everywhere, and in a single-country region (such as USA) so are `country` and `currency`.
 - Fields the profile marks as non-signals (codes, market-wide constants, adjustment factors like `adjfactor`) are not used for random exploration or mutations.
 

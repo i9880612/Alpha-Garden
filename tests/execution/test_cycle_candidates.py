@@ -97,6 +97,11 @@ class ImprovementCandidatePoolTests(unittest.TestCase):
                     OperatorParameter("x", "expr"),
                 ),
                 self._operator(
+                    "zscore",
+                    ("cross_sectional_normalization",),
+                    OperatorParameter("x", "expr"),
+                ),
+                self._operator(
                     "ts_delta",
                     ("time_series_change",),
                     OperatorParameter("x", "expr"),
@@ -636,6 +641,30 @@ class ImprovementCandidatePoolTests(unittest.TestCase):
         slow = families(0.02)
         self.assertNotIn(TEMPORAL_PERSISTENCE_REFRAME, slow)
         self.assertIn(TEMPORAL_CHANGE_REFRAME, slow)
+
+    def test_decay_ladder_waits_for_turnover_above_thirty_percent(self) -> None:
+        from dataclasses import replace
+        from unittest.mock import patch
+        def climbs(turnover):
+            parent = self._parent_snapshot("parent-busy", "rank(ts_delta(close,5))")
+            parent = replace(parent, result=replace(parent.result, turnover=turnover))
+            with patch("execution.cycle_candidates.iter_decay_ladder_leaves",
+                       return_value=iter(())) as ladder:
+                self._pools(eligible_parent_task_ids=(parent.task.task_id,),
+                            completed_by_task_id={parent.task.task_id: parent})
+            return ladder.called
+        self.assertFalse(climbs(0.20))
+        self.assertTrue(climbs(0.40))
+
+    def test_root_affine_child_of_a_neutralized_parent_is_skipped(self) -> None:
+        # Under neutralization zscore(x) and x hold the same positions, so removing
+        # the root zscore is no change at all.
+        parent = self._parent_snapshot("parent-mix", "zscore(rank(close)-rank(open))")
+        pool = self._pools(eligible_parent_task_ids=(parent.task.task_id,),
+                           completed_by_task_id={parent.task.task_id: parent})[0]
+        formulas = {candidate.candidate.formula for candidate in pool.candidates}
+        self.assertTrue(formulas)
+        self.assertNotIn("rank(close)-rank(open)", formulas)
 
     def test_high_sc_can_use_targeted_edits_while_unknown_sc_remains_ordinary(self):
         parent = self._parent_snapshot("parent-sc", "rank(ts_mean(close,5))")

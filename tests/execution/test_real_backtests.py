@@ -449,8 +449,32 @@ class RealBacktestExecutionTests(unittest.TestCase):
         self.assertIsNone(snapshot.result)
         self.assertIsNone(snapshot.yearly_stats)
 
+    def test_platform_duplicate_alpha_fails_once_without_rereading(self):
+        # The platform files an alias-field formula under an existing alpha whose code
+        # is the other spelling; reading again would return the same.
+        self.formula = "rank(close)"
+        prepared = self._prepare()
+        with open_database(self.database_path) as connection:
+            record_submission_accepted(
+                connection, prepared.task.task_id,
+                remote_id="https://api.worldquantbrain.com/simulations/duplicate",
+                platform_alpha_id="alpha-1", observed_at="2026-08-29T00:02:00+00:00",
+            )
+        payload = self._detail_payload()
+        payload["regular"]["code"] = "rank(high)"
+        executor = FakeExecutor(self._response(201, {}), self._response(200, payload))
+        client = self._client(executor)
+        client.authenticate()
+        failed = advance_real_backtest(
+            self.database_path, client, prepared.task.task_id,
+            observed_at="2026-08-29T00:03:00+00:00",
+        )
+        self.assertEqual(failed.snapshot.task.failure_code, "platform_duplicate_alpha")
+        self.assertIn("rank(high)", failed.snapshot.task.failure_message)
+        self.assertEqual([r.get_method() for r in executor.requests[1:]], ["GET"])
+
     def test_invalid_task_response_exhaustion_fails_locally_without_reposting(self):
-        for stage in ("poll", "detail"):
+        for stage in ("poll",):
             with self.subTest(stage=stage):
                 self.formula = "rank(close)" if stage == "detail" else "rank(open)"
                 prepared = self._prepare()

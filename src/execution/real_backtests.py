@@ -44,6 +44,7 @@ from persistence.runs import (
 from worldquant.backtests import (
     BacktestSettings,
     WorldQuantDetailMetricUnavailable,
+    WorldQuantDuplicateAlpha,
     WorldQuantProtocolError,
     WorldQuantZeroCapitalResult,
     build_backtest_request,
@@ -150,6 +151,23 @@ def advance_real_backtest(
         except WorldQuantProtocolError as exc:
             if exc.code not in _TASK_RESPONSE_ERRORS:
                 raise
+            if isinstance(exc, WorldQuantDuplicateAlpha):
+                # A stable platform answer, not a transient fault: reading again only
+                # returns the same alpha, so settle it now.
+                with open_database(database_path) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    snapshot = fail_backtest_task(
+                        connection, task_id,
+                        failure_code="platform_duplicate_alpha",
+                        failure_message=(
+                            "平台把它归入一条已有 Alpha（多为字段别名，结果与已有公式相同），"
+                            f"不再重复读取：{exc.platform_formula[:200]}"
+                        ),
+                        observed_at=observed_at,
+                    )
+                return RealBacktestAdvance(
+                    action="failed", snapshot=snapshot, platform_request_performed=True,
+                )
             if attempt < MAX_BACKTEST_RESPONSE_ATTEMPTS:
                 continue
             with open_database(database_path) as connection:

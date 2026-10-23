@@ -137,6 +137,10 @@ def iter_transformation_leaves(
     for family in STRUCTURAL_TRANSFORMATION_FAMILIES:
         if family not in requested_families:
             continue
+        if family == DISTRIBUTION_STABILIZATION and is_bounded_mix(expression):
+            # Nothing to stabilize: 12 of 16 such children matched their rank-mix
+            # parents at 0.996-1.000 (2026-10-22).
+            continue
         candidates = iter(
             _family_candidates(
                 expression,
@@ -583,6 +587,68 @@ def _small_rank_mix(expression: Expression) -> bool:
         return False
 
     return collect(expression) and 1 <= len(terms) <= _MAX_WINSORIZE_FREE_TERMS
+
+
+# Terms whose values stay in a fixed range whatever the input: ranks and correlations.
+_BOUNDED_TERMS = frozenset({"rank", "group_rank", "quantile", "ts_rank", "ts_corr"})
+_RESHAPER_WRAPPERS = frozenset({"rank", "quantile", "zscore", "normalize", "scale", "winsorize"})
+
+
+def is_bounded_mix(expression: Expression, *, max_terms: int = 3) -> bool:
+    """A reshaper around, or a constant-weighted sum of, at most a few bounded terms.
+
+    Such a signal has no tails to trim and an even spread already, so a further
+    reshaper (zscore, rank, quantile, winsorize) barely moves it.
+    """
+    terms = 0
+
+    def term(node: Expression) -> bool:
+        nonlocal terms
+        if isinstance(node, Prefix) and node.operator == "-":
+            return term(node.operand)
+        if isinstance(node, Call) and node.operator in _BOUNDED_TERMS:
+            terms += 1
+            return True
+        inner = _sole_argument(node) if isinstance(node, Call) else None
+        if isinstance(node, Call) and node.operator in _RESHAPER_WRAPPERS and inner is not None:
+            return mix(inner)
+        return False
+
+    def mix(node: Expression) -> bool:
+        if isinstance(node, Binary) and node.operator in {"+", "-"}:
+            return mix(node.left) and mix(node.right)
+        if isinstance(node, Binary) and node.operator == "*":
+            if isinstance(node.left, Literal):
+                return mix(node.right)
+            if isinstance(node.right, Literal):
+                return mix(node.left)
+            return False
+        return term(node)
+
+    return mix(expression) and 1 <= terms <= max_terms
+
+
+_ROOT_AFFINE = frozenset({"zscore", "normalize", "scale"})
+
+
+def strip_root_affine(expression: Expression) -> Expression:
+    """Drop zscore/normalize/scale at the root, where neutralization makes them no-ops.
+
+    With any neutralization the platform removes each group's mean and rescales the
+    book every day, so a per-day shift and positive scale cannot change positions:
+    zscore(rank(a)+w*rank(b)) matched rank(a)+w*rank(b) at 1.000 (2026-10-22).
+    """
+    if isinstance(expression, Prefix) and expression.operator == "-":
+        return Prefix("-", strip_root_affine(expression.operand))
+    if isinstance(expression, Call) and expression.operator in _ROOT_AFFINE:
+        inner = _sole_argument(expression)
+        if inner is not None:
+            return strip_root_affine(inner)
+    return expression
+
+
+def same_signal_when_neutralized(first: Expression, second: Expression) -> bool:
+    return signal_key(strip_root_affine(first)) == signal_key(strip_root_affine(second))
 
 
 def _sole_argument(call: Call) -> Expression | None:

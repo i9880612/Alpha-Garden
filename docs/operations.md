@@ -76,6 +76,7 @@ Check retries:
 - Authentication failures, or HTTP 429 after bounded retries, stop further requests immediately; wait for the printed `Retry-After` before trying again.
 - A 429 on formal checks waits at least 60 seconds; the log shows that the queue check was rate-limited, and backtest results are unaffected.
 - After each PnL collection the next request waits at least 2 seconds; on 429 the whole run backs off and the saved cooldown survives restarts. 2 seconds is a conservative local value, not a guarantee against 429s.
+- The platform sometimes files a formula that uses an alias field under an existing alpha (whose code is the other spelling); such a task is recorded as `platform_duplicate_alpha` at once instead of being re-read.
 - `maxConsecutiveFailures`, `maxRequestFailures` and `maxPendingSeconds` in the run configuration set the failure limits.
 
 ## Database upgrades

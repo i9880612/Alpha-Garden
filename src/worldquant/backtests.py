@@ -19,6 +19,19 @@ class WorldQuantDetailMetricUnavailable(WorldQuantProtocolError):
         super().__init__(f"worldquant_detail_metric_unavailable:{metric_name}")
 
 
+class WorldQuantDuplicateAlpha(WorldQuantProtocolError):
+    """The platform filed the simulation under an alpha that holds another formula.
+
+    The platform treats some fields as aliases (anl4_totassets_high and
+    anl4_fs_detail_estimate_1qf_v4_nd_totassets_high) and returns the existing alpha,
+    whose code is the other spelling; re-reading returns the same (2026-10-22).
+    """
+
+    def __init__(self, platform_formula: str) -> None:
+        self.platform_formula = platform_formula
+        super().__init__("worldquant_detail_formula_mismatch")
+
+
 class WorldQuantZeroCapitalResult(WorldQuantProtocolError):
     def __init__(self) -> None:
         super().__init__("worldquant_detail_zero_capital")
@@ -385,7 +398,7 @@ def parse_backtest_detail(
         "worldquant_detail_formula_missing",
     )
     if formula != expected_formula:
-        raise WorldQuantProtocolError("worldquant_detail_formula_mismatch")
+        raise WorldQuantDuplicateAlpha(formula)
 
     response_settings = payload.get("settings")
     if not isinstance(response_settings, Mapping):

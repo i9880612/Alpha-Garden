@@ -43,6 +43,7 @@ from generation.transformations import (
     TEMPORAL_PERSISTENCE_REFRAME,
     TemporalReframeSpec,
     iter_transformation_leaves,
+    same_signal_when_neutralized,
 )
 from learning.quality_proximity import (
     LOCAL_POLISHING_STAGE,
@@ -51,6 +52,7 @@ from learning.quality_proximity import (
 )
 from learning.diagnosis import (
     HIGH_TURNOVER,
+    HIGH_TURNOVER_LEVEL,
     SHORT_SMOOTHING_WINDOW,
     ParentDiagnosis,
     diagnose_parent,
@@ -294,8 +296,10 @@ def build_improvement_candidate_pools(
         if stage == QUALIFIED_EVOLUTION_STAGE and enhancement_leaves:
             # Proven independent companions come first, best expected gain first.
             leaves = chain(enhancement_leaves.get(parent_task_id, ()), leaves)
-        if diagnosis is not None and diagnosis.problem == HIGH_TURNOVER:
-            # Only a parent that trades too much climbs the decay ladder.
+        if (diagnosis is not None and diagnosis.problem == HIGH_TURNOVER
+                and parent.result.turnover > HIGH_TURNOVER_LEVEL):
+            # Only a parent that trades too much climbs the decay ladder: at 17-22%
+            # turnover 11 ladder children lost or kept Fitness, none gained (2026-10-22).
             leaves = chain(iter_decay_ladder_leaves(parsed.expression, catalog), leaves)
         sc_reference = references_by_parent.get(parent_task_id)
         sc_families = allowed_self_correlation_families(
@@ -355,6 +359,9 @@ def build_improvement_candidate_pools(
         for leaf in leaves:
             if (parent.result.turnover < SMOOTHING_MIN_PARENT_TURNOVER
                     and getattr(leaf, "family", None) == TEMPORAL_PERSISTENCE_REFRAME):
+                continue
+            if (settings.neutralization.upper() != "NONE"
+                    and same_signal_when_neutralized(leaf.expression, parsed.expression)):
                 continue
             if (sc_reference is not None and sc_reference.correlation is not None
                     and not isinstance(leaf, FormulaCandidate) and leaf.family == COMPLEMENTARY_SIGNAL_REFRAME):

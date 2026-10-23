@@ -133,6 +133,25 @@ class StructuralTransformationTests(unittest.TestCase):
                      "winsorize(close+rank(open))", "winsorize(rank(close)*rank(open))"):
             self.assertEqual(collapsed(kept), kept)
 
+    def test_bounded_mixes_get_no_stabilization_and_root_affine_is_neutral(self) -> None:
+        from generation.transformations import (is_bounded_mix, same_signal,
+                                                same_signal_when_neutralized)
+        def expr(formula):
+            return parse_formula(formula).expression
+        for bounded in ("rank(close)+1.8*rank(open)", "-ts_corr(close,volume,22)+1.3*rank(open)",
+                        "zscore(rank(close)-0.5*rank(open))+2*rank(volume)"):
+            self.assertTrue(is_bounded_mix(expr(bounded)), bounded)
+        for unbounded in ("ts_delta(close,5)", "close+rank(open)",
+                          "rank(close)+rank(open)+rank(volume)+rank(ts_delta(close,5))"):
+            self.assertFalse(is_bounded_mix(expr(unbounded)), unbounded)
+        self.assertFalse(any(leaf.family == DISTRIBUTION_STABILIZATION for leaf in iter_transformation_leaves(
+            expr("rank(close)+1.8*rank(open)"), self.catalog, field_candidates=("volume",),
+            group_candidates=("sector",))))
+        parent, child = expr("rank(close)+1.8*rank(open)"), expr("zscore(rank(close)+1.8*rank(open))")
+        self.assertFalse(same_signal(parent, child))
+        self.assertTrue(same_signal_when_neutralized(parent, child))
+        self.assertFalse(same_signal_when_neutralized(parent, expr("rank(rank(close)+1.8*rank(open))")))
+
     def test_root_normalize_and_zscore_are_the_same_signal(self) -> None:
         from generation.transformations import same_signal
         def same(a, b):
@@ -195,9 +214,10 @@ class StructuralTransformationTests(unittest.TestCase):
 
     def test_every_family_is_capped_at_sixty_four_leaves(self) -> None:
         catalog = self._large_catalog()
+        # An unbounded parent: a rank parent has nothing left to stabilize.
         leaves = tuple(
             iter_transformation_leaves(
-                parse_formula("rank(close)").expression,
+                parse_formula("zscore(close)").expression,
                 catalog,
             )
         )
